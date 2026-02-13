@@ -139,25 +139,25 @@ const (
 	OpWorkerTaskAssignment   OpCode = 0x71
 	OpWorkerListResponse     OpCode = 0x72
 
-	// Workflows (0x80 - 0x8F)
-	OpWorkflowStart          OpCode = 0x80
-	OpWorkflowSignal         OpCode = 0x81
-	OpWorkflowQuery          OpCode = 0x82
-	OpWorkflowCancel         OpCode = 0x83
-	OpWorkflowStatus         OpCode = 0x84
-	OpWorkflowStartResponse  OpCode = 0x85
-	OpWorkflowQueryResponse  OpCode = 0x86
-	OpWorkflowStatusResponse OpCode = 0x87
-
-	// Circuit Breakers (0x90 - 0x9F)
-	OpCircuitExecute         OpCode = 0x90
-	OpCircuitGetState        OpCode = 0x91
-	OpCircuitGetMetrics      OpCode = 0x92
-	OpCircuitReset           OpCode = 0x93
-	OpCircuitConfigure       OpCode = 0x94
-	OpCircuitStateResponse   OpCode = 0x95
-	OpCircuitExecuteResponse OpCode = 0x96
-	OpCircuitMetricsResponse OpCode = 0x97
+	// Workflows (0x80 - 0x91)
+	OpWorkflowCreate                OpCode = 0x80 // Create workflow from YAML definition
+	OpWorkflowStart                 OpCode = 0x81 // Start a workflow run
+	OpWorkflowSignal                OpCode = 0x82 // Send signal to running workflow
+	OpWorkflowCancel                OpCode = 0x83 // Cancel a workflow run
+	OpWorkflowStatus                OpCode = 0x84 // Get workflow run status
+	OpWorkflowHistory               OpCode = 0x85 // Get workflow run history
+	OpWorkflowListRuns              OpCode = 0x86 // List workflow runs
+	OpWorkflowGetDefinition         OpCode = 0x87 // Get workflow definition
+	OpWorkflowCreateResponse        OpCode = 0x88
+	OpWorkflowStartResponse         OpCode = 0x89
+	OpWorkflowStatusResponse        OpCode = 0x8A
+	OpWorkflowHistoryResponse       OpCode = 0x8B
+	OpWorkflowListRunsResponse      OpCode = 0x8C
+	OpWorkflowGetDefinitionResponse OpCode = 0x8D
+	OpWorkflowDisable               OpCode = 0x8E
+	OpWorkflowEnable                OpCode = 0x8F
+	OpWorkflowDisableResponse       OpCode = 0x90
+	OpWorkflowEnableResponse        OpCode = 0x91
 )
 
 // StatusCode represents status codes for Flo protocol responses.
@@ -437,24 +437,22 @@ const (
 
 // StreamRecord represents a single stream record.
 type StreamRecord struct {
-	Seq       uint64
-	Timestamp int64
-	Tier      StorageTier
-	Payload   []byte
-	Headers   map[string]string
+	Sequence    uint64
+	TimestampMs int64
+	Tier        StorageTier
+	Payload     []byte
+	Headers     map[string]string
 }
 
 // StreamReadResult represents the result of a stream read operation.
 type StreamReadResult struct {
-	Records    []StreamRecord
-	NextOffset uint64 // Sequence offset for next read (for pagination)
+	Records []StreamRecord
 }
 
 // StreamAppendResult represents the result of a stream append operation.
 type StreamAppendResult struct {
-	FirstOffset uint64
-	LastOffset  uint64
-	Count       uint32
+	Sequence    uint64
+	TimestampMs int64
 }
 
 // StreamInfo represents stream metadata.

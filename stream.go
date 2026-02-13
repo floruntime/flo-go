@@ -28,15 +28,14 @@ func (s *StreamClient) Append(stream string, payload []byte, opts *StreamAppendO
 		return nil, err
 	}
 
-	// Parse response: [first_offset:u64][last_offset:u64][count:u32]
-	if len(resp.Data) < 20 {
+	// Parse response: [sequence:u64][timestamp_ms:i64]
+	if len(resp.Data) < 16 {
 		return nil, fmt.Errorf("incomplete stream append response")
 	}
 
 	return &StreamAppendResult{
-		FirstOffset: binary.LittleEndian.Uint64(resp.Data[0:8]),
-		LastOffset:  binary.LittleEndian.Uint64(resp.Data[8:16]),
-		Count:       binary.LittleEndian.Uint32(resp.Data[16:20]),
+		Sequence:    binary.LittleEndian.Uint64(resp.Data[0:8]),
+		TimestampMs: int64(binary.LittleEndian.Uint64(resp.Data[8:16])),
 	}, nil
 }
 
@@ -262,12 +261,11 @@ func (s *StreamClient) GroupAck(stream, group string, seqs []uint64, opts *Strea
 }
 
 // parseStreamReadResponse parses a stream read response.
-// Wire format: [count:u32]([offset:u64][timestamp:i64][tier:u8][partition:u32][key_present:u8][payload_len:u32][payload][header_count:u32])*[next_offset:u64]
+// Wire format: [count:u32]([sequence:u64][timestamp_ms:i64][tier:u8][partition:u32][key_present:u8][payload_len:u32][payload][header_count:u32])*
 func parseStreamReadResponse(data []byte) (*StreamReadResult, error) {
 	if len(data) < 4 {
 		return &StreamReadResult{
-			Records:    []StreamRecord{},
-			NextOffset: 0,
+			Records: []StreamRecord{},
 		}, nil
 	}
 
@@ -278,18 +276,18 @@ func parseStreamReadResponse(data []byte) (*StreamReadResult, error) {
 	records := make([]StreamRecord, 0, count)
 
 	for i := uint32(0); i < count && pos < len(data); i++ {
-		// Read offset
+		// Read sequence
 		if pos+8 > len(data) {
-			return nil, fmt.Errorf("incomplete stream record: missing offset")
+			return nil, fmt.Errorf("incomplete stream record: missing sequence")
 		}
-		seq := binary.LittleEndian.Uint64(data[pos:])
+		sequence := binary.LittleEndian.Uint64(data[pos:])
 		pos += 8
 
-		// Read timestamp
+		// Read timestamp_ms
 		if pos+8 > len(data) {
-			return nil, fmt.Errorf("incomplete stream record: missing timestamp")
+			return nil, fmt.Errorf("incomplete stream record: missing timestamp_ms")
 		}
-		timestamp := int64(binary.LittleEndian.Uint64(data[pos:]))
+		timestampMs := int64(binary.LittleEndian.Uint64(data[pos:]))
 		pos += 8
 
 		// Read tier
@@ -346,22 +344,15 @@ func parseStreamReadResponse(data []byte) (*StreamReadResult, error) {
 		pos += 4
 
 		records = append(records, StreamRecord{
-			Seq:       seq,
-			Timestamp: timestamp,
-			Tier:      tier,
-			Payload:   payload,
-			Headers:   nil,
+			Sequence:    sequence,
+			TimestampMs: timestampMs,
+			Tier:        tier,
+			Payload:     payload,
+			Headers:     nil,
 		})
 	}
 
-	// Read next_offset (at end of response)
-	var nextOffset uint64
-	if pos+8 <= len(data) {
-		nextOffset = binary.LittleEndian.Uint64(data[pos:])
-	}
-
 	return &StreamReadResult{
-		Records:    records,
-		NextOffset: nextOffset,
+		Records: records,
 	}, nil
 }

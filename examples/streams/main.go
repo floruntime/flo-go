@@ -43,7 +43,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Append failed: %v", err)
 		}
-		fmt.Printf("Appended record: offset=%d\n", result.FirstOffset)
+		fmt.Printf("Appended record: sequence=%d timestamp_ms=%d\n", result.Sequence, result.TimestampMs)
 	}
 
 	// Get stream info
@@ -65,14 +65,14 @@ func main() {
 	}
 	fmt.Printf("Read %d records\n", len(readResult.Records))
 	for _, rec := range readResult.Records {
-		fmt.Printf("  seq=%d ts=%d payload=%s\n", rec.Seq, rec.Timestamp, string(rec.Payload))
+		fmt.Printf("  seq=%d ts=%d payload=%s\n", rec.Sequence, rec.TimestampMs, string(rec.Payload))
 	}
 
-	// Read using continuation
+	// Read using continuation (use last record's sequence + 1)
 	fmt.Println("\n--- Reading continuation ---")
 	if len(readResult.Records) > 0 {
-		// Use NextOffset to continue reading
-		startID := flo.NewStreamIDFromSequence(readResult.NextOffset)
+		last := readResult.Records[len(readResult.Records)-1]
+		startID := flo.NewStreamIDFromSequence(last.Sequence + 1)
 		readResult, err = stream.Read("events", &flo.StreamReadOptions{
 			Start: &startID,
 			Count: flo.Uint32Ptr(3),
@@ -116,7 +116,7 @@ func main() {
 	if len(groupResult.Records) > 0 {
 		seqs := make([]uint64, len(groupResult.Records))
 		for i, rec := range groupResult.Records {
-			seqs[i] = rec.Seq
+			seqs[i] = rec.Sequence
 		}
 		if err := stream.GroupAck("events", "processors", seqs, nil); err != nil {
 			log.Fatalf("GroupAck failed: %v", err)
