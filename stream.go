@@ -94,16 +94,17 @@ func (s *StreamClient) Info(stream string, opts *StreamInfoOptions) (*StreamInfo
 		return nil, err
 	}
 
-	// Parse response: [first_seq:u64][last_seq:u64][count:u64][bytes:u64]
-	if len(resp.Data) < 32 {
+	// Parse response: [first_seq:u64][last_seq:u64][count:u64][bytes:u64][partition_count:u32]
+	if len(resp.Data) < 36 {
 		return nil, fmt.Errorf("incomplete stream info response")
 	}
 
 	return &StreamInfo{
-		FirstSeq: binary.LittleEndian.Uint64(resp.Data[0:8]),
-		LastSeq:  binary.LittleEndian.Uint64(resp.Data[8:16]),
-		Count:    binary.LittleEndian.Uint64(resp.Data[16:24]),
-		Bytes:    binary.LittleEndian.Uint64(resp.Data[24:32]),
+		FirstSeq:       binary.LittleEndian.Uint64(resp.Data[0:8]),
+		LastSeq:        binary.LittleEndian.Uint64(resp.Data[8:16]),
+		Count:          binary.LittleEndian.Uint64(resp.Data[16:24]),
+		Bytes:          binary.LittleEndian.Uint64(resp.Data[24:32]),
+		PartitionCount: binary.LittleEndian.Uint32(resp.Data[32:36]),
 	}, nil
 }
 
@@ -234,14 +235,21 @@ func (s *StreamClient) GroupAck(stream, group string, seqs []uint64, opts *Strea
 
 	namespace := s.client.getNamespace(opts.Namespace)
 
-	// Encode group and seqs in value: [group_len:u16][group][count:u32][seq:u64]*
-	value := make([]byte, 2+len(group)+4+len(seqs)*8)
+	// Encode group, consumer and seqs in value:
+	// [group_len:u16][group][consumer_len:u16][consumer][count:u32][seq:u64]*
+	consumer := opts.Consumer
+	value := make([]byte, 2+len(group)+2+len(consumer)+4+len(seqs)*8)
 	offset := 0
 
 	binary.LittleEndian.PutUint16(value[offset:], uint16(len(group)))
 	offset += 2
 	copy(value[offset:], group)
 	offset += len(group)
+
+	binary.LittleEndian.PutUint16(value[offset:], uint16(len(consumer)))
+	offset += 2
+	copy(value[offset:], consumer)
+	offset += len(consumer)
 
 	binary.LittleEndian.PutUint32(value[offset:], uint32(len(seqs)))
 	offset += 4
@@ -252,6 +260,51 @@ func (s *StreamClient) GroupAck(stream, group string, seqs []uint64, opts *Strea
 	}
 
 	_, err := s.client.sendAndCheck(OpStreamGroupAck, namespace, []byte(stream), value, nil, true)
+	return err
+}
+
+// GroupNack negatively acknowledges records in a consumer group.
+// Records will be redelivered after the redelivery delay.
+func (s *StreamClient) GroupNack(stream, group string, seqs []uint64, opts *StreamGroupNackOptions) error {
+	if opts == nil {
+		opts = &StreamGroupNackOptions{}
+	}
+
+	namespace := s.client.getNamespace(opts.Namespace)
+
+	// Encode group, consumer and seqs in value:
+	// [group_len:u16][group][consumer_len:u16][consumer][count:u32][seq:u64]*
+	consumer := opts.Consumer
+	value := make([]byte, 2+len(group)+2+len(consumer)+4+len(seqs)*8)
+	offset := 0
+
+	binary.LittleEndian.PutUint16(value[offset:], uint16(len(group)))
+	offset += 2
+	copy(value[offset:], group)
+	offset += len(group)
+
+	binary.LittleEndian.PutUint16(value[offset:], uint16(len(consumer)))
+	offset += 2
+	copy(value[offset:], consumer)
+	offset += len(consumer)
+
+	binary.LittleEndian.PutUint32(value[offset:], uint32(len(seqs)))
+	offset += 4
+
+	for _, seq := range seqs {
+		binary.LittleEndian.PutUint64(value[offset:], seq)
+		offset += 8
+	}
+
+	// Build options for redelivery delay
+	var options []byte
+	if opts.RedeliveryDelayMS != nil {
+		builder := NewOptionsBuilder()
+		builder.AddU32(OptRedeliveryDelayMS, *opts.RedeliveryDelayMS)
+		options = builder.Build()
+	}
+
+	_, err := s.client.sendAndCheck(OpStreamGroupNack, namespace, []byte(stream), value, options, true)
 	return err
 }
 

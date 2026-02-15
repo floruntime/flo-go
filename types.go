@@ -406,22 +406,22 @@ type StreamID struct {
 	Sequence    uint64
 }
 
-// ToBytes serializes the StreamID to 16 bytes (little-endian).
+// ToBytes serializes the StreamID to 16 bytes (big-endian for lexicographic sorting).
 func (id StreamID) ToBytes() []byte {
 	buf := make([]byte, 16)
-	binary.LittleEndian.PutUint64(buf[0:8], id.TimestampMS)
-	binary.LittleEndian.PutUint64(buf[8:16], id.Sequence)
+	binary.BigEndian.PutUint64(buf[0:8], id.TimestampMS)
+	binary.BigEndian.PutUint64(buf[8:16], id.Sequence)
 	return buf
 }
 
-// StreamIDFromBytes parses a StreamID from 16 bytes (little-endian).
+// StreamIDFromBytes parses a StreamID from 16 bytes (big-endian).
 func StreamIDFromBytes(data []byte) (StreamID, error) {
 	if len(data) < 16 {
 		return StreamID{}, fmt.Errorf("invalid StreamID: expected 16 bytes, got %d", len(data))
 	}
 	return StreamID{
-		TimestampMS: binary.LittleEndian.Uint64(data[0:8]),
-		Sequence:    binary.LittleEndian.Uint64(data[8:16]),
+		TimestampMS: binary.BigEndian.Uint64(data[0:8]),
+		Sequence:    binary.BigEndian.Uint64(data[8:16]),
 	}, nil
 }
 
@@ -466,10 +466,11 @@ type StreamAppendResult struct {
 
 // StreamInfo represents stream metadata.
 type StreamInfo struct {
-	FirstSeq uint64
-	LastSeq  uint64
-	Count    uint64
-	Bytes    uint64
+	FirstSeq       uint64
+	LastSeq        uint64
+	Count          uint64
+	Bytes          uint64
+	PartitionCount uint32
 }
 
 // StreamAppendOptions contains options for stream append operations.
@@ -518,6 +519,14 @@ type StreamGroupReadOptions struct {
 // StreamGroupAckOptions contains options for consumer group ack.
 type StreamGroupAckOptions struct {
 	Namespace string
+	Consumer  string // Consumer ID (required for correct ack matching)
+}
+
+// StreamGroupNackOptions contains options for consumer group nack.
+type StreamGroupNackOptions struct {
+	Namespace        string
+	Consumer         string // Consumer ID (required for correct nack matching)
+	RedeliveryDelayMS *uint32 // Delay before message becomes visible again
 }
 
 // =============================================================================
