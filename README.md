@@ -42,6 +42,13 @@ func main() {
         fmt.Printf("Processing: %s\n", msg.Payload)
         client.Queue.Ack("tasks", []uint64{msg.Seq}, nil)
     }
+
+    // Stream operations
+    client.Stream.Append("events", []byte(`{"event":"login"}`), nil)
+    records, _ := client.Stream.Read("events", nil)
+    for _, rec := range records.Records {
+        fmt.Printf("Event: %s\n", rec.Payload)
+    }
 }
 ```
 
@@ -299,30 +306,32 @@ The client uses a mutex to ensure thread-safe access to the connection. Multiple
 ## Example: Worker Pattern
 
 ```go
-func worker(client *flo.Client, queue string) {
-    blockMS := uint32(30000) // 30 second long poll
+// Create and connect client
+client := flo.NewClient("localhost:9000",
+    flo.WithNamespace("myapp"),
+)
+client.Connect()
+defer client.Close()
 
-    for {
-        result, err := client.Queue.Dequeue(queue, 10, &flo.DequeueOptions{
-            BlockMS: &blockMS,
-        })
-        if err != nil {
-            log.Printf("Dequeue error: %v", err)
-            time.Sleep(time.Second)
-            continue
-        }
-
-        for _, msg := range result.Messages {
-            if err := processMessage(msg.Payload); err != nil {
-                // Processing failed - nack for retry
-                client.Queue.Nack(queue, []uint64{msg.Seq}, nil)
-            } else {
-                // Success - acknowledge
-                client.Queue.Ack(queue, []uint64{msg.Seq}, nil)
-            }
-        }
-    }
+// Create a worker from the client
+w, err := client.NewWorker(flo.WorkerOptions{
+    Concurrency: 10,
+})
+if err != nil {
+    log.Fatal(err)
 }
+defer w.Close()
+
+// Register action handlers
+w.MustRegisterAction("process-order", func(actx *flo.ActionContext) ([]byte, error) {
+    var input map[string]interface{}
+    actx.Into(&input)
+    // Process the order...
+    return actx.Bytes(map[string]string{"status": "done"})
+})
+
+// Start the worker (blocks until context is cancelled)
+w.Start(ctx)
 ```
 
 ## License

@@ -14,10 +14,17 @@ import (
 )
 
 func main() {
-	// Create a worker with configuration
-	w, err := flo.NewWorker(flo.WorkerConfig{
-		Endpoint:    getEnv("FLO_ENDPOINT", "localhost:3000"),
-		Namespace:   getEnv("FLO_NAMESPACE", "myapp"),
+	// Create and connect client (shared configuration)
+	client := flo.NewClient(getEnv("FLO_ENDPOINT", "localhost:3000"),
+		flo.WithNamespace(getEnv("FLO_NAMESPACE", "myapp")),
+	)
+	if err := client.Connect(); err != nil {
+		log.Fatalf("Failed to connect: %v", err)
+	}
+	defer client.Close()
+
+	// Create a worker from the client
+	w, err := client.NewWorker(flo.WorkerOptions{
 		Concurrency: 10,
 	})
 	if err != nil {

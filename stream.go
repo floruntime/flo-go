@@ -10,11 +10,6 @@ type StreamClient struct {
 	client *Client
 }
 
-// NewStreamClient creates a new stream client.
-func (c *Client) Stream() *StreamClient {
-	return &StreamClient{client: c}
-}
-
 // Append appends a record to a stream.
 func (s *StreamClient) Append(stream string, payload []byte, opts *StreamAppendOptions) (*StreamAppendResult, error) {
 	if opts == nil {

@@ -18,14 +18,9 @@ type Logger interface {
 	Printf(format string, v ...interface{})
 }
 
-// WorkerConfig holds worker configuration.
-type WorkerConfig struct {
-	// Endpoint is the Flo server address (e.g., "localhost:3000")
-	Endpoint string
-
-	// Namespace is the namespace this worker operates in
-	Namespace string
-
+// WorkerOptions holds worker configuration.
+// Endpoint and namespace are inherited from the parent Client.
+type WorkerOptions struct {
 	// WorkerID uniquely identifies this worker instance (optional, auto-generated if empty)
 	WorkerID string
 
@@ -44,9 +39,9 @@ type WorkerConfig struct {
 
 // Worker manages action execution using the Flo wire protocol.
 type Worker struct {
-	config WorkerConfig
+	config WorkerOptions
 
-	// Protocol client
+	// Protocol client (dedicated connection for the worker)
 	client *Client
 
 	// Action handlers
@@ -60,54 +55,49 @@ type Worker struct {
 	logger Logger
 }
 
-// NewWorker creates a new Flo worker.
-func NewWorker(cfg WorkerConfig) (*Worker, error) {
-	// Validate required fields
-	if cfg.Endpoint == "" {
-		return nil, fmt.Errorf("Endpoint is required")
-	}
-	if cfg.Namespace == "" {
-		return nil, fmt.Errorf("Namespace is required")
-	}
-
+// NewWorker creates a new Flo worker from an existing client.
+// The worker creates a dedicated connection using the client's endpoint and namespace,
+// so it does not interfere with other operations on the parent client.
+func (c *Client) NewWorker(opts WorkerOptions) (*Worker, error) {
 	// Apply defaults
-	if cfg.Concurrency == 0 {
-		cfg.Concurrency = 10
+	if opts.Concurrency == 0 {
+		opts.Concurrency = 10
 	}
-	if cfg.ActionTimeout == 0 {
-		cfg.ActionTimeout = 5 * time.Minute
+	if opts.ActionTimeout == 0 {
+		opts.ActionTimeout = 5 * time.Minute
 	}
-	if cfg.BlockMS == 0 {
-		cfg.BlockMS = 30000
+	if opts.BlockMS == 0 {
+		opts.BlockMS = 30000
 	}
-	if cfg.Logger == nil {
-		cfg.Logger = &stdLogger{}
+	if opts.Logger == nil {
+		opts.Logger = &stdLogger{}
 	}
 
 	// Generate WorkerID if not provided
-	if cfg.WorkerID == "" {
+	if opts.WorkerID == "" {
 		hostname, _ := os.Hostname()
 		if hostname == "" {
 			hostname = "unknown"
 		}
-		cfg.WorkerID = fmt.Sprintf("%s-%s", hostname, randomID(8))
+		opts.WorkerID = fmt.Sprintf("%s-%s", hostname, randomID(8))
 	}
 
-	// Create and connect client
-	client := NewClient(cfg.Endpoint,
-		WithNamespace(cfg.Namespace),
-		WithTimeout(cfg.ActionTimeout),
+	// Create a dedicated connection for the worker using the parent client's settings
+	workerClient := NewClient(c.endpoint,
+		WithNamespace(c.namespace),
+		WithTimeout(opts.ActionTimeout),
+		WithDebug(c.debug),
 	)
 
-	if err := client.Connect(); err != nil {
-		return nil, fmt.Errorf("failed to connect to Flo: %w", err)
+	if err := workerClient.Connect(); err != nil {
+		return nil, fmt.Errorf("failed to connect worker: %w", err)
 	}
 
 	w := &Worker{
-		config:   cfg,
-		client:   client,
+		config:   opts,
+		client:   workerClient,
 		handlers: make(map[string]ActionHandler),
-		logger:   cfg.Logger,
+		logger:   opts.Logger,
 	}
 
 	return w, nil
@@ -123,8 +113,7 @@ func (w *Worker) RegisterAction(actionName string, handler ActionHandler) error 
 	}
 
 	// Register the action with the server
-	actionClient := w.client.Action()
-	if err := actionClient.Register(actionName, ActionTypeUser, nil); err != nil {
+	if err := w.client.Action.Register(actionName, ActionTypeUser, nil); err != nil {
 		return fmt.Errorf("failed to register action '%s': %w", actionName, err)
 	}
 
@@ -146,7 +135,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	defer w.cancel()
 
 	w.logger.Printf("Starting Flo worker (id=%s, namespace=%s, concurrency=%d)",
-		w.config.WorkerID, w.config.Namespace, w.config.Concurrency)
+		w.config.WorkerID, w.client.Namespace(), w.config.Concurrency)
 
 	// Check that we have handlers
 	w.mu.RLock()
@@ -162,7 +151,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	}
 
 	// Register worker with all task types
-	workerClient := w.client.Worker(w.config.WorkerID)
+	workerClient := w.client.workerClient(w.config.WorkerID)
 	if err := workerClient.Register(actionNames, nil); err != nil {
 		return fmt.Errorf("failed to register worker: %w", err)
 	}
@@ -255,7 +244,7 @@ func (w *Worker) executeTask(workerClient *WorkerClient, task *TaskAssignment) {
 	// Create action context
 	actx := &ActionContext{
 		ctx:          ctx,
-		namespace:    w.config.Namespace,
+		namespace:    w.client.Namespace(),
 		actionName:   task.TaskType,
 		input:        task.Payload,
 		taskID:       task.TaskID,
@@ -373,8 +362,8 @@ type WorkerClient struct {
 	workerID string
 }
 
-// Worker returns a WorkerClient for low-level worker operations.
-func (c *Client) Worker(workerID string) *WorkerClient {
+// workerClient returns a WorkerClient for low-level worker protocol operations.
+func (c *Client) workerClient(workerID string) *WorkerClient {
 	return &WorkerClient{client: c, workerID: workerID}
 }
 

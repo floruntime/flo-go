@@ -2,7 +2,16 @@
 //
 // Flo is a platform for building reliable and complex software with durable
 // primitives for communication and state management. This SDK provides access
-// to the KV store and Queue primitives.
+// to all Flo primitives: KV store, Queues, Streams, Actions, and Workers.
+//
+// All primitives are accessed as fields on a connected Client:
+//
+//	client := flo.NewClient("localhost:9000", flo.WithNamespace("myapp"))
+//	client.Connect()
+//	client.KV.Get("key", nil)
+//	client.Queue.Enqueue("tasks", payload, nil)
+//	client.Stream.Append("events", payload, nil)
+//	client.Action.Invoke("process", input, nil)
 package flo
 
 import (

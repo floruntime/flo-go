@@ -10,11 +10,6 @@ type ActionClient struct {
 	client *Client
 }
 
-// Action returns an ActionClient for action operations.
-func (c *Client) Action() *ActionClient {
-	return &ActionClient{client: c}
-}
-
 // =============================================================================
 // Action Operations
 // =============================================================================

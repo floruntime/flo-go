@@ -24,7 +24,7 @@ func main() {
 	defer client.Close()
 
 	// Get stream client
-	stream := client.Stream()
+	stream := client.Stream
 
 	fmt.Println("=== Stream Operations ===")
 
