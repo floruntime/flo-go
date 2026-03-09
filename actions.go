@@ -114,7 +114,7 @@ func (a *ActionClient) Invoke(name string, input []byte, opts *ActionInvokeOptio
 	// Input
 	value = append(value, input...)
 
-	resp, err := a.client.sendAndCheck(OpActionInvoke, namespace, []byte(name), value, nil, true)
+	resp, err := a.client.sendAndCheck(OpActionInvoke, namespace, []byte(name), value, nil, false)
 	if err != nil {
 		return "", err
 	}

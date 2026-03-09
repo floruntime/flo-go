@@ -125,6 +125,8 @@ const (
 	OpQueueTouchResponse        OpCode = 0x55
 	OpQueueBatchEnqueueResponse OpCode = 0x56
 	OpQueuePurgeResponse        OpCode = 0x57
+	OpQueueList                 OpCode = 0x58 // List all queues in namespace
+	OpQueueListResponse         OpCode = 0x59
 
 	// Actions (0x60 - 0x68)
 	OpActionRegister         OpCode = 0x60
@@ -165,8 +167,66 @@ const (
 	OpWorkflowGetDefinitionResponse OpCode = 0x8D
 	OpWorkflowDisable               OpCode = 0x8E
 	OpWorkflowEnable                OpCode = 0x8F
-	OpWorkflowDisableResponse       OpCode = 0x90
-	OpWorkflowEnableResponse        OpCode = 0x91
+	OpWorkflowDisableResponse              OpCode = 0x90
+	OpWorkflowEnableResponse               OpCode = 0x91
+	OpWorkflowListDefinitions              OpCode = 0x92
+	OpWorkflowListDefinitionsResponse      OpCode = 0x93
+
+	// Cluster Management (0xA0 - 0xAF)
+	OpClusterStatus           OpCode = 0xA0 // Get cluster status (leader, term, health)
+	OpClusterMembers          OpCode = 0xA1 // List cluster members
+	OpClusterJoin             OpCode = 0xA2 // Request to join cluster
+	OpClusterLeave            OpCode = 0xA3 // Request to leave cluster gracefully
+	OpClusterTransferLeader   OpCode = 0xA4 // Transfer leadership to another node
+	OpClusterAddNode          OpCode = 0xA5 // Admin: add node to cluster (leader only)
+	OpClusterRemoveNode       OpCode = 0xA6 // Admin: remove node from cluster (leader only)
+	OpClusterStatusResponse   OpCode = 0xA8
+	OpClusterMembersResponse  OpCode = 0xA9
+	OpClusterJoinResponse     OpCode = 0xAA
+
+	// Namespace Management (0xB0 - 0xBF)
+	OpNamespaceCreate         OpCode = 0xB0 // Create a new namespace
+	OpNamespaceDelete         OpCode = 0xB1 // Delete an existing namespace
+	OpNamespaceList           OpCode = 0xB2 // List all namespaces
+	OpNamespaceInfo           OpCode = 0xB3 // Get namespace info/config
+	OpNamespaceCreateResponse OpCode = 0xB4
+	OpNamespaceDeleteResponse OpCode = 0xB5
+	OpNamespaceListResponse   OpCode = 0xB6
+	OpNamespaceInfoResponse   OpCode = 0xB7
+
+	// Processing / Stream Processing (0xC0 - 0xD1)
+	OpProcessingSubmit           OpCode = 0xC0 // Submit a processing job
+	OpProcessingStop             OpCode = 0xC1 // Gracefully stop a processing job
+	OpProcessingCancel           OpCode = 0xC2 // Force cancel a processing job
+	OpProcessingStatus           OpCode = 0xC3 // Get processing job status
+	OpProcessingList             OpCode = 0xC4 // List processing jobs
+	OpProcessingSavepoint        OpCode = 0xC6 // Trigger a savepoint
+	OpProcessingRestore          OpCode = 0xC7 // Restore from a savepoint
+	OpProcessingRescale          OpCode = 0xC8 // Rescale job parallelism
+	OpProcessingSubmitResponse   OpCode = 0xC9
+	OpProcessingStopResponse     OpCode = 0xCA
+	OpProcessingCancelResponse   OpCode = 0xCB
+	OpProcessingStatusResponse   OpCode = 0xCC
+	OpProcessingListResponse     OpCode = 0xCD
+	OpProcessingSavepointResponse OpCode = 0xCF
+	OpProcessingRestoreResponse  OpCode = 0xD0
+	OpProcessingRescaleResponse  OpCode = 0xD1
+
+	// Time-Series Operations (0xE0 - 0xED)
+	OpTSWrite            OpCode = 0xE0 // Write data point(s) to a time-series
+	OpTSRead             OpCode = 0xE1 // Read raw data points from a time-series
+	OpTSQuery            OpCode = 0xE2 // Aggregated query over a time range
+	OpTSFloQL            OpCode = 0xE3 // FloQL query string
+	OpTSList             OpCode = 0xE4 // List measurements or series
+	OpTSDelete           OpCode = 0xE5 // Delete a series and its metadata
+	OpTSRetention        OpCode = 0xE6 // Configure retention / downsampling policy
+	OpTSWriteResponse    OpCode = 0xE7
+	OpTSReadResponse     OpCode = 0xE8
+	OpTSQueryResponse    OpCode = 0xE9
+	OpTSFloQLResponse    OpCode = 0xEA
+	OpTSListResponse     OpCode = 0xEB
+	OpTSDeleteResponse   OpCode = 0xEC
+	OpTSRetentionResponse OpCode = 0xED
 )
 
 // StatusCode represents status codes for Flo protocol responses.
@@ -231,6 +291,7 @@ const (
 	OptLimit       OptionTag = 0x05 // u32: Maximum number of results for scan/list operations
 	OptKeysOnly    OptionTag = 0x06 // u8: Skip values in scan response (0/1)
 	OptCursor      OptionTag = 0x07 // bytes: Pagination cursor (ShardWalker format)
+	OptRoutingKey  OptionTag = 0x08 // string: Explicit routing key for shard co-location
 
 	// Queue Options (0x10 - 0x1F)
 	OptPriority            OptionTag = 0x10 // u8: Message priority (0-255, higher = more urgent)
@@ -241,6 +302,7 @@ const (
 	OptCount               OptionTag = 0x15 // u32: Number of messages to dequeue
 	OptSendToDLQ           OptionTag = 0x16 // u8: Whether to send failed messages to DLQ (0/1)
 	OptBlockMS             OptionTag = 0x17 // u32: Blocking timeout for dequeue (0 = infinite)
+	OptWaitMS              OptionTag = 0x18 // u32: Watch timeout - wait for NEXT version change (0=forever)
 
 	// Stream Options (0x20 - 0x2F) - StreamID-native ONLY
 	// All stream positioning uses StreamID (timestamp_ms + sequence) - no legacy offset/timestamp modes
@@ -281,6 +343,19 @@ const (
 	OptRetryPolicy    OptionTag = 0x51 // bytes: Serialized retry policy
 	OptCorrelationID  OptionTag = 0x52 // string: Correlation ID for tracing
 	OptSubscriptionID OptionTag = 0x53 // u64: Subscription ID for stream subscriptions
+
+	// Time-Series Options (0x60 - 0x6F)
+	OptTSFromMS      OptionTag = 0x60 // i64: Start of time range (inclusive, unix ms)
+	OptTSToMS        OptionTag = 0x61 // i64: End of time range (inclusive, 0 = now)
+	OptTSWindowMS    OptionTag = 0x62 // i64: Aggregation window size (ms)
+	OptTSAggregation OptionTag = 0x63 // string: Aggregation function name (avg, sum, count, min, max)
+	OptTSField       OptionTag = 0x64 // string: Field name filter (empty = "value")
+	OptTSTags        OptionTag = 0x65 // string: Comma-separated tag filters "key=val,key2=val2"
+	OptTSPrecision   OptionTag = 0x66 // u8: Timestamp precision (0=ns, 1=us, 2=ms, 3=s)
+	OptTSTimestamp    OptionTag = 0x67 // i64: Explicit timestamp for write (0 = server-assigned)
+	OptTSRawTTL      OptionTag = 0x68 // string: Raw data TTL (e.g., "7d")
+	OptTSDownsample  OptionTag = 0x69 // string: Downsample rule (e.g., "1m:avg:30d")
+	OptTSBatch       OptionTag = 0x6A // void: Flag indicating batch/line-protocol mode
 )
 
 // KVEntry represents an entry from scan results.
