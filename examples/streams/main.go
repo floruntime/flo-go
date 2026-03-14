@@ -43,7 +43,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Append failed: %v", err)
 		}
-		fmt.Printf("Appended record: sequence=%d timestamp_ms=%d\n", result.Sequence, result.TimestampMs)
+		fmt.Printf("Appended record: id=%s\n", result.ID)
 	}
 
 	// Get stream info
@@ -52,8 +52,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Info failed: %v", err)
 	}
-	fmt.Printf("Stream 'events': first=%d, last=%d, count=%d, bytes=%d\n",
-		info.FirstSeq, info.LastSeq, info.Count, info.Bytes)
+	fmt.Printf("Stream 'events': first=%s, last=%s, count=%d, bytes=%d\n",
+		info.FirstID, info.LastID, info.Count, info.Bytes)
 
 	// Read records from the beginning (default behavior)
 	fmt.Println("\n--- Reading from start ---")
@@ -65,14 +65,14 @@ func main() {
 	}
 	fmt.Printf("Read %d records\n", len(readResult.Records))
 	for _, rec := range readResult.Records {
-		fmt.Printf("  seq=%d ts=%d payload=%s\n", rec.Sequence, rec.TimestampMs, string(rec.Payload))
+		fmt.Printf("  id=%s payload=%s\n", rec.ID, string(rec.Payload))
 	}
 
 	// Read using continuation (use last record's sequence + 1)
 	fmt.Println("\n--- Reading continuation ---")
 	if len(readResult.Records) > 0 {
 		last := readResult.Records[len(readResult.Records)-1]
-		startID := flo.NewStreamIDFromSequence(last.Sequence + 1)
+		startID := last.ID.Next()
 		readResult, err = stream.Read("events", &flo.StreamReadOptions{
 			Start: &startID,
 			Count: flo.Uint32Ptr(3),
@@ -114,14 +114,14 @@ func main() {
 
 	// Acknowledge processed records
 	if len(groupResult.Records) > 0 {
-		seqs := make([]uint64, len(groupResult.Records))
+		ids := make([]flo.StreamID, len(groupResult.Records))
 		for i, rec := range groupResult.Records {
-			seqs[i] = rec.Sequence
+			ids[i] = rec.ID
 		}
-		if err := stream.GroupAck("events", "processors", seqs, nil); err != nil {
+		if err := stream.GroupAck("events", "processors", ids, nil); err != nil {
 			log.Fatalf("GroupAck failed: %v", err)
 		}
-		fmt.Printf("Acknowledged %d records\n", len(seqs))
+		fmt.Printf("Acknowledged %d records\n", len(ids))
 	}
 
 	// Leave consumer group

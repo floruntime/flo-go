@@ -1,356 +1,12 @@
 package flo
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log"
-	"os"
-	"sync"
-	"time"
 )
-
-// Logger is a simple logging interface.
-type Logger interface {
-	Printf(format string, v ...interface{})
-}
-
-// WorkerOptions holds worker configuration.
-// Endpoint and namespace are inherited from the parent Client.
-type WorkerOptions struct {
-	// WorkerID uniquely identifies this worker instance (optional, auto-generated if empty)
-	WorkerID string
-
-	// Concurrency is the maximum number of concurrent actions (default: 10)
-	Concurrency int
-
-	// ActionTimeout defines the maximum duration allowed for an action handler
-	ActionTimeout time.Duration
-
-	// BlockMS is the timeout for blocking dequeue (default: 30000)
-	BlockMS uint32
-
-	// Logger for worker output (optional, defaults to log.Printf)
-	Logger Logger
-}
-
-// Worker manages action execution using the Flo wire protocol.
-type Worker struct {
-	config WorkerOptions
-
-	// Protocol client (dedicated connection for the worker)
-	client *Client
-
-	// Action handlers
-	mu       sync.RWMutex
-	handlers map[string]ActionHandler
-
-	// Worker state
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	logger Logger
-}
-
-// NewWorker creates a new Flo worker from an existing client.
-// The worker creates a dedicated connection using the client's endpoint and namespace,
-// so it does not interfere with other operations on the parent client.
-func (c *Client) NewWorker(opts WorkerOptions) (*Worker, error) {
-	// Apply defaults
-	if opts.Concurrency == 0 {
-		opts.Concurrency = 10
-	}
-	if opts.ActionTimeout == 0 {
-		opts.ActionTimeout = 5 * time.Minute
-	}
-	if opts.BlockMS == 0 {
-		opts.BlockMS = 30000
-	}
-	if opts.Logger == nil {
-		opts.Logger = &stdLogger{}
-	}
-
-	// Generate WorkerID if not provided
-	if opts.WorkerID == "" {
-		hostname, _ := os.Hostname()
-		if hostname == "" {
-			hostname = "unknown"
-		}
-		opts.WorkerID = fmt.Sprintf("%s-%s", hostname, randomID(8))
-	}
-
-	// Create a dedicated connection for the worker using the parent client's settings
-	workerClient := NewClient(c.endpoint,
-		WithNamespace(c.namespace),
-		WithTimeout(opts.ActionTimeout),
-		WithDebug(c.debug),
-	)
-
-	if err := workerClient.Connect(); err != nil {
-		return nil, fmt.Errorf("failed to connect worker: %w", err)
-	}
-
-	w := &Worker{
-		config:   opts,
-		client:   workerClient,
-		handlers: make(map[string]ActionHandler),
-		logger:   opts.Logger,
-	}
-
-	return w, nil
-}
-
-// RegisterAction registers an action handler.
-func (w *Worker) RegisterAction(actionName string, handler ActionHandler) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if _, exists := w.handlers[actionName]; exists {
-		return fmt.Errorf("action '%s' is already registered", actionName)
-	}
-
-	// Register the action with the server
-	if err := w.client.Action.Register(actionName, ActionTypeUser, nil); err != nil {
-		return fmt.Errorf("failed to register action '%s': %w", actionName, err)
-	}
-
-	w.handlers[actionName] = handler
-	w.logger.Printf("Registered action: %s", actionName)
-	return nil
-}
-
-// MustRegisterAction registers an action handler and panics on error.
-func (w *Worker) MustRegisterAction(actionName string, handler ActionHandler) {
-	if err := w.RegisterAction(actionName, handler); err != nil {
-		panic(fmt.Sprintf("failed to register action: %v", err))
-	}
-}
-
-// Start begins polling and executing actions.
-func (w *Worker) Start(ctx context.Context) error {
-	w.ctx, w.cancel = context.WithCancel(ctx)
-	defer w.cancel()
-
-	w.logger.Printf("Starting Flo worker (id=%s, namespace=%s, concurrency=%d)",
-		w.config.WorkerID, w.client.Namespace(), w.config.Concurrency)
-
-	// Check that we have handlers
-	w.mu.RLock()
-	handlerCount := len(w.handlers)
-	actionNames := make([]string, 0, handlerCount)
-	for name := range w.handlers {
-		actionNames = append(actionNames, name)
-	}
-	w.mu.RUnlock()
-
-	if handlerCount == 0 {
-		return fmt.Errorf("no action handlers registered")
-	}
-
-	// Register worker with all task types
-	workerClient := w.client.workerClient(w.config.WorkerID)
-	if err := workerClient.Register(actionNames, nil); err != nil {
-		return fmt.Errorf("failed to register worker: %w", err)
-	}
-
-	// Semaphore for concurrency control
-	sem := make(chan struct{}, w.config.Concurrency)
-
-	// Main polling loop
-	for {
-		select {
-		case <-w.ctx.Done():
-			w.wg.Wait()
-			w.logger.Printf("Worker stopped")
-			return w.ctx.Err()
-		default:
-			// Wait for semaphore slot
-			sem <- struct{}{}
-
-			// Await task
-			task, err := workerClient.Await(actionNames, &WorkerAwaitOptions{
-				BlockMS: &w.config.BlockMS,
-			})
-			if err != nil {
-				<-sem // Release slot
-				w.logger.Printf("Await error: %v, retrying...", err)
-				time.Sleep(time.Second)
-				continue
-			}
-
-			if task == nil {
-				<-sem // Release slot - no task available
-				continue
-			}
-
-			// Execute task in background
-			w.wg.Add(1)
-			go func(t *TaskAssignment) {
-				defer w.wg.Done()
-				defer func() { <-sem }()
-				w.executeTask(workerClient, t)
-			}(task)
-		}
-	}
-}
-
-// Stop gracefully stops the worker.
-func (w *Worker) Stop() {
-	w.logger.Printf("Stopping worker...")
-	if w.cancel != nil {
-		w.cancel()
-	}
-}
-
-// Close closes the connection.
-func (w *Worker) Close() error {
-	w.Stop()
-	if w.client != nil {
-		return w.client.Close()
-	}
-	return nil
-}
-
-// executeTask executes a task with error recovery.
-func (w *Worker) executeTask(workerClient *WorkerClient, task *TaskAssignment) {
-	defer func() {
-		if r := recover(); r != nil {
-			w.logger.Printf("Action handler panicked: %v", r)
-			_ = workerClient.Fail(task.TaskID, fmt.Sprintf("action panicked: %v", r), nil)
-		}
-	}()
-
-	w.logger.Printf("Executing action: %s (task=%s, attempt=%d)",
-		task.TaskType, task.TaskID, task.Attempt)
-
-	// Get handler
-	w.mu.RLock()
-	handler := w.handlers[task.TaskType]
-	w.mu.RUnlock()
-
-	if handler == nil {
-		w.logger.Printf("No handler registered for action: %s", task.TaskType)
-		_ = workerClient.Fail(task.TaskID, fmt.Sprintf("no handler for: %s", task.TaskType), nil)
-		return
-	}
-
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(w.ctx, w.config.ActionTimeout)
-	defer cancel()
-
-	// Create action context
-	actx := &ActionContext{
-		ctx:          ctx,
-		namespace:    w.client.Namespace(),
-		actionName:   task.TaskType,
-		input:        task.Payload,
-		taskID:       task.TaskID,
-		attempt:      task.Attempt,
-		workerClient: workerClient,
-	}
-
-	// Execute handler
-	result, err := handler(actx)
-
-	// Determine outcome
-	if err != nil {
-		if err == context.DeadlineExceeded {
-			w.logger.Printf("Action timed out: %s", task.TaskType)
-			_ = workerClient.Fail(task.TaskID, "action timed out", &WorkerFailOptions{Retry: false})
-		} else if err == context.Canceled {
-			w.logger.Printf("Action cancelled: %s", task.TaskType)
-			_ = workerClient.Fail(task.TaskID, "action cancelled", &WorkerFailOptions{Retry: false})
-		} else {
-			w.logger.Printf("Action failed: %s - %v", task.TaskType, err)
-			_ = workerClient.Fail(task.TaskID, err.Error(), &WorkerFailOptions{Retry: true})
-		}
-		return
-	}
-
-	// Success
-	if err := workerClient.Complete(task.TaskID, result, nil); err != nil {
-		w.logger.Printf("Failed to report completion: %v", err)
-	} else {
-		w.logger.Printf("Action completed: %s", task.TaskType)
-	}
-}
-
-// ActionContext provides context to action handlers.
-type ActionContext struct {
-	ctx          context.Context
-	namespace    string
-	actionName   string
-	input        []byte
-	taskID       string
-	attempt      uint32
-	workerClient *WorkerClient
-}
-
-// Ctx returns the context for this action execution.
-func (a *ActionContext) Ctx() context.Context {
-	return a.ctx
-}
-
-// Context is an alias for Ctx.
-func (a *ActionContext) Context() context.Context {
-	return a.ctx
-}
-
-// Namespace returns the namespace.
-func (a *ActionContext) Namespace() string {
-	return a.namespace
-}
-
-// ActionName returns the action name.
-func (a *ActionContext) ActionName() string {
-	return a.actionName
-}
-
-// TaskID returns the task ID.
-func (a *ActionContext) TaskID() string {
-	return a.taskID
-}
-
-// Attempt returns the attempt number (starts at 1).
-func (a *ActionContext) Attempt() uint32 {
-	return a.attempt
-}
-
-// Input returns the raw input bytes.
-func (a *ActionContext) Input() []byte {
-	return a.input
-}
-
-// Into unmarshals the action input into the provided value.
-func (a *ActionContext) Into(v interface{}) error {
-	if len(a.input) == 0 {
-		return fmt.Errorf("no input data")
-	}
-	return json.Unmarshal(a.input, v)
-}
-
-// Bytes marshals the provided value to JSON bytes.
-func (a *ActionContext) Bytes(v interface{}) ([]byte, error) {
-	return json.Marshal(v)
-}
-
-// Touch extends the lease on this task.
-// Use this for long-running tasks to prevent the task from timing out.
-// The extendMS parameter specifies how long to extend the lease (default: 30000ms).
-func (a *ActionContext) Touch(extendMS uint32) error {
-	if a.workerClient == nil {
-		return fmt.Errorf("worker client not available")
-	}
-	return a.workerClient.Touch(a.taskID, &WorkerTouchOptions{
-		ExtendMS: &extendMS,
-	})
-}
-
-// ActionHandler is a function that executes action logic.
-type ActionHandler func(actx *ActionContext) (result []byte, err error)
 
 // =============================================================================
 // WorkerClient - Low-level worker protocol operations
@@ -367,7 +23,12 @@ func (c *Client) workerClient(workerID string) *WorkerClient {
 	return &WorkerClient{client: c, workerID: workerID}
 }
 
-// Register registers a worker with the given task types.
+// Register registers a worker in the worker registry.
+// Wire format: [type:u8][max_concurrency:u32][process_count:u16]
+//
+//	([name_len:u16][name][kind:u8])*
+//	[has_metadata:u8][metadata_len:u16][metadata]?
+//	[has_machine_id:u8][machine_id_len:u16][machine_id]?
 func (w *WorkerClient) Register(taskTypes []string, opts *WorkerRegisterOptions) error {
 	if opts == nil {
 		opts = &WorkerRegisterOptions{}
@@ -375,36 +36,76 @@ func (w *WorkerClient) Register(taskTypes []string, opts *WorkerRegisterOptions)
 
 	namespace := w.client.getNamespace(opts.Namespace)
 
-	// Wire format: [count:u32][task_type_len:u16][task_type]...[has_caps:u8][caps]?
-	size := 4 // count
-	for _, tt := range taskTypes {
-		size += 2 + len(tt)
+	// Build process list: merge explicit Processes + legacy taskTypes
+	processes := opts.Processes
+	if len(processes) == 0 && len(taskTypes) > 0 {
+		for _, name := range taskTypes {
+			processes = append(processes, ProcessEntry{Name: name, Kind: ProcessKindAction})
+		}
 	}
-	size += 1 // has_caps flag
-	if opts.Capabilities != "" {
-		size += len(opts.Capabilities)
+
+	metadata := opts.Metadata
+	machineID := opts.MachineID
+	maxConcurrency := opts.MaxConcurrency
+	if maxConcurrency == 0 {
+		maxConcurrency = 10
+	}
+
+	// Compute wire size
+	size := 1 + 4 + 2 // type + max_concurrency + process_count
+	for _, p := range processes {
+		size += 2 + len(p.Name) + 1 // name_len + name + kind
+	}
+	size += 1 // has_metadata
+	if metadata != "" {
+		size += 2 + len(metadata)
+	}
+	size += 1 // has_machine_id
+	if machineID != "" {
+		size += 2 + len(machineID)
 	}
 
 	value := make([]byte, size)
 	offset := 0
 
-	// Task types count
-	binary.LittleEndian.PutUint32(value[offset:], uint32(len(taskTypes)))
+	value[offset] = uint8(opts.WorkerType)
+	offset++
+
+	binary.LittleEndian.PutUint32(value[offset:], maxConcurrency)
 	offset += 4
 
-	// Each task type: [len:u16][data]
-	for _, tt := range taskTypes {
-		binary.LittleEndian.PutUint16(value[offset:], uint16(len(tt)))
+	// Process list
+	binary.LittleEndian.PutUint16(value[offset:], uint16(len(processes)))
+	offset += 2
+	for _, p := range processes {
+		binary.LittleEndian.PutUint16(value[offset:], uint16(len(p.Name)))
 		offset += 2
-		copy(value[offset:], tt)
-		offset += len(tt)
+		copy(value[offset:], p.Name)
+		offset += len(p.Name)
+		value[offset] = uint8(p.Kind)
+		offset++
 	}
 
-	// Capabilities flag and optional data
-	if opts.Capabilities != "" {
+	// Metadata
+	if metadata != "" {
 		value[offset] = 1
 		offset++
-		copy(value[offset:], opts.Capabilities)
+		binary.LittleEndian.PutUint16(value[offset:], uint16(len(metadata)))
+		offset += 2
+		copy(value[offset:], metadata)
+		offset += len(metadata)
+	} else {
+		value[offset] = 0
+		offset++
+	}
+
+	// Machine ID
+	if machineID != "" {
+		value[offset] = 1
+		offset++
+		binary.LittleEndian.PutUint16(value[offset:], uint16(len(machineID)))
+		offset += 2
+		copy(value[offset:], machineID)
 	} else {
 		value[offset] = 0
 	}
@@ -413,7 +114,58 @@ func (w *WorkerClient) Register(taskTypes []string, opts *WorkerRegisterOptions)
 	return err
 }
 
-// Await waits for a task assignment.
+// Heartbeat sends a lightweight keep-alive to the worker registry.
+// Wire format: [current_load:u32]
+// Returns the worker's current status (e.g. draining) from the server response.
+func (w *WorkerClient) Heartbeat(currentLoad uint32, opts *WorkerHeartbeatOptions) (WorkerStatus, error) {
+	if opts == nil {
+		opts = &WorkerHeartbeatOptions{}
+	}
+
+	namespace := w.client.getNamespace(opts.Namespace)
+
+	value := make([]byte, 4)
+	binary.LittleEndian.PutUint32(value[0:], currentLoad)
+
+	resp, err := w.client.sendAndCheck(OpWorkerHeartbeat, namespace, []byte(w.workerID), value, nil, true)
+	if err != nil {
+		return WorkerStatusActive, err
+	}
+
+	// Server responds with [status:u8]
+	if resp != nil && len(resp.Data) >= 1 {
+		return WorkerStatus(resp.Data[0]), nil
+	}
+	return WorkerStatusActive, nil
+}
+
+// Deregister removes the worker from the registry.
+func (w *WorkerClient) Deregister(opts *WorkerDeregisterOptions) error {
+	if opts == nil {
+		opts = &WorkerDeregisterOptions{}
+	}
+
+	namespace := w.client.getNamespace(opts.Namespace)
+
+	_, err := w.client.sendAndCheck(OpWorkerDeregister, namespace, []byte(w.workerID), nil, nil, true)
+	return err
+}
+
+// Drain marks the worker as draining — no new tasks will be assigned.
+// In-flight tasks continue to completion. The server will respond to
+// subsequent heartbeats with WorkerStatusDraining.
+func (w *WorkerClient) Drain(opts *WorkerDrainOptions) error {
+	if opts == nil {
+		opts = &WorkerDrainOptions{}
+	}
+
+	namespace := w.client.getNamespace(opts.Namespace)
+
+	_, err := w.client.sendAndCheck(OpWorkerDrain, namespace, []byte(w.workerID), nil, nil, true)
+	return err
+}
+
+// Await waits for a task assignment (action_await).
 func (w *WorkerClient) Await(taskTypes []string, opts *WorkerAwaitOptions) (*TaskAssignment, error) {
 	if opts == nil {
 		opts = &WorkerAwaitOptions{}
@@ -453,7 +205,7 @@ func (w *WorkerClient) Await(taskTypes []string, opts *WorkerAwaitOptions) (*Tas
 		builder.AddU64(OptTimeoutMS, *opts.TimeoutMS)
 	}
 
-	resp, err := w.client.sendAndCheck(OpWorkerAwait, namespace, []byte(w.workerID), value, builder.Build(), true)
+	resp, err := w.client.sendAndCheck(OpActionAwait, namespace, []byte(w.workerID), value, builder.Build(), true)
 	if err != nil {
 		return nil, err
 	}
@@ -483,7 +235,7 @@ func (w *WorkerClient) Complete(taskID string, result []byte, opts *WorkerComple
 	offset += len(taskID)
 	copy(value[offset:], result)
 
-	_, err := w.client.sendAndCheck(OpWorkerComplete, namespace, []byte(w.workerID), value, nil, true)
+	_, err := w.client.sendAndCheck(OpActionComplete, namespace, []byte(w.workerID), value, nil, true)
 	return err
 }
 
@@ -514,7 +266,7 @@ func (w *WorkerClient) Fail(taskID string, errorMessage string, opts *WorkerFail
 		optionsData = builder.Build()
 	}
 
-	_, err := w.client.sendAndCheck(OpWorkerFail, namespace, []byte(w.workerID), value, optionsData, true)
+	_, err := w.client.sendAndCheck(OpActionFail, namespace, []byte(w.workerID), value, optionsData, true)
 	return err
 }
 
@@ -541,7 +293,7 @@ func (w *WorkerClient) Touch(taskID string, opts *WorkerTouchOptions) error {
 	offset += len(taskID)
 	binary.LittleEndian.PutUint32(value[offset:], extendMS)
 
-	_, err := w.client.sendAndCheck(OpWorkerTouch, namespace, []byte(w.workerID), value, nil, true)
+	_, err := w.client.sendAndCheck(OpActionTouch, namespace, []byte(w.workerID), value, nil, true)
 	return err
 }
 

@@ -16,6 +16,7 @@ package flo
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 )
 
@@ -128,61 +129,66 @@ const (
 	OpQueueList                 OpCode = 0x58 // List all queues in namespace
 	OpQueueListResponse         OpCode = 0x59
 
-	// Actions (0x60 - 0x68)
+	// Actions (0x60 - 0x6D)
 	OpActionRegister         OpCode = 0x60
 	OpActionInvoke           OpCode = 0x61
 	OpActionStatus           OpCode = 0x62
 	OpActionList             OpCode = 0x63
 	OpActionDelete           OpCode = 0x64
-	OpActionRegisterResponse OpCode = 0x65
-	OpActionInvokeResponse   OpCode = 0x66
-	OpActionStatusResponse   OpCode = 0x67
-	OpActionListResponse     OpCode = 0x68
+	OpActionAwait            OpCode = 0x65 // Worker blocks waiting for task
+	OpActionComplete         OpCode = 0x66 // Worker completes task
+	OpActionFail             OpCode = 0x67 // Worker fails task
+	OpActionTouch            OpCode = 0x68 // Worker extends task lease
+	OpActionRegisterResponse OpCode = 0x69
+	OpActionInvokeResponse   OpCode = 0x6A
+	OpActionStatusResponse   OpCode = 0x6B
+	OpActionListResponse     OpCode = 0x6C
+	OpActionTaskAssignment   OpCode = 0x6D // Server pushes task to worker
 
-	// Workers (0x69 - 0x7F)
-	OpWorkerRegister         OpCode = 0x69
-	OpWorkerTouch            OpCode = 0x6A
-	OpWorkerAwait            OpCode = 0x6B
-	OpWorkerComplete         OpCode = 0x6C
-	OpWorkerFail             OpCode = 0x6D
-	OpWorkerList             OpCode = 0x6E
-	OpWorkerRegisterResponse OpCode = 0x70
-	OpWorkerTaskAssignment   OpCode = 0x71
-	OpWorkerListResponse     OpCode = 0x72
+	// Workers — physical worker registry (0x70 - 0x77)
+	OpWorkerRegister         OpCode = 0x70
+	OpWorkerHeartbeat        OpCode = 0x71
+	OpWorkerDeregister       OpCode = 0x72
+	OpWorkerList             OpCode = 0x73
+	OpWorkerInfo             OpCode = 0x74
+	OpWorkerRegisterResponse OpCode = 0x75
+	OpWorkerListResponse     OpCode = 0x76
+	OpWorkerInfoResponse     OpCode = 0x77
+	OpWorkerDrain            OpCode = 0x78
 
 	// Workflows (0x80 - 0x91)
-	OpWorkflowCreate                OpCode = 0x80 // Create workflow from YAML definition
-	OpWorkflowStart                 OpCode = 0x81 // Start a workflow run
-	OpWorkflowSignal                OpCode = 0x82 // Send signal to running workflow
-	OpWorkflowCancel                OpCode = 0x83 // Cancel a workflow run
-	OpWorkflowStatus                OpCode = 0x84 // Get workflow run status
-	OpWorkflowHistory               OpCode = 0x85 // Get workflow run history
-	OpWorkflowListRuns              OpCode = 0x86 // List workflow runs
-	OpWorkflowGetDefinition         OpCode = 0x87 // Get workflow definition
-	OpWorkflowCreateResponse        OpCode = 0x88
-	OpWorkflowStartResponse         OpCode = 0x89
-	OpWorkflowStatusResponse        OpCode = 0x8A
-	OpWorkflowHistoryResponse       OpCode = 0x8B
-	OpWorkflowListRunsResponse      OpCode = 0x8C
-	OpWorkflowGetDefinitionResponse OpCode = 0x8D
-	OpWorkflowDisable               OpCode = 0x8E
-	OpWorkflowEnable                OpCode = 0x8F
-	OpWorkflowDisableResponse              OpCode = 0x90
-	OpWorkflowEnableResponse               OpCode = 0x91
-	OpWorkflowListDefinitions              OpCode = 0x92
-	OpWorkflowListDefinitionsResponse      OpCode = 0x93
+	OpWorkflowCreate                  OpCode = 0x80 // Create workflow from YAML definition
+	OpWorkflowStart                   OpCode = 0x81 // Start a workflow run
+	OpWorkflowSignal                  OpCode = 0x82 // Send signal to running workflow
+	OpWorkflowCancel                  OpCode = 0x83 // Cancel a workflow run
+	OpWorkflowStatus                  OpCode = 0x84 // Get workflow run status
+	OpWorkflowHistory                 OpCode = 0x85 // Get workflow run history
+	OpWorkflowListRuns                OpCode = 0x86 // List workflow runs
+	OpWorkflowGetDefinition           OpCode = 0x87 // Get workflow definition
+	OpWorkflowCreateResponse          OpCode = 0x88
+	OpWorkflowStartResponse           OpCode = 0x89
+	OpWorkflowStatusResponse          OpCode = 0x8A
+	OpWorkflowHistoryResponse         OpCode = 0x8B
+	OpWorkflowListRunsResponse        OpCode = 0x8C
+	OpWorkflowGetDefinitionResponse   OpCode = 0x8D
+	OpWorkflowDisable                 OpCode = 0x8E
+	OpWorkflowEnable                  OpCode = 0x8F
+	OpWorkflowDisableResponse         OpCode = 0x90
+	OpWorkflowEnableResponse          OpCode = 0x91
+	OpWorkflowListDefinitions         OpCode = 0x92
+	OpWorkflowListDefinitionsResponse OpCode = 0x93
 
 	// Cluster Management (0xA0 - 0xAF)
-	OpClusterStatus           OpCode = 0xA0 // Get cluster status (leader, term, health)
-	OpClusterMembers          OpCode = 0xA1 // List cluster members
-	OpClusterJoin             OpCode = 0xA2 // Request to join cluster
-	OpClusterLeave            OpCode = 0xA3 // Request to leave cluster gracefully
-	OpClusterTransferLeader   OpCode = 0xA4 // Transfer leadership to another node
-	OpClusterAddNode          OpCode = 0xA5 // Admin: add node to cluster (leader only)
-	OpClusterRemoveNode       OpCode = 0xA6 // Admin: remove node from cluster (leader only)
-	OpClusterStatusResponse   OpCode = 0xA8
-	OpClusterMembersResponse  OpCode = 0xA9
-	OpClusterJoinResponse     OpCode = 0xAA
+	OpClusterStatus          OpCode = 0xA0 // Get cluster status (leader, term, health)
+	OpClusterMembers         OpCode = 0xA1 // List cluster members
+	OpClusterJoin            OpCode = 0xA2 // Request to join cluster
+	OpClusterLeave           OpCode = 0xA3 // Request to leave cluster gracefully
+	OpClusterTransferLeader  OpCode = 0xA4 // Transfer leadership to another node
+	OpClusterAddNode         OpCode = 0xA5 // Admin: add node to cluster (leader only)
+	OpClusterRemoveNode      OpCode = 0xA6 // Admin: remove node from cluster (leader only)
+	OpClusterStatusResponse  OpCode = 0xA8
+	OpClusterMembersResponse OpCode = 0xA9
+	OpClusterJoinResponse    OpCode = 0xAA
 
 	// Namespace Management (0xB0 - 0xBF)
 	OpNamespaceCreate         OpCode = 0xB0 // Create a new namespace
@@ -195,37 +201,37 @@ const (
 	OpNamespaceInfoResponse   OpCode = 0xB7
 
 	// Processing / Stream Processing (0xC0 - 0xD1)
-	OpProcessingSubmit           OpCode = 0xC0 // Submit a processing job
-	OpProcessingStop             OpCode = 0xC1 // Gracefully stop a processing job
-	OpProcessingCancel           OpCode = 0xC2 // Force cancel a processing job
-	OpProcessingStatus           OpCode = 0xC3 // Get processing job status
-	OpProcessingList             OpCode = 0xC4 // List processing jobs
-	OpProcessingSavepoint        OpCode = 0xC6 // Trigger a savepoint
-	OpProcessingRestore          OpCode = 0xC7 // Restore from a savepoint
-	OpProcessingRescale          OpCode = 0xC8 // Rescale job parallelism
-	OpProcessingSubmitResponse   OpCode = 0xC9
-	OpProcessingStopResponse     OpCode = 0xCA
-	OpProcessingCancelResponse   OpCode = 0xCB
-	OpProcessingStatusResponse   OpCode = 0xCC
-	OpProcessingListResponse     OpCode = 0xCD
+	OpProcessingSubmit            OpCode = 0xC0 // Submit a processing job
+	OpProcessingStop              OpCode = 0xC1 // Gracefully stop a processing job
+	OpProcessingCancel            OpCode = 0xC2 // Force cancel a processing job
+	OpProcessingStatus            OpCode = 0xC3 // Get processing job status
+	OpProcessingList              OpCode = 0xC4 // List processing jobs
+	OpProcessingSavepoint         OpCode = 0xC6 // Trigger a savepoint
+	OpProcessingRestore           OpCode = 0xC7 // Restore from a savepoint
+	OpProcessingRescale           OpCode = 0xC8 // Rescale job parallelism
+	OpProcessingSubmitResponse    OpCode = 0xC9
+	OpProcessingStopResponse      OpCode = 0xCA
+	OpProcessingCancelResponse    OpCode = 0xCB
+	OpProcessingStatusResponse    OpCode = 0xCC
+	OpProcessingListResponse      OpCode = 0xCD
 	OpProcessingSavepointResponse OpCode = 0xCF
-	OpProcessingRestoreResponse  OpCode = 0xD0
-	OpProcessingRescaleResponse  OpCode = 0xD1
+	OpProcessingRestoreResponse   OpCode = 0xD0
+	OpProcessingRescaleResponse   OpCode = 0xD1
 
 	// Time-Series Operations (0xE0 - 0xED)
-	OpTSWrite            OpCode = 0xE0 // Write data point(s) to a time-series
-	OpTSRead             OpCode = 0xE1 // Read raw data points from a time-series
-	OpTSQuery            OpCode = 0xE2 // Aggregated query over a time range
-	OpTSFloQL            OpCode = 0xE3 // FloQL query string
-	OpTSList             OpCode = 0xE4 // List measurements or series
-	OpTSDelete           OpCode = 0xE5 // Delete a series and its metadata
-	OpTSRetention        OpCode = 0xE6 // Configure retention / downsampling policy
-	OpTSWriteResponse    OpCode = 0xE7
-	OpTSReadResponse     OpCode = 0xE8
-	OpTSQueryResponse    OpCode = 0xE9
-	OpTSFloQLResponse    OpCode = 0xEA
-	OpTSListResponse     OpCode = 0xEB
-	OpTSDeleteResponse   OpCode = 0xEC
+	OpTSWrite             OpCode = 0xE0 // Write data point(s) to a time-series
+	OpTSRead              OpCode = 0xE1 // Read raw data points from a time-series
+	OpTSQuery             OpCode = 0xE2 // Aggregated query over a time range
+	OpTSFloQL             OpCode = 0xE3 // FloQL query string
+	OpTSList              OpCode = 0xE4 // List measurements or series
+	OpTSDelete            OpCode = 0xE5 // Delete a series and its metadata
+	OpTSRetention         OpCode = 0xE6 // Configure retention / downsampling policy
+	OpTSWriteResponse     OpCode = 0xE7
+	OpTSReadResponse      OpCode = 0xE8
+	OpTSQueryResponse     OpCode = 0xE9
+	OpTSFloQLResponse     OpCode = 0xEA
+	OpTSListResponse      OpCode = 0xEB
+	OpTSDeleteResponse    OpCode = 0xEC
 	OpTSRetentionResponse OpCode = 0xED
 )
 
@@ -352,7 +358,7 @@ const (
 	OptTSField       OptionTag = 0x64 // string: Field name filter (empty = "value")
 	OptTSTags        OptionTag = 0x65 // string: Comma-separated tag filters "key=val,key2=val2"
 	OptTSPrecision   OptionTag = 0x66 // u8: Timestamp precision (0=ns, 1=us, 2=ms, 3=s)
-	OptTSTimestamp    OptionTag = 0x67 // i64: Explicit timestamp for write (0 = server-assigned)
+	OptTSTimestamp   OptionTag = 0x67 // i64: Explicit timestamp for write (0 = server-assigned)
 	OptTSRawTTL      OptionTag = 0x68 // string: Raw data TTL (e.g., "7d")
 	OptTSDownsample  OptionTag = 0x69 // string: Downsample rule (e.g., "1m:avg:30d")
 	OptTSBatch       OptionTag = 0x6A // void: Flag indicating batch/line-protocol mode
@@ -500,12 +506,16 @@ func StreamIDFromBytes(data []byte) (StreamID, error) {
 	}, nil
 }
 
-// NewStreamIDFromSequence creates a StreamID with just a sequence number.
-// Used for backwards compatibility with offset-based reads.
-func NewStreamIDFromSequence(seq uint64) StreamID {
+// String returns the StreamID in "timestamp-sequence" format (e.g. "1703350800000-3").
+func (id StreamID) String() string {
+	return fmt.Sprintf("%d-%d", id.TimestampMS, id.Sequence)
+}
+
+// Next returns the next StreamID in sequence (same timestamp, sequence + 1).
+func (id StreamID) Next() StreamID {
 	return StreamID{
-		TimestampMS: 0,
-		Sequence:    seq,
+		TimestampMS: id.TimestampMS,
+		Sequence:    id.Sequence + 1,
 	}
 }
 
@@ -521,11 +531,18 @@ const (
 
 // StreamRecord represents a single stream record.
 type StreamRecord struct {
-	Sequence    uint64
-	TimestampMs int64
-	Tier        StorageTier
-	Payload     []byte
-	Headers     map[string]string
+	ID      StreamID
+	Tier    StorageTier
+	Payload []byte
+	Headers map[string]string
+}
+
+// Into unmarshals the record payload (JSON) into the provided value.
+func (r *StreamRecord) Into(v interface{}) error {
+	if len(r.Payload) == 0 {
+		return fmt.Errorf("no payload data")
+	}
+	return json.Unmarshal(r.Payload, v)
 }
 
 // StreamReadResult represents the result of a stream read operation.
@@ -535,14 +552,13 @@ type StreamReadResult struct {
 
 // StreamAppendResult represents the result of a stream append operation.
 type StreamAppendResult struct {
-	Sequence    uint64
-	TimestampMs int64
+	ID StreamID
 }
 
 // StreamInfo represents stream metadata.
 type StreamInfo struct {
-	FirstSeq       uint64
-	LastSeq        uint64
+	FirstID        StreamID
+	LastID         StreamID
 	Count          uint64
 	Bytes          uint64
 	PartitionCount uint32
@@ -599,9 +615,9 @@ type StreamGroupAckOptions struct {
 
 // StreamGroupNackOptions contains options for consumer group nack.
 type StreamGroupNackOptions struct {
-	Namespace        string
-	Consumer         string // Consumer ID (required for correct nack matching)
-	RedeliveryDelayMS *uint32 // Delay before message becomes visible again
+	Namespace         string
+	Consumer          string     // Consumer ID (required for correct nack matching)
+	RedeliveryDelayMS *uint32    // Delay before message becomes visible again
 }
 
 // =============================================================================
@@ -651,10 +667,13 @@ type ActionRunStatus struct {
 
 // ActionRegisterOptions contains options for action registration.
 type ActionRegisterOptions struct {
-	Namespace   string
-	Description string
-	TimeoutMS   *uint64
-	MaxRetries  *uint8
+	Namespace      string
+	Description    string
+	TimeoutMS      *uint64
+	MaxRetries     *uint8
+	WasmModule     []byte  // WASM module bytes (for ActionTypeWASM)
+	WasmEntrypoint string  // Custom WASM entrypoint function (default: "handle")
+	MemoryLimitMB  *uint32 // WASM memory limit in MB
 }
 
 // ActionInvokeOptions contains options for action invocation.
@@ -663,6 +682,12 @@ type ActionInvokeOptions struct {
 	Priority       *uint8
 	DelayMS        *uint64
 	IdempotencyKey string
+}
+
+// ActionInvokeResult represents the result of an action invocation.
+type ActionInvokeResult struct {
+	RunID  string // Unique run ID for tracking
+	Output []byte // WASM output (populated inline for WASM actions, nil for user actions)
 }
 
 // ActionStatusOptions contains options for action status query.
@@ -677,32 +702,119 @@ type ActionListOptions struct {
 	Prefix    string
 }
 
-// WorkerRegisterOptions contains options for worker registration.
+// WorkerRegisterOptions contains options for registering a worker in the worker registry.
 type WorkerRegisterOptions struct {
-	Namespace    string
-	Capabilities string // Optional JSON capabilities string
+	Namespace      string
+	WorkerType     WorkerType     // action or stream
+	MaxConcurrency uint32         // Maximum concurrent tasks (default 10)
+	Processes      []ProcessEntry // Actions/streams this worker handles
+	Metadata       string         // Optional JSON metadata (labels, etc.)
+	MachineID      string         // Optional machine/host identifier for grouping workers
 }
 
-// WorkerAwaitOptions contains options for worker await task.
+// ProcessKind identifies what a registered process does.
+type ProcessKind uint8
+
+const (
+	ProcessKindAction         ProcessKind = 0 // Handles an action
+	ProcessKindStreamConsumer ProcessKind = 1 // Consumes a stream
+)
+
+// ProcessEntry describes a single process to register on a worker.
+type ProcessEntry struct {
+	Name string      // e.g. "process-image" or "events/processors"
+	Kind ProcessKind // action or stream_consumer
+}
+
+// ProcessStats holds per-process tracking data returned by the server.
+type ProcessStats struct {
+	Name        string
+	Kind        ProcessKind
+	RunCount    uint64
+	FailCount   uint64
+	LastRunAtMS int64
+}
+
+// WorkerAwaitOptions contains options for action_await (blocking wait for task).
 type WorkerAwaitOptions struct {
 	Namespace string
 	TimeoutMS *uint64
 	BlockMS   *uint32
 }
 
-// WorkerCompleteOptions contains options for worker complete task.
+// WorkerCompleteOptions contains options for action_complete.
 type WorkerCompleteOptions struct {
 	Namespace string
 }
 
-// WorkerFailOptions contains options for worker fail task.
+// WorkerFailOptions contains options for action_fail.
 type WorkerFailOptions struct {
 	Namespace string
 	Retry     bool
 }
 
-// WorkerTouchOptions contains options for worker touch (extend lease).
+// WorkerTouchOptions contains options for action_touch (extend lease).
 type WorkerTouchOptions struct {
 	Namespace string
 	ExtendMS  *uint32
+}
+
+// WorkerHeartbeatOptions contains options for worker heartbeat.
+type WorkerHeartbeatOptions struct {
+	Namespace string
+}
+
+// WorkerDeregisterOptions contains options for worker deregistration.
+type WorkerDeregisterOptions struct {
+	Namespace string
+}
+
+// WorkerDrainOptions contains options for draining a worker.
+type WorkerDrainOptions struct {
+	Namespace string
+}
+
+// WorkerListOptions contains options for listing workers.
+type WorkerListOptions struct {
+	Namespace string
+	Limit     *uint32
+}
+
+// WorkerInfoOptions contains options for getting worker info.
+type WorkerInfoOptions struct {
+	Namespace string
+}
+
+// WorkerType identifies the kind of worker.
+type WorkerType uint8
+
+const (
+	WorkerTypeAction WorkerType = 0 // Processes action tasks
+	WorkerTypeStream WorkerType = 1 // Processes stream records
+)
+
+// WorkerStatus represents the health state of a worker.
+type WorkerStatus uint8
+
+const (
+	WorkerStatusActive    WorkerStatus = 0 // Actively processing
+	WorkerStatusIdle      WorkerStatus = 1 // Connected, no current tasks
+	WorkerStatusDraining  WorkerStatus = 2 // Finishing current tasks, accepting no new ones
+	WorkerStatusUnhealthy WorkerStatus = 3 // Missed heartbeats
+)
+
+// WorkerInfo holds information about a registered worker.
+type WorkerInfo struct {
+	ID             string
+	Type           WorkerType
+	Status         WorkerStatus
+	Metadata       string         // JSON metadata
+	MachineID      string         // Machine/host identifier
+	Processes      []ProcessStats // Per-process tracking
+	TasksCompleted uint64
+	TasksFailed    uint64
+	CurrentLoad    uint32
+	MaxConcurrency uint32
+	RegisteredAtMS int64
+	LastHeartbeat  int64
 }

@@ -58,10 +58,38 @@ func (a *ActionClient) Register(name string, actionType ActionType, opts *Action
 		value = append(value, 0) // no desc
 	}
 
-	// Placeholder optionals (none)
-	value = append(value, 0) // has_wasm_module
-	value = append(value, 0) // has_wasm_entrypoint
-	value = append(value, 0) // has_wasm_memory_limit
+	// WASM module (optional)
+	if len(opts.WasmModule) > 0 {
+		value = append(value, 1) // has_wasm_module
+		buf = make([]byte, 4)
+		binary.LittleEndian.PutUint32(buf, uint32(len(opts.WasmModule)))
+		value = append(value, buf...)
+		value = append(value, opts.WasmModule...)
+	} else {
+		value = append(value, 0) // no wasm_module
+	}
+
+	// WASM entrypoint (optional)
+	if opts.WasmEntrypoint != "" {
+		value = append(value, 1) // has_wasm_entrypoint
+		buf = make([]byte, 2)
+		binary.LittleEndian.PutUint16(buf, uint16(len(opts.WasmEntrypoint)))
+		value = append(value, buf...)
+		value = append(value, []byte(opts.WasmEntrypoint)...)
+	} else {
+		value = append(value, 0) // no wasm_entrypoint
+	}
+
+	// WASM memory limit (optional)
+	if opts.MemoryLimitMB != nil {
+		value = append(value, 1) // has_wasm_memory_limit
+		buf = make([]byte, 4)
+		binary.LittleEndian.PutUint32(buf, *opts.MemoryLimitMB)
+		value = append(value, buf...)
+	} else {
+		value = append(value, 0) // no wasm_memory_limit
+	}
+
 	value = append(value, 0) // has_trigger_stream
 	value = append(value, 0) // has_trigger_group
 
@@ -69,8 +97,10 @@ func (a *ActionClient) Register(name string, actionType ActionType, opts *Action
 	return err
 }
 
-// Invoke invokes an action and returns the run ID.
-func (a *ActionClient) Invoke(name string, input []byte, opts *ActionInvokeOptions) (string, error) {
+// Invoke invokes an action and returns the result.
+// For WASM actions, Output contains the inline execution result.
+// For user actions, Output is nil (use Status to poll for results).
+func (a *ActionClient) Invoke(name string, input []byte, opts *ActionInvokeOptions) (*ActionInvokeResult, error) {
 	if opts == nil {
 		opts = &ActionInvokeOptions{}
 	}
@@ -116,10 +146,10 @@ func (a *ActionClient) Invoke(name string, input []byte, opts *ActionInvokeOptio
 
 	resp, err := a.client.sendAndCheck(OpActionInvoke, namespace, []byte(name), value, nil, false)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	return string(resp.Data), nil
+	return parseActionInvokeResult(resp.Data)
 }
 
 // Status gets the status of an action run.
@@ -153,6 +183,50 @@ func (a *ActionClient) Delete(name string, opts *ActionStatusOptions) error {
 // =============================================================================
 // Response Parsers
 // =============================================================================
+
+// parseActionInvokeResult parses the invoke response.
+// Wire format: [run_id_len:u16][run_id][has_output:u8][output_len:u32]?[output]?
+func parseActionInvokeResult(data []byte) (*ActionInvokeResult, error) {
+	if len(data) < 3 { // min: u16 len + at least 1 byte run_id
+		// Fallback: treat entire data as run_id (backwards compat with older servers)
+		return &ActionInvokeResult{RunID: string(data)}, nil
+	}
+
+	pos := 0
+
+	// Read run_id (length-prefixed u16)
+	if pos+2 > len(data) {
+		return &ActionInvokeResult{RunID: string(data)}, nil
+	}
+	runIDLen := int(binary.LittleEndian.Uint16(data[pos:]))
+	pos += 2
+
+	// Sanity check: if runIDLen is impossibly large or doesn't look right,
+	// this is likely an old-format response (raw run_id string)
+	if runIDLen > len(data)-pos || runIDLen > 256 || runIDLen == 0 {
+		return &ActionInvokeResult{RunID: string(data)}, nil
+	}
+
+	runID := string(data[pos : pos+runIDLen])
+	pos += runIDLen
+
+	result := &ActionInvokeResult{RunID: runID}
+
+	// Read optional output
+	if pos < len(data) && data[pos] == 1 {
+		pos++
+		if pos+4 <= len(data) {
+			outputLen := int(binary.LittleEndian.Uint32(data[pos:]))
+			pos += 4
+			if pos+outputLen <= len(data) {
+				result.Output = make([]byte, outputLen)
+				copy(result.Output, data[pos:pos+outputLen])
+			}
+		}
+	}
+
+	return result, nil
+}
 
 func parseActionRunStatus(data []byte) (*ActionRunStatus, error) {
 	if len(data) < 14 { // Minimum size
