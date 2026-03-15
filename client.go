@@ -23,10 +23,11 @@ type Client struct {
 	mu        sync.Mutex
 
 	// Sub-clients for different operations — all accessed as fields for consistency.
-	KV     *KVClient
-	Queue  *QueueClient
-	Stream *StreamClient
-	Action *ActionClient
+	KV       *KVClient
+	Queue    *QueueClient
+	Stream   *StreamClient
+	Action   *ActionClient
+	Workflow *WorkflowClient
 }
 
 // ClientOption is a function that configures a Client.
@@ -70,6 +71,7 @@ func NewClient(endpoint string, opts ...ClientOption) *Client {
 	c.Queue = &QueueClient{client: c}
 	c.Stream = &StreamClient{client: c}
 	c.Action = &ActionClient{client: c}
+	c.Workflow = &WorkflowClient{client: c}
 
 	return c
 }

@@ -1,0 +1,33 @@
+kind: workflow
+name: user-onboarding
+version: "2.0.1"
+description: Onboard new users with verification and welcome sequence
+
+initial_state: verify_email
+
+states:
+  verify_email:
+    action: send-verification-email
+    on_success: wait_verification
+
+  wait_verification:
+    wait_for_signal: email_verified
+    timeout: 24h
+    on_timeout: expired
+    on_signal:
+      verified: create_profile
+
+  create_profile:
+    action: create-user-profile
+    on_success: welcome
+
+  welcome:
+    action: send-welcome-pack
+    on_success: completed
+
+  expired:
+    action: cleanup-pending-user
+    on_success: completed
+
+  completed:
+    terminal: true

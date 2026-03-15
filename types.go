@@ -616,8 +616,8 @@ type StreamGroupAckOptions struct {
 // StreamGroupNackOptions contains options for consumer group nack.
 type StreamGroupNackOptions struct {
 	Namespace         string
-	Consumer          string     // Consumer ID (required for correct nack matching)
-	RedeliveryDelayMS *uint32    // Delay before message becomes visible again
+	Consumer          string  // Consumer ID (required for correct nack matching)
+	RedeliveryDelayMS *uint32 // Delay before message becomes visible again
 }
 
 // =============================================================================
@@ -817,4 +817,56 @@ type WorkerInfo struct {
 	MaxConcurrency uint32
 	RegisteredAtMS int64
 	LastHeartbeat  int64
+}
+
+// =============================================================================
+// Workflow Types
+// =============================================================================
+
+// WorkflowCreateOptions contains options for creating a workflow.
+type WorkflowCreateOptions struct {
+	Namespace string
+}
+
+// WorkflowGetDefinitionOptions contains options for getting a workflow definition.
+type WorkflowGetDefinitionOptions struct {
+	Namespace string
+	Version   string // If set, only returns if version matches
+}
+
+// WorkflowStartOptions contains options for starting a workflow run.
+type WorkflowStartOptions struct {
+	Namespace      string
+	IdempotencyKey string // Prevents duplicate runs with the same key
+	RunID          string // Explicit run ID (auto-generated if empty)
+}
+
+// WorkflowStatusOptions contains options for workflow status queries.
+type WorkflowStatusOptions struct {
+	Namespace string
+}
+
+// WorkflowSignalOptions contains options for sending a signal to a workflow.
+type WorkflowSignalOptions struct {
+	Namespace string
+}
+
+// WorkflowCancelOptions contains options for cancelling a workflow run.
+type WorkflowCancelOptions struct {
+	Namespace string
+}
+
+// WorkflowDisableOptions contains options for disabling a workflow.
+type WorkflowDisableOptions struct {
+	Namespace string
+}
+
+// WorkflowEnableOptions contains options for enabling a workflow.
+type WorkflowEnableOptions struct {
+	Namespace string
+}
+
+// WorkflowSyncOptions contains options for declarative workflow sync.
+type WorkflowSyncOptions struct {
+	Namespace string
 }

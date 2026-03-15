@@ -1,0 +1,42 @@
+kind: workflow
+name: order-processing
+version: "1.2.0"
+description: Process incoming orders with payment validation and notification
+
+initial_state: validate
+
+states:
+  validate:
+    action: validate-payment
+    on_success: charge
+    on_failure: rejected
+
+  charge:
+    action: process-payment
+    on_success: fulfill
+    on_failure: rejected
+    retry:
+      max_attempts: 3
+      backoff: exponential
+
+  fulfill:
+    action: fulfill-order
+    on_success: notify
+    on_failure: manual_review
+
+  notify:
+    action: send-confirmation
+    on_success: completed
+
+  rejected:
+    action: send-rejection
+    on_success: completed
+
+  manual_review:
+    wait_for_signal: review_decision
+    on_signal:
+      approve: fulfill
+      reject: rejected
+
+  completed:
+    terminal: true
