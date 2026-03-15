@@ -243,6 +243,10 @@ func (w *WorkflowClient) SyncBytes(yaml []byte, opts *WorkflowSyncOptions) (*Syn
 
 // SyncDir syncs all YAML files in a directory. Returns results for each file.
 func (w *WorkflowClient) SyncDir(dir string, opts *WorkflowSyncOptions) ([]*SyncResult, error) {
+	if opts == nil {
+		opts = &WorkflowSyncOptions{}
+	}
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("flo: failed to read directory %s: %w", dir, err)
