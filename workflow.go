@@ -1,6 +1,7 @@
 package flo
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -98,7 +99,7 @@ func (w *WorkflowClient) Start(name string, input []byte, opts *WorkflowStartOpt
 }
 
 // Status gets the status of a workflow run.
-func (w *WorkflowClient) Status(runID string, opts *WorkflowStatusOptions) ([]byte, error) {
+func (w *WorkflowClient) Status(runID string, opts *WorkflowStatusOptions) (*WorkflowStatusResult, error) {
 	if opts == nil {
 		opts = &WorkflowStatusOptions{}
 	}
@@ -109,7 +110,127 @@ func (w *WorkflowClient) Status(runID string, opts *WorkflowStatusOptions) ([]by
 		return nil, err
 	}
 
-	return resp.Data, nil
+	return parseWorkflowStatus(resp.Data)
+}
+
+var statusNames = []string{"pending", "running", "waiting", "completed", "failed", "cancelled", "timed_out"}
+
+func parseWorkflowStatus(data []byte) (*WorkflowStatusResult, error) {
+	pos := 0
+	readU16 := func() (int, error) {
+		if pos+2 > len(data) {
+			return 0, errors.New("unexpected end of status data")
+		}
+		v := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+		pos += 2
+		return v, nil
+	}
+	readStr := func() (string, error) {
+		n, err := readU16()
+		if err != nil {
+			return "", err
+		}
+		if pos+n > len(data) {
+			return "", errors.New("unexpected end of status data")
+		}
+		s := string(data[pos : pos+n])
+		pos += n
+		return s, nil
+	}
+
+	rid, err := readStr()
+	if err != nil {
+		return nil, fmt.Errorf("parse status run_id: %w", err)
+	}
+	workflow, err := readStr()
+	if err != nil {
+		return nil, fmt.Errorf("parse status workflow: %w", err)
+	}
+	version, err := readStr()
+	if err != nil {
+		return nil, fmt.Errorf("parse status version: %w", err)
+	}
+
+	if pos >= len(data) {
+		return nil, errors.New("unexpected end of status data at status byte")
+	}
+	statusByte := data[pos]
+	pos++
+	statusStr := "unknown"
+	if int(statusByte) < len(statusNames) {
+		statusStr = statusNames[statusByte]
+	}
+
+	currentStep, err := readStr()
+	if err != nil {
+		return nil, fmt.Errorf("parse status current_step: %w", err)
+	}
+
+	if pos+4 > len(data) {
+		return nil, errors.New("unexpected end of status data at input_len")
+	}
+	inputLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+	pos += 4
+	if pos+inputLen > len(data) {
+		return nil, errors.New("unexpected end of status data at input")
+	}
+	input := make([]byte, inputLen)
+	copy(input, data[pos:pos+inputLen])
+	pos += inputLen
+
+	if pos+8 > len(data) {
+		return nil, errors.New("unexpected end of status data at created_at")
+	}
+	createdAt := int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
+	pos += 8
+
+	result := &WorkflowStatusResult{
+		RunID:       rid,
+		Workflow:    workflow,
+		Version:     version,
+		Status:      statusStr,
+		CurrentStep: currentStep,
+		Input:       input,
+		CreatedAt:   createdAt,
+	}
+
+	// Optional: started_at
+	if pos < len(data) && data[pos] == 1 {
+		pos++
+		if pos+8 > len(data) {
+			return nil, errors.New("unexpected end of status data at started_at")
+		}
+		v := int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
+		pos += 8
+		result.StartedAt = &v
+	} else if pos < len(data) {
+		pos++ // skip has_started=0
+	}
+
+	// Optional: completed_at
+	if pos < len(data) && data[pos] == 1 {
+		pos++
+		if pos+8 > len(data) {
+			return nil, errors.New("unexpected end of status data at completed_at")
+		}
+		v := int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
+		pos += 8
+		result.CompletedAt = &v
+	} else if pos < len(data) {
+		pos++ // skip has_completed=0
+	}
+
+	// Optional: wait_signal
+	if pos < len(data) && data[pos] == 1 {
+		pos++
+		ws, err := readStr()
+		if err != nil {
+			return nil, fmt.Errorf("parse status wait_signal: %w", err)
+		}
+		result.WaitSignal = &ws
+	}
+
+	return result, nil
 }
 
 // Signal sends a signal to a running workflow.
@@ -138,6 +259,71 @@ func (w *WorkflowClient) Cancel(runID string, opts *WorkflowCancelOptions) error
 
 	_, err := w.client.sendAndCheck(OpWorkflowCancel, namespace, []byte(runID), nil, nil, false)
 	return err
+}
+
+// History retrieves the execution history of a workflow run.
+// Returns the raw response bytes (binary format from server).
+func (w *WorkflowClient) History(runID string, opts *WorkflowHistoryOptions) ([]byte, error) {
+	if opts == nil {
+		opts = &WorkflowHistoryOptions{}
+	}
+	namespace := w.client.getNamespace(opts.Namespace)
+
+	resp, err := w.client.sendAndCheck(OpWorkflowHistory, namespace, []byte(runID), nil, nil, true)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Data, nil
+}
+
+// ListRuns lists workflow runs, optionally filtered by workflow name.
+// If name is empty, lists all runs across all workflows.
+// Returns the raw response bytes (binary format from server).
+func (w *WorkflowClient) ListRuns(name string, opts *WorkflowListRunsOptions) ([]byte, error) {
+	if opts == nil {
+		opts = &WorkflowListRunsOptions{}
+	}
+	namespace := w.client.getNamespace(opts.Namespace)
+
+	// Build value with limit
+	limit := opts.Limit
+	if limit == 0 {
+		limit = 100
+	}
+	value := make([]byte, 4)
+	binary.LittleEndian.PutUint32(value, limit)
+
+	resp, err := w.client.sendAndCheck(OpWorkflowListRuns, namespace, []byte(name), value, nil, false)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Data, nil
+}
+
+// ListDefinitions lists all workflow definitions.
+// Returns the raw response bytes (binary format from server).
+func (w *WorkflowClient) ListDefinitions(opts *WorkflowListDefinitionsOptions) ([]byte, error) {
+	if opts == nil {
+		opts = &WorkflowListDefinitionsOptions{}
+	}
+	namespace := w.client.getNamespace(opts.Namespace)
+
+	// Build value with limit
+	limit := opts.Limit
+	if limit == 0 {
+		limit = 100
+	}
+	value := make([]byte, 4)
+	binary.LittleEndian.PutUint32(value, limit)
+
+	resp, err := w.client.sendAndCheck(OpWorkflowListDefinitions, namespace, nil, value, nil, false)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Data, nil
 }
 
 // Disable disables a workflow definition (prevents new runs from starting).

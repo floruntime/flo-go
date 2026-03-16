@@ -261,7 +261,7 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 	defer func() {
 		if r := recover(); r != nil {
 			w.logger.Printf("Action handler panicked: %v", r)
-			_ = workerClient.Fail(task.TaskID, fmt.Sprintf("action panicked: %v", r), nil)
+			_ = workerClient.Fail(task.TaskType, task.TaskID, fmt.Sprintf("action panicked: %v", r), nil)
 		}
 	}()
 
@@ -275,7 +275,7 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 
 	if handler == nil {
 		w.logger.Printf("No handler registered for action: %s", task.TaskType)
-		_ = workerClient.Fail(task.TaskID, fmt.Sprintf("no handler for: %s", task.TaskType), nil)
+		_ = workerClient.Fail(task.TaskType, task.TaskID, fmt.Sprintf("no handler for: %s", task.TaskType), nil)
 		return
 	}
 
@@ -301,22 +301,47 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 	if err != nil {
 		if err == context.DeadlineExceeded {
 			w.logger.Printf("Action timed out: %s", task.TaskType)
-			_ = workerClient.Fail(task.TaskID, "action timed out", &WorkerFailOptions{Retry: false})
+			_ = workerClient.Fail(task.TaskType, task.TaskID, "action timed out", &WorkerFailOptions{Retry: false})
 		} else if err == context.Canceled {
 			w.logger.Printf("Action cancelled: %s", task.TaskType)
-			_ = workerClient.Fail(task.TaskID, "action cancelled", &WorkerFailOptions{Retry: false})
+			_ = workerClient.Fail(task.TaskType, task.TaskID, "action cancelled", &WorkerFailOptions{Retry: false})
+		} else if IsNonRetryable(err) {
+			w.logger.Printf("Action failed (non-retryable): %s - %v", task.TaskType, err)
+			_ = workerClient.Fail(task.TaskType, task.TaskID, err.Error(), &WorkerFailOptions{Retry: false})
 		} else {
 			w.logger.Printf("Action failed: %s - %v", task.TaskType, err)
-			_ = workerClient.Fail(task.TaskID, err.Error(), &WorkerFailOptions{Retry: true})
+			_ = workerClient.Fail(task.TaskType, task.TaskID, err.Error(), &WorkerFailOptions{Retry: true})
 		}
 		return
 	}
 
-	// Success
-	if err := workerClient.Complete(task.TaskID, result, nil); err != nil {
-		w.logger.Printf("Failed to report completion: %v", err)
-	} else {
-		w.logger.Printf("Action completed: %s", task.TaskType)
+	// Success — dispatch based on result type
+	switch v := result.(type) {
+	case *ActionResult:
+		if err := workerClient.Complete(task.TaskType, task.TaskID, v.Data, &WorkerCompleteOptions{Outcome: v.Outcome}); err != nil {
+			w.logger.Printf("Failed to report completion: %v", err)
+		} else {
+			w.logger.Printf("Action completed: %s (outcome: %s)", task.TaskType, v.Outcome)
+		}
+	case []byte:
+		if err := workerClient.Complete(task.TaskType, task.TaskID, v, nil); err != nil {
+			w.logger.Printf("Failed to report completion: %v", err)
+		} else {
+			w.logger.Printf("Action completed: %s", task.TaskType)
+		}
+	default:
+		// Auto-marshal to JSON
+		data, marshalErr := json.Marshal(v)
+		if marshalErr != nil {
+			w.logger.Printf("Failed to marshal result: %v", marshalErr)
+			_ = workerClient.Fail(task.TaskType, task.TaskID, fmt.Sprintf("marshal error: %v", marshalErr), &WorkerFailOptions{Retry: false})
+			return
+		}
+		if err := workerClient.Complete(task.TaskType, task.TaskID, data, nil); err != nil {
+			w.logger.Printf("Failed to report completion: %v", err)
+		} else {
+			w.logger.Printf("Action completed: %s", task.TaskType)
+		}
 	}
 }
 
@@ -386,10 +411,24 @@ func (a *ActionContext) Touch(extendMS uint32) error {
 	if a.workerClient == nil {
 		return fmt.Errorf("worker client not available")
 	}
-	return a.workerClient.Touch(a.taskID, &WorkerTouchOptions{
+	return a.workerClient.Touch(a.actionName, a.taskID, &WorkerTouchOptions{
 		ExtendMS: &extendMS,
 	})
 }
 
+// Result creates an ActionResult with a named outcome for workflow routing.
+// The value is automatically JSON-marshaled to bytes.
+func (a *ActionContext) Result(outcome string, value interface{}) (*ActionResult, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal result: %w", err)
+	}
+	return &ActionResult{Outcome: outcome, Data: data}, nil
+}
+
 // ActionHandler is a function that executes action logic.
-type ActionHandler func(actx *ActionContext) (result []byte, err error)
+// Return types:
+//   - []byte: raw result bytes
+//   - *ActionResult: named outcome for workflow routing
+//   - any other type: auto-marshaled to JSON bytes
+type ActionHandler func(actx *ActionContext) (result interface{}, err error)

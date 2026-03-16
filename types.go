@@ -745,6 +745,7 @@ type WorkerAwaitOptions struct {
 // WorkerCompleteOptions contains options for action_complete.
 type WorkerCompleteOptions struct {
 	Namespace string
+	Outcome   string // Named outcome for workflow routing (default: "success")
 }
 
 // WorkerFailOptions contains options for action_fail.
@@ -846,6 +847,20 @@ type WorkflowStatusOptions struct {
 	Namespace string
 }
 
+// WorkflowStatusResult contains parsed status of a workflow run.
+type WorkflowStatusResult struct {
+	RunID       string
+	Workflow    string
+	Version     string
+	Status      string
+	CurrentStep string
+	Input       []byte
+	CreatedAt   int64
+	StartedAt   *int64
+	CompletedAt *int64
+	WaitSignal  *string
+}
+
 // WorkflowSignalOptions contains options for sending a signal to a workflow.
 type WorkflowSignalOptions struct {
 	Namespace string
@@ -869,4 +884,21 @@ type WorkflowEnableOptions struct {
 // WorkflowSyncOptions contains options for declarative workflow sync.
 type WorkflowSyncOptions struct {
 	Namespace string
+}
+
+// WorkflowHistoryOptions contains options for workflow history queries.
+type WorkflowHistoryOptions struct {
+	Namespace string
+}
+
+// WorkflowListRunsOptions contains options for listing workflow runs.
+type WorkflowListRunsOptions struct {
+	Namespace string
+	Limit     uint32
+}
+
+// WorkflowListDefinitionsOptions contains options for listing workflow definitions.
+type WorkflowListDefinitionsOptions struct {
+	Namespace string
+	Limit     uint32
 }

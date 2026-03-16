@@ -118,6 +118,46 @@ func IsConflict(err error) bool {
 	return errors.Is(err, ErrConflict)
 }
 
+// NonRetryableError indicates a failure that should not be retried.
+// Wrap or return this error in an action handler to signal the server
+// that the task should fail permanently (retry=false).
+type NonRetryableError struct {
+	Err error
+}
+
+func (e *NonRetryableError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *NonRetryableError) Unwrap() error {
+	return e.Err
+}
+
+// NewNonRetryableError wraps an error as non-retryable.
+func NewNonRetryableError(err error) *NonRetryableError {
+	return &NonRetryableError{Err: err}
+}
+
+// NewNonRetryableErrorf creates a non-retryable error with a formatted message.
+func NewNonRetryableErrorf(format string, args ...interface{}) *NonRetryableError {
+	return &NonRetryableError{Err: fmt.Errorf(format, args...)}
+}
+
+// IsNonRetryable returns true if the error is a NonRetryableError.
+func IsNonRetryable(err error) bool {
+	var nr *NonRetryableError
+	return errors.As(err, &nr)
+}
+
+// ActionResult represents a named outcome from an action handler.
+// Use this to route workflows based on business outcomes.
+type ActionResult struct {
+	// Outcome is the named outcome string (maps to workflow transition keys).
+	Outcome string
+	// Data is the result payload bytes.
+	Data []byte
+}
+
 // IsBadRequest returns true if the error is a bad request error.
 func IsBadRequest(err error) bool {
 	return errors.Is(err, ErrBadRequest)

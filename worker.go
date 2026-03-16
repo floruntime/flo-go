@@ -218,21 +218,43 @@ func (w *WorkerClient) Await(taskTypes []string, opts *WorkerAwaitOptions) (*Tas
 }
 
 // Complete marks a task as successfully completed.
-func (w *WorkerClient) Complete(taskID string, result []byte, opts *WorkerCompleteOptions) error {
+// Wire format: [action_name_len:u16][action_name][task_id_len:u16][task_id][outcome_len:u16][outcome][result_len:u16][result]
+func (w *WorkerClient) Complete(actionName string, taskID string, result []byte, opts *WorkerCompleteOptions) error {
 	if opts == nil {
 		opts = &WorkerCompleteOptions{}
 	}
 
 	namespace := w.client.getNamespace(opts.Namespace)
 
-	// Build value: [task_id_len:u16][task_id][result...]
-	value := make([]byte, 2+len(taskID)+len(result))
+	outcome := opts.Outcome
+	if outcome == "" {
+		outcome = "success"
+	}
+
+	value := make([]byte, 2+len(actionName)+2+len(taskID)+2+len(outcome)+2+len(result))
 	offset := 0
 
+	// action_name
+	binary.LittleEndian.PutUint16(value[offset:], uint16(len(actionName)))
+	offset += 2
+	copy(value[offset:], actionName)
+	offset += len(actionName)
+
+	// task_id
 	binary.LittleEndian.PutUint16(value[offset:], uint16(len(taskID)))
 	offset += 2
 	copy(value[offset:], taskID)
 	offset += len(taskID)
+
+	// outcome
+	binary.LittleEndian.PutUint16(value[offset:], uint16(len(outcome)))
+	offset += 2
+	copy(value[offset:], outcome)
+	offset += len(outcome)
+
+	// result
+	binary.LittleEndian.PutUint16(value[offset:], uint16(len(result)))
+	offset += 2
 	copy(value[offset:], result)
 
 	_, err := w.client.sendAndCheck(OpActionComplete, namespace, []byte(w.workerID), value, nil, true)
@@ -240,57 +262,74 @@ func (w *WorkerClient) Complete(taskID string, result []byte, opts *WorkerComple
 }
 
 // Fail marks a task as failed.
-func (w *WorkerClient) Fail(taskID string, errorMessage string, opts *WorkerFailOptions) error {
+// Wire format: [action_name_len:u16][action_name][task_id_len:u16][task_id][retry:u8][error_message...]
+func (w *WorkerClient) Fail(actionName string, taskID string, errorMessage string, opts *WorkerFailOptions) error {
 	if opts == nil {
 		opts = &WorkerFailOptions{}
 	}
 
 	namespace := w.client.getNamespace(opts.Namespace)
 
-	// Build value: [task_id_len:u16][task_id][error_message...]
-	// Note: retry flag is handled via options, not in payload
-	value := make([]byte, 2+len(taskID)+len(errorMessage))
+	value := make([]byte, 2+len(actionName)+2+len(taskID)+1+len(errorMessage))
 	offset := 0
 
+	// action_name
+	binary.LittleEndian.PutUint16(value[offset:], uint16(len(actionName)))
+	offset += 2
+	copy(value[offset:], actionName)
+	offset += len(actionName)
+
+	// task_id
 	binary.LittleEndian.PutUint16(value[offset:], uint16(len(taskID)))
 	offset += 2
 	copy(value[offset:], taskID)
 	offset += len(taskID)
+
+	// retry flag
+	if opts.Retry {
+		value[offset] = 1
+	} else {
+		value[offset] = 0
+	}
+	offset++
+
+	// error_message
 	copy(value[offset:], errorMessage)
 
-	// Build options for retry flag
-	var optionsData []byte
-	if opts.Retry {
-		builder := NewOptionsBuilder()
-		builder.AddFlag(OptRetry)
-		optionsData = builder.Build()
-	}
-
-	_, err := w.client.sendAndCheck(OpActionFail, namespace, []byte(w.workerID), value, optionsData, true)
+	_, err := w.client.sendAndCheck(OpActionFail, namespace, []byte(w.workerID), value, nil, true)
 	return err
 }
 
 // Touch extends the lease on a task.
-func (w *WorkerClient) Touch(taskID string, opts *WorkerTouchOptions) error {
+// Wire format: [action_name_len:u16][action_name][task_id_len:u16][task_id][extend_ms:u32]
+func (w *WorkerClient) Touch(actionName string, taskID string, opts *WorkerTouchOptions) error {
 	if opts == nil {
 		opts = &WorkerTouchOptions{}
 	}
 
 	namespace := w.client.getNamespace(opts.Namespace)
 
-	// Build value: [task_id_len:u16][task_id][extend_ms:u32]
-	extendMS := uint32(30000) // default 30 seconds
+	extendMS := uint32(30000)
 	if opts.ExtendMS != nil {
 		extendMS = *opts.ExtendMS
 	}
 
-	value := make([]byte, 2+len(taskID)+4)
+	value := make([]byte, 2+len(actionName)+2+len(taskID)+4)
 	offset := 0
 
+	// action_name
+	binary.LittleEndian.PutUint16(value[offset:], uint16(len(actionName)))
+	offset += 2
+	copy(value[offset:], actionName)
+	offset += len(actionName)
+
+	// task_id
 	binary.LittleEndian.PutUint16(value[offset:], uint16(len(taskID)))
 	offset += 2
 	copy(value[offset:], taskID)
 	offset += len(taskID)
+
+	// extend_ms
 	binary.LittleEndian.PutUint32(value[offset:], extendMS)
 
 	_, err := w.client.sendAndCheck(OpActionTouch, namespace, []byte(w.workerID), value, nil, true)
