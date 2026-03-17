@@ -285,13 +285,15 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 
 	// Create action context
 	actx := &ActionContext{
-		ctx:          ctx,
-		namespace:    w.client.Namespace(),
-		actionName:   task.TaskType,
-		input:        task.Payload,
-		taskID:       task.TaskID,
-		attempt:      task.Attempt,
-		workerClient: workerClient,
+		ctx:                ctx,
+		namespace:          w.client.Namespace(),
+		actionName:         task.TaskType,
+		input:              task.Payload,
+		taskID:             task.TaskID,
+		attempt:            task.Attempt,
+		callerRunID:        task.CallerRunID,
+		callerWorkflowName: task.CallerWorkflowName,
+		workerClient:       workerClient,
 	}
 
 	// Execute handler
@@ -347,13 +349,15 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 
 // ActionContext provides context to action handlers.
 type ActionContext struct {
-	ctx          context.Context
-	namespace    string
-	actionName   string
-	input        []byte
-	taskID       string
-	attempt      uint32
-	workerClient *WorkerClient
+	ctx                context.Context
+	namespace          string
+	actionName         string
+	input              []byte
+	taskID             string
+	attempt            uint32
+	callerRunID        string
+	callerWorkflowName string
+	workerClient       *WorkerClient
 }
 
 // Ctx returns the context for this action execution.
@@ -384,6 +388,23 @@ func (a *ActionContext) TaskID() string {
 // Attempt returns the attempt number (starts at 1).
 func (a *ActionContext) Attempt() uint32 {
 	return a.attempt
+}
+
+// CallerRunID returns the run ID of the workflow that invoked this action,
+// or an empty string if the action was invoked directly.
+func (a *ActionContext) CallerRunID() string {
+	return a.callerRunID
+}
+
+// CallerWorkflowName returns the name of the workflow that invoked this action,
+// or an empty string if the action was invoked directly.
+func (a *ActionContext) CallerWorkflowName() string {
+	return a.callerWorkflowName
+}
+
+// IsCalledByWorkflow returns true if this action was invoked by a workflow.
+func (a *ActionContext) IsCalledByWorkflow() bool {
+	return a.callerRunID != ""
 }
 
 // Input returns the raw input bytes.

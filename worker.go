@@ -383,6 +383,37 @@ func parseTaskAssignment(data []byte) (*TaskAssignment, error) {
 	attempt := binary.LittleEndian.Uint32(data[pos:])
 	pos += 4
 
+	// Read optional caller block: [has_caller:u8][run_id_len:u16][run_id][wf_name_len:u16][wf_name]
+	var callerRunID string
+	var callerWorkflowName string
+	if pos < len(data) {
+		hasCaller := data[pos]
+		pos += 1
+		if hasCaller == 1 {
+			if pos+2 > len(data) {
+				return nil, fmt.Errorf("incomplete task assignment: missing caller_run_id length")
+			}
+			cridLen := int(binary.LittleEndian.Uint16(data[pos:]))
+			pos += 2
+			if pos+cridLen > len(data) {
+				return nil, fmt.Errorf("incomplete task assignment: missing caller_run_id")
+			}
+			callerRunID = string(data[pos : pos+cridLen])
+			pos += cridLen
+
+			if pos+2 > len(data) {
+				return nil, fmt.Errorf("incomplete task assignment: missing caller_workflow_name length")
+			}
+			cwnLen := int(binary.LittleEndian.Uint16(data[pos:]))
+			pos += 2
+			if pos+cwnLen > len(data) {
+				return nil, fmt.Errorf("incomplete task assignment: missing caller_workflow_name")
+			}
+			callerWorkflowName = string(data[pos : pos+cwnLen])
+			pos += cwnLen
+		}
+	}
+
 	// Read payload (rest of data)
 	var payload []byte
 	if pos < len(data) {
@@ -391,11 +422,13 @@ func parseTaskAssignment(data []byte) (*TaskAssignment, error) {
 	}
 
 	return &TaskAssignment{
-		TaskID:    taskID,
-		TaskType:  taskType,
-		Payload:   payload,
-		CreatedAt: createdAt,
-		Attempt:   attempt,
+		TaskID:             taskID,
+		TaskType:           taskType,
+		Payload:            payload,
+		CreatedAt:          createdAt,
+		Attempt:            attempt,
+		CallerRunID:        callerRunID,
+		CallerWorkflowName: callerWorkflowName,
 	}, nil
 }
 

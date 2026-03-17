@@ -646,11 +646,13 @@ const (
 
 // TaskAssignment represents a task assigned to a worker.
 type TaskAssignment struct {
-	TaskID    string
-	TaskType  string
-	Payload   []byte
-	CreatedAt int64
-	Attempt   uint32
+	TaskID              string
+	TaskType            string
+	Payload             []byte
+	CreatedAt           int64
+	Attempt             uint32
+	CallerRunID         string
+	CallerWorkflowName  string
 }
 
 // ActionRunStatus represents the status of an action invocation.
