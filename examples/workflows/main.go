@@ -601,5 +601,59 @@ func main() {
 	runOutcomeTest("Large  ($750)", 750, "ORD-BIG", "notify_rejection")
 	runOutcomeTest("Medium ($250)", 250, "ORD-MID", "manual_review")
 
+	// =========================================================================
+	// 12. SyncDir — sync all YAML files in the example directory
+	// =========================================================================
+	fmt.Println("\n=== SyncDir ===")
+
+	// Sync the workflows directory (contains onboarding-workflow.yaml, order-workflow.yaml)
+	syncDirResults, err := client.Workflow.SyncDir("examples/workflows", nil)
+	if err != nil {
+		log.Fatalf("SyncDir failed: %v", err)
+	}
+	fmt.Printf("  Synced %d workflow(s) from directory:\n", len(syncDirResults))
+	for _, r := range syncDirResults {
+		fmt.Printf("    %q v%s: %s\n", r.Name, r.Version, r.Action)
+	}
+
+	// Verify each synced workflow is retrievable by getting its definition
+	fmt.Println("  Verifying definitions are stored:")
+	allOk := true
+	for _, r := range syncDirResults {
+		yamlBytes, err := client.Workflow.GetDefinition(r.Name, nil)
+		if err != nil {
+			fmt.Printf("    ✗ %q — GetDefinition failed: %v\n", r.Name, err)
+			allOk = false
+			continue
+		}
+		if len(yamlBytes) == 0 {
+			fmt.Printf("    ✗ %q — definition returned empty\n", r.Name)
+			allOk = false
+			continue
+		}
+		fmt.Printf("    ✓ %q — %d bytes stored\n", r.Name, len(yamlBytes))
+	}
+
+	// Re-run SyncDir — all results should be "unchanged"
+	fmt.Println("  Re-syncing (expect all unchanged):")
+	resync, err := client.Workflow.SyncDir("examples/workflows", nil)
+	if err != nil {
+		log.Fatalf("SyncDir re-sync failed: %v", err)
+	}
+	for _, r := range resync {
+		if r.Action == "unchanged" {
+			fmt.Printf("    ✓ %q: unchanged\n", r.Name)
+		} else {
+			fmt.Printf("    ⚠ %q: expected unchanged but got %q\n", r.Name, r.Action)
+			allOk = false
+		}
+	}
+
+	if allOk {
+		fmt.Println("  ✓ SyncDir passed")
+	} else {
+		fmt.Println("  ✗ SyncDir had failures")
+	}
+
 	fmt.Println("\nDone ✓")
 }

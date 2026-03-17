@@ -1,42 +1,46 @@
-kind: workflow
+kind: Workflow
 name: order-processing
 version: "1.2.0"
-description: Process incoming orders with payment validation and notification
 
-initial_state: validate
+start:
+  run: "@actions/validate-payment"
+  transitions:
+    success: charge
+    failure: rejected
 
-states:
-  validate:
-    action: validate-payment
-    on_success: charge
-    on_failure: rejected
-
+steps:
   charge:
-    action: process-payment
-    on_success: fulfill
-    on_failure: rejected
+    run: "@actions/process-payment"
     retry:
-      max_attempts: 3
-      backoff: exponential
+      maxAttempts: 3
+      backoffMs: 1000
+    transitions:
+      success: fulfill
+      failure: rejected
 
   fulfill:
-    action: fulfill-order
-    on_success: notify
-    on_failure: manual_review
+    run: "@actions/fulfill-order"
+    transitions:
+      success: notify
+      failure: manual_review
 
   notify:
-    action: send-confirmation
-    on_success: completed
+    run: "@actions/send-confirmation"
+    transitions:
+      success: flo.Completed
+      failure: flo.Failed
 
   rejected:
-    action: send-rejection
-    on_success: completed
+    run: "@actions/send-rejection"
+    transitions:
+      success: flo.Completed
+      failure: flo.Failed
 
   manual_review:
-    wait_for_signal: review_decision
-    on_signal:
-      approve: fulfill
-      reject: rejected
-
-  completed:
-    terminal: true
+    waitForSignal:
+      type: "review_decision"
+      timeoutMs: 86400000
+      onTimeout: flo.Failed
+    transitions:
+      success: fulfill
+      failure: rejected

@@ -1,33 +1,37 @@
-kind: workflow
+kind: Workflow
 name: user-onboarding
 version: "2.0.1"
-description: Onboard new users with verification and welcome sequence
 
-initial_state: verify_email
+start:
+  run: "@actions/send-verification-email"
+  transitions:
+    success: wait_verification
+    failure: flo.Failed
 
-states:
-  verify_email:
-    action: send-verification-email
-    on_success: wait_verification
-
+steps:
   wait_verification:
-    wait_for_signal: email_verified
-    timeout: 24h
-    on_timeout: expired
-    on_signal:
-      verified: create_profile
+    waitForSignal:
+      type: "email_verified"
+      timeoutMs: 86400000
+      onTimeout: expired
+    transitions:
+      success: create_profile
+      failure: flo.Failed
 
   create_profile:
-    action: create-user-profile
-    on_success: welcome
+    run: "@actions/create-user-profile"
+    transitions:
+      success: welcome
+      failure: flo.Failed
 
   welcome:
-    action: send-welcome-pack
-    on_success: completed
+    run: "@actions/send-welcome-pack"
+    transitions:
+      success: flo.Completed
+      failure: flo.Failed
 
   expired:
-    action: cleanup-pending-user
-    on_success: completed
-
-  completed:
-    terminal: true
+    run: "@actions/cleanup-pending-user"
+    transitions:
+      success: flo.Completed
+      failure: flo.Failed

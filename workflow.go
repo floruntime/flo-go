@@ -354,9 +354,10 @@ func (w *WorkflowClient) Enable(name string, opts *WorkflowEnableOptions) error 
 
 // SyncResult describes what happened during a Sync operation.
 type SyncResult struct {
-	Name    string // Workflow name from YAML
-	Version string // Version from YAML
-	Action  string // "created", "updated", "unchanged"
+	Name        string // Workflow name from YAML
+	Version     string // Version from YAML
+	Description string // Description from YAML (may be empty)
+	Action      string // "created", "updated", "unchanged"
 }
 
 // Sync performs a declarative, idempotent sync of a workflow YAML file.
@@ -392,8 +393,8 @@ func (w *WorkflowClient) SyncBytes(yaml []byte, opts *WorkflowSyncOptions) (*Syn
 		opts = &WorkflowSyncOptions{}
 	}
 
-	// Extract name and version from YAML
-	name, version, err := extractWorkflowMeta(yaml)
+	// Extract name, version, and description from YAML
+	name, version, description, err := extractWorkflowMeta(yaml)
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +411,7 @@ func (w *WorkflowClient) SyncBytes(yaml []byte, opts *WorkflowSyncOptions) (*Syn
 		// Workflow exists — check version
 		existingVersion, _ := extractVersionFromYAML(existing)
 		if existingVersion == version {
-			return &SyncResult{Name: name, Version: version, Action: "unchanged"}, nil
+			return &SyncResult{Name: name, Version: version, Description: description, Action: "unchanged"}, nil
 		}
 	}
 
@@ -424,7 +425,7 @@ func (w *WorkflowClient) SyncBytes(yaml []byte, opts *WorkflowSyncOptions) (*Syn
 		action = "updated"
 	}
 
-	return &SyncResult{Name: name, Version: version, Action: action}, nil
+	return &SyncResult{Name: name, Version: version, Description: description, Action: action}, nil
 }
 
 // SyncDir syncs all YAML files in a directory. Returns results for each file.
@@ -460,20 +461,21 @@ func (w *WorkflowClient) SyncDir(dir string, opts *WorkflowSyncOptions) ([]*Sync
 // YAML Metadata Extraction (lightweight — no full parser needed)
 // =============================================================================
 
-// extractWorkflowMeta extracts the name and version from workflow YAML.
+// extractWorkflowMeta extracts the name, version, and description from workflow YAML.
 // Works with both YAML and JSON formats.
-func extractWorkflowMeta(data []byte) (name, version string, err error) {
+func extractWorkflowMeta(data []byte) (name, version, description string, err error) {
 	name = extractYAMLField(data, "name")
 	version = extractYAMLField(data, "version")
+	description = extractYAMLField(data, "description")
 
 	if name == "" {
-		return "", "", fmt.Errorf("flo: workflow YAML missing required 'name' field")
+		return "", "", "", fmt.Errorf("flo: workflow YAML missing required 'name' field")
 	}
 	if version == "" {
-		return "", "", fmt.Errorf("flo: workflow YAML missing required 'version' field")
+		return "", "", "", fmt.Errorf("flo: workflow YAML missing required 'version' field")
 	}
 
-	return name, version, nil
+	return name, version, description, nil
 }
 
 // extractVersionFromYAML extracts just the version field from YAML bytes.
