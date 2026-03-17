@@ -902,3 +902,73 @@ type WorkflowListDefinitionsOptions struct {
 	Namespace string
 	Limit     uint32
 }
+
+// =============================================================================
+// Processing Types
+// =============================================================================
+
+// ProcessingSubmitOptions contains options for submitting a processing job.
+type ProcessingSubmitOptions struct {
+	Namespace string
+}
+
+// ProcessingStatusOptions contains options for getting processing job status.
+type ProcessingStatusOptions struct {
+	Namespace string
+}
+
+// ProcessingListOptions contains options for listing processing jobs.
+type ProcessingListOptions struct {
+	Namespace string
+	Limit     uint32
+}
+
+// ProcessingStopOptions contains options for stopping a processing job.
+type ProcessingStopOptions struct {
+	Namespace string
+}
+
+// ProcessingCancelOptions contains options for cancelling a processing job.
+type ProcessingCancelOptions struct {
+	Namespace string
+}
+
+// ProcessingSavepointOptions contains options for triggering a savepoint.
+type ProcessingSavepointOptions struct {
+	Namespace string
+}
+
+// ProcessingRestoreOptions contains options for restoring from a savepoint.
+type ProcessingRestoreOptions struct {
+	Namespace string
+}
+
+// ProcessingRescaleOptions contains options for rescaling a processing job.
+type ProcessingRescaleOptions struct {
+	Namespace string
+}
+
+// ProcessingSyncOptions contains options for declarative processing sync.
+type ProcessingSyncOptions struct {
+	Namespace string
+}
+
+// ProcessingStatusResult contains the status of a processing job.
+type ProcessingStatusResult struct {
+	JobID            string
+	Name             string
+	Status           string
+	Parallelism      uint32
+	BatchSize        uint32
+	RecordsProcessed uint64
+	CreatedAt        int64
+}
+
+// ProcessingListEntry represents a single entry in a processing job list.
+type ProcessingListEntry struct {
+	Name        string
+	JobID       string
+	Status      string
+	Parallelism uint32
+	CreatedAt   int64
+}
