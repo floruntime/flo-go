@@ -20,8 +20,12 @@ type StreamWorkerOptions struct {
 	// MachineID groups workers on the same machine (optional, defaults to hostname)
 	MachineID string
 
-	// Stream is the stream to consume from (required).
+	// Stream is a single stream to consume from (convenience shorthand).
 	Stream string
+
+	// Streams is a list of streams to consume from.
+	// Can be used together with Stream — duplicates are removed.
+	Streams []string
 
 	// Group is the consumer group name (optional, defaults to "default").
 	Group string
@@ -103,7 +107,8 @@ func (sc *StreamContext) Bytes(v interface{}) ([]byte, error) {
 
 // StreamWorker processes stream records via consumer groups.
 type StreamWorker struct {
-	config StreamWorkerOptions
+	config  StreamWorkerOptions
+	streams []string // resolved list of streams
 
 	client  *Client
 	handler StreamRecordHandler
@@ -118,10 +123,28 @@ type StreamWorker struct {
 	messagesFailed    uint64
 }
 
+// resolveStreams merges Stream and Streams into a deduplicated list.
+func resolveStreams(opts StreamWorkerOptions) ([]string, error) {
+	seen := map[string]bool{}
+	var streams []string
+	// Stream first (backward compat), then Streams
+	for _, s := range append([]string{opts.Stream}, opts.Streams...) {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			streams = append(streams, s)
+		}
+	}
+	if len(streams) == 0 {
+		return nil, fmt.Errorf("at least one stream is required (set Stream or Streams)")
+	}
+	return streams, nil
+}
+
 // NewStreamWorker creates a new stream worker from an existing client.
 func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordHandler) (*StreamWorker, error) {
-	if opts.Stream == "" {
-		return nil, fmt.Errorf("stream is required")
+	streams, err := resolveStreams(opts)
+	if err != nil {
+		return nil, err
 	}
 	if opts.Group == "" {
 		opts.Group = "default"
@@ -172,36 +195,50 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 		return nil, fmt.Errorf("failed to connect stream worker: %w", err)
 	}
 
+	// Backfill Stream for single-stream backward compat (used by processRecord/logging)
+	if opts.Stream == "" {
+		opts.Stream = streams[0]
+	}
+
 	return &StreamWorker{
 		config:  opts,
+		streams: streams,
 		client:  workerClient,
 		handler: handler,
 		logger:  opts.Logger,
 	}, nil
 }
 
-// Start begins consuming stream records.
+// Start begins consuming stream records from all configured streams.
 func (sw *StreamWorker) Start(ctx context.Context) error {
 	sw.ctx, sw.cancel = context.WithCancel(ctx)
 	defer sw.cancel()
 
-	sw.logger.Printf("Starting stream worker (id=%s, stream=%s, group=%s, consumer=%s)",
-		sw.config.WorkerID, sw.config.Stream, sw.config.Group, sw.config.Consumer)
+	sw.logger.Printf("Starting stream worker (id=%s, streams=%v, group=%s, consumer=%s)",
+		sw.config.WorkerID, sw.streams, sw.config.Group, sw.config.Consumer)
 
-	// Join consumer group
-	if err := sw.client.Stream.GroupJoin(sw.config.Stream, sw.config.Group, sw.config.Consumer, nil); err != nil {
-		return fmt.Errorf("failed to join consumer group: %w", err)
+	// Join consumer group on each stream
+	for _, stream := range sw.streams {
+		if err := sw.client.Stream.GroupJoin(stream, sw.config.Group, sw.config.Consumer, nil); err != nil {
+			return fmt.Errorf("failed to join consumer group on stream %s: %w", stream, err)
+		}
 	}
 
-	// Register in worker registry with process entry
+	// Register in worker registry with a process entry per stream
 	wc := sw.client.workerClient(sw.config.WorkerID)
-	processName := sw.config.Stream + "/" + sw.config.Group
-	metadata := fmt.Sprintf(`{"stream":"%s","group":"%s","consumer":"%s"}`,
-		sw.config.Stream, sw.config.Group, sw.config.Consumer)
+	var processes []ProcessEntry
+	for _, stream := range sw.streams {
+		processes = append(processes, ProcessEntry{
+			Name: stream + "/" + sw.config.Group,
+			Kind: ProcessKindStreamConsumer,
+		})
+	}
+	metadata := fmt.Sprintf(`{"streams":%q,"group":"%s","consumer":"%s"}`,
+		sw.streams, sw.config.Group, sw.config.Consumer)
 	if err := wc.Register(nil, &WorkerRegisterOptions{
 		WorkerType:     WorkerTypeStream,
 		MaxConcurrency: uint32(sw.config.Concurrency),
-		Processes:      []ProcessEntry{{Name: processName, Kind: ProcessKindStreamConsumer}},
+		Processes:      processes,
 		Metadata:       metadata,
 		MachineID:      sw.config.MachineID,
 	}); err != nil {
@@ -210,6 +247,7 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 		defer wc.Deregister(nil)
 	}
 
+	// Shared concurrency semaphore across all streams
 	sem := make(chan struct{}, sw.config.Concurrency)
 
 	// Start heartbeat
@@ -232,25 +270,51 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Main polling loop
+	// One poll loop per stream, all sharing the concurrency semaphore
+	errCh := make(chan error, len(sw.streams))
+	for _, stream := range sw.streams {
+		sw.wg.Add(1)
+		go func(stream string) {
+			defer sw.wg.Done()
+			errCh <- sw.pollStream(stream, sem)
+		}(stream)
+	}
+
+	// Wait for all poll loops to finish
+	sw.wg.Wait()
+
+	// Leave consumer groups
+	for _, stream := range sw.streams {
+		_ = sw.client.Stream.GroupLeave(stream, sw.config.Group, sw.config.Consumer, nil)
+	}
+	sw.logger.Printf("Stream worker stopped")
+
+	// Return first non-context error, or the context error
+	close(errCh)
+	for err := range errCh {
+		if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+			return err
+		}
+	}
+	return sw.ctx.Err()
+}
+
+// pollStream runs a single stream's poll loop.
+func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 	for {
 		select {
 		case <-sw.ctx.Done():
-			sw.wg.Wait()
-			// Leave consumer group
-			_ = sw.client.Stream.GroupLeave(sw.config.Stream, sw.config.Group, sw.config.Consumer, nil)
-			sw.logger.Printf("Stream worker stopped")
 			return sw.ctx.Err()
 		default:
 			result, err := sw.client.Stream.GroupRead(
-				sw.config.Stream, sw.config.Group, sw.config.Consumer,
+				stream, sw.config.Group, sw.config.Consumer,
 				&StreamGroupReadOptions{
 					Count:   &sw.config.BatchSize,
 					BlockMS: &sw.config.BlockMS,
 				},
 			)
 			if err != nil {
-				sw.logger.Printf("GroupRead error: %v, retrying...", err)
+				sw.logger.Printf("[%s] GroupRead error: %v, retrying...", stream, err)
 				time.Sleep(time.Second)
 				continue
 			}
@@ -261,11 +325,9 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 
 			for _, record := range result.Records {
 				sem <- struct{}{} // concurrency gate
-				sw.wg.Add(1)
 				go func(rec StreamRecord) {
-					defer sw.wg.Done()
 					defer func() { <-sem }()
-					sw.processRecord(rec)
+					sw.processRecord(stream, rec)
 				}(record)
 			}
 		}
@@ -273,12 +335,12 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 }
 
 // processRecord handles a single record with ack/nack.
-func (sw *StreamWorker) processRecord(record StreamRecord) {
+func (sw *StreamWorker) processRecord(stream string, record StreamRecord) {
 	defer func() {
 		if r := recover(); r != nil {
-			sw.logger.Printf("Stream handler panicked on id %s: %v", record.ID, r)
+			sw.logger.Printf("[%s] Stream handler panicked on id %s: %v", stream, record.ID, r)
 			atomic.AddUint64(&sw.messagesFailed, 1)
-			_ = sw.client.Stream.GroupNack(sw.config.Stream, sw.config.Group, []StreamID{record.ID}, nil)
+			_ = sw.client.Stream.GroupNack(stream, sw.config.Group, []StreamID{record.ID}, nil)
 		}
 	}()
 
@@ -289,20 +351,20 @@ func (sw *StreamWorker) processRecord(record StreamRecord) {
 		ctx:       ctx,
 		record:    record,
 		namespace: sw.client.Namespace(),
-		stream:    sw.config.Stream,
+		stream:    stream,
 		group:     sw.config.Group,
 		consumer:  sw.config.Consumer,
 	}
 
 	if err := sw.handler(sctx); err != nil {
 		atomic.AddUint64(&sw.messagesFailed, 1)
-		sw.logger.Printf("Stream record %s failed: %v", record.ID, err)
-		_ = sw.client.Stream.GroupNack(sw.config.Stream, sw.config.Group, []StreamID{record.ID}, nil)
+		sw.logger.Printf("[%s] Stream record %s failed: %v", stream, record.ID, err)
+		_ = sw.client.Stream.GroupNack(stream, sw.config.Group, []StreamID{record.ID}, nil)
 		return
 	}
 
 	atomic.AddUint64(&sw.messagesProcessed, 1)
-	_ = sw.client.Stream.GroupAck(sw.config.Stream, sw.config.Group, []StreamID{record.ID}, nil)
+	_ = sw.client.Stream.GroupAck(stream, sw.config.Group, []StreamID{record.ID}, nil)
 }
 
 // Stop gracefully stops the stream worker.
