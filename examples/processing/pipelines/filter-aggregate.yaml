@@ -1,0 +1,31 @@
+kind: Processing
+name: filter-aggregate
+namespace: e2e
+parallelism: 1
+batch_size: 50
+
+sources:
+  - name: orders
+    stream:
+      name: order-events
+      namespace: e2e
+
+sinks:
+  - name: output
+    stream:
+      name: order-totals
+      namespace: e2e
+
+operators:
+  - type: filter
+    name: completed-only
+    condition: "json:status=completed"
+
+  - type: keyby
+    name: by-customer
+    key_expression: "$.customer_id"
+
+  - type: aggregate
+    name: total-amount
+    function: sum
+    field: "$.amount"

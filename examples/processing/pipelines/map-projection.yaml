@@ -1,0 +1,24 @@
+kind: Processing
+name: field-projection
+namespace: e2e
+parallelism: 1
+batch_size: 50
+
+sources:
+  - name: raw
+    stream:
+      name: user-events
+      namespace: e2e
+
+sinks:
+  - name: projected
+    stream:
+      name: user-profiles
+      namespace: e2e
+
+operators:
+  - type: map
+    name: extract-user
+    user_id: "$.data.user_id"
+    email: "$.data.email"
+    source: "signup-service"

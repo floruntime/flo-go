@@ -1,0 +1,23 @@
+kind: Processing
+name: flatmap-exploder
+namespace: e2e
+parallelism: 1
+batch_size: 50
+
+sources:
+  - name: orders
+    stream:
+      name: bulk-orders
+      namespace: e2e
+
+sinks:
+  - name: items
+    stream:
+      name: order-items
+      namespace: e2e
+
+operators:
+  - type: flatmap
+    name: explode-items
+    array_field: "$.items"
+    element_key: "$.sku"

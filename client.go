@@ -1,6 +1,7 @@
 package flo
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -104,6 +105,9 @@ func (c *Client) Connect() error {
 
 // Close closes the connection to the server.
 func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.conn != nil {
 		err := c.conn.Close()
 		c.conn = nil
@@ -113,6 +117,80 @@ func (c *Client) Close() error {
 		return err
 	}
 	return nil
+}
+
+// Interrupt forcibly closes the underlying TCP connection without acquiring
+// the mutex. This unblocks any in-flight sendRequest (e.g. a blocking Await)
+// that is holding the mutex. The interrupted call will return an error, and
+// the caller should not reuse the client afterward without reconnecting.
+func (c *Client) Interrupt() {
+	// Read conn without lock — racy but safe: net.Conn.Close is safe to call
+	// concurrently and multiple times.
+	if conn := c.conn; conn != nil {
+		conn.Close()
+	}
+}
+
+// Reconnect closes the existing connection and establishes a new one.
+// Retries with exponential backoff for up to 5 minutes.
+func (c *Client) Reconnect() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	return c.ReconnectWithContext(ctx)
+}
+
+// ReconnectWithContext closes the existing connection and establishes a new one,
+// retrying with exponential backoff (1s → 2s → 4s → ... capped at 30s) until
+// the connection succeeds or the context is cancelled.
+func (c *Client) ReconnectWithContext(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Close existing connection
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
+	}
+
+	host, port, err := parseEndpoint(c.endpoint)
+	if err != nil {
+		return err
+	}
+
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+
+	for attempt := 1; ; attempt++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		dialer := net.Dialer{Timeout: c.timeout}
+		conn, dialErr := dialer.DialContext(ctx, "tcp", addr)
+		if dialErr == nil {
+			c.conn = conn
+			if c.debug {
+				log.Printf("[flo] Reconnected to %s (attempt %d)", c.endpoint, attempt)
+			}
+			return nil
+		}
+
+		log.Printf("[flo] Reconnect attempt %d failed: %v, retrying in %v...", attempt, dialErr, backoff)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
 }
 
 // IsConnected returns true if the client is connected.
@@ -182,12 +260,12 @@ func (c *Client) getNamespace(override string) string {
 
 // sendRequest sends a request and receives the response.
 func (c *Client) sendRequest(opCode OpCode, namespace string, key, value, options []byte) (*rawResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.conn == nil {
 		return nil, ErrNotConnected
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	requestID := c.nextRequestID()
 

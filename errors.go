@@ -96,6 +96,15 @@ func newServerError(status StatusCode, data []byte) error {
 	}
 }
 
+// IsConnectionError returns true if the error indicates a broken connection
+// that may be resolved by reconnecting.
+func IsConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, ErrUnexpectedEOF) || errors.Is(err, ErrNotConnected)
+}
+
 // checkStatus checks the response status and returns an error if not OK.
 // If allowNotFound is true, StatusNotFound is not treated as an error.
 func checkStatus(status StatusCode, data []byte, allowNotFound bool) error {

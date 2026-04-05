@@ -1,5 +1,7 @@
 package flo
 
+import "encoding/binary"
+
 // KVClient provides KV operations for a Flo client.
 type KVClient struct {
 	client *Client
@@ -88,21 +90,23 @@ func (kv *KVClient) Scan(prefix string, opts *ScanOptions) (*ScanResult, error) 
 	}
 	namespace := kv.client.getNamespace(opts.Namespace)
 
-	// Build TLV options
+	// Build TLV options (keys_only only — limit is in value now)
 	builder := NewOptionsBuilder()
-
-	if opts.Limit != nil {
-		builder.AddU32(OptLimit, *opts.Limit)
-	}
 
 	if opts.KeysOnly {
 		builder.AddU8(OptKeysOnly, 1)
 	}
 
-	// Cursor goes in value field
-	var value []byte
-	if opts.Cursor != nil {
-		value = opts.Cursor
+	// Value: [limit:u32][cursor...]
+	limit := uint32(0) // 0 = server default
+	if opts.Limit != nil {
+		limit = *opts.Limit
+	}
+	cursor := opts.Cursor
+	value := make([]byte, 4+len(cursor))
+	binary.LittleEndian.PutUint32(value[0:4], limit)
+	if len(cursor) > 0 {
+		copy(value[4:], cursor)
 	}
 
 	resp, err := kv.client.sendAndCheck(OpKVScan, namespace, []byte(prefix), value, builder.Build(), false)

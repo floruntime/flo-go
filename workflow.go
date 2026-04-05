@@ -64,8 +64,16 @@ func (w *WorkflowClient) Start(name string, input []byte, opts *WorkflowStartOpt
 	}
 	namespace := w.client.getNamespace(opts.Namespace)
 
-	// Build value: [has_idem:u8][idem_len:u16]?[idem]?[has_run_id:u8][run_id_len:u16]?[run_id]?[input...]
-	value := make([]byte, 0, 4+len(input))
+	// Build value: [ver_len:u16][version][has_idem:u8][idem_len:u16]?[idem]?[has_run_id:u8][run_id_len:u16]?[run_id]?[input...]
+	version := opts.Version
+	if version == "" {
+		version = "latest"
+	}
+	value := make([]byte, 0, 2+len(version)+4+len(input))
+
+	// Version prefix
+	value = append(value, byte(len(version)&0xFF), byte(len(version)>>8))
+	value = append(value, []byte(version)...)
 
 	// Idempotency key
 	if opts.IdempotencyKey != "" {
@@ -194,8 +202,11 @@ func parseWorkflowStatus(data []byte) (*WorkflowStatusResult, error) {
 		CreatedAt:   createdAt,
 	}
 
-	// Optional: started_at
-	if pos < len(data) && data[pos] == 1 {
+	// started_at
+	if pos >= len(data) {
+		return nil, errors.New("unexpected end of status data at has_started_at")
+	}
+	if data[pos] == 1 {
 		pos++
 		if pos+8 > len(data) {
 			return nil, errors.New("unexpected end of status data at started_at")
@@ -203,12 +214,15 @@ func parseWorkflowStatus(data []byte) (*WorkflowStatusResult, error) {
 		v := int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
 		pos += 8
 		result.StartedAt = &v
-	} else if pos < len(data) {
-		pos++ // skip has_started=0
+	} else {
+		pos++
 	}
 
-	// Optional: completed_at
-	if pos < len(data) && data[pos] == 1 {
+	// completed_at
+	if pos >= len(data) {
+		return nil, errors.New("unexpected end of status data at has_completed_at")
+	}
+	if data[pos] == 1 {
 		pos++
 		if pos+8 > len(data) {
 			return nil, errors.New("unexpected end of status data at completed_at")
@@ -216,18 +230,44 @@ func parseWorkflowStatus(data []byte) (*WorkflowStatusResult, error) {
 		v := int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
 		pos += 8
 		result.CompletedAt = &v
-	} else if pos < len(data) {
-		pos++ // skip has_completed=0
+	} else {
+		pos++
 	}
 
-	// Optional: wait_signal
-	if pos < len(data) && data[pos] == 1 {
+	// wait_signal
+	if pos >= len(data) {
+		return nil, errors.New("unexpected end of status data at has_wait_signal")
+	}
+	if data[pos] == 1 {
 		pos++
 		ws, err := readStr()
 		if err != nil {
 			return nil, fmt.Errorf("parse status wait_signal: %w", err)
 		}
 		result.WaitSignal = &ws
+	} else {
+		pos++
+	}
+
+	// output
+	if pos >= len(data) {
+		return nil, errors.New("unexpected end of status data at has_output")
+	}
+	if data[pos] == 1 {
+		pos++
+		if pos+4 > len(data) {
+			return nil, errors.New("unexpected end of status data at output_len")
+		}
+		outputLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+		pos += 4
+		if pos+outputLen > len(data) {
+			return nil, errors.New("unexpected end of status data at output")
+		}
+		result.Output = make([]byte, outputLen)
+		copy(result.Output, data[pos:pos+outputLen])
+		pos += outputLen
+	} else {
+		pos++
 	}
 
 	return result, nil
@@ -286,13 +326,26 @@ func (w *WorkflowClient) ListRuns(name string, opts *WorkflowListRunsOptions) ([
 	}
 	namespace := w.client.getNamespace(opts.Namespace)
 
-	// Build value with limit
+	// Build value: [limit:u32][status_len:u16][status][cursor_len:u16][cursor][search_len:u16][search]
 	limit := opts.Limit
 	if limit == 0 {
 		limit = 100
 	}
-	value := make([]byte, 4)
-	binary.LittleEndian.PutUint32(value, limit)
+	valueLen := 4 + 2 + len(opts.Status) + 2 + len(opts.Cursor) + 2 + len(opts.Search)
+	value := make([]byte, valueLen)
+	binary.LittleEndian.PutUint32(value[0:4], limit)
+	off := 4
+	binary.LittleEndian.PutUint16(value[off:off+2], uint16(len(opts.Status)))
+	off += 2
+	copy(value[off:], opts.Status)
+	off += len(opts.Status)
+	binary.LittleEndian.PutUint16(value[off:off+2], uint16(len(opts.Cursor)))
+	off += 2
+	copy(value[off:], opts.Cursor)
+	off += len(opts.Cursor)
+	binary.LittleEndian.PutUint16(value[off:off+2], uint16(len(opts.Search)))
+	off += 2
+	copy(value[off:], opts.Search)
 
 	resp, err := w.client.sendAndCheck(OpWorkflowListRuns, namespace, []byte(name), value, nil, false)
 	if err != nil {
@@ -310,13 +363,17 @@ func (w *WorkflowClient) ListDefinitions(opts *WorkflowListDefinitionsOptions) (
 	}
 	namespace := w.client.getNamespace(opts.Namespace)
 
-	// Build value with limit
 	limit := opts.Limit
 	if limit == 0 {
 		limit = 100
 	}
-	value := make([]byte, 4)
-	binary.LittleEndian.PutUint32(value, limit)
+
+	// Wire format: [limit:u32][cursor...]
+	value := make([]byte, 4+len(opts.Cursor))
+	binary.LittleEndian.PutUint32(value[0:4], limit)
+	if len(opts.Cursor) > 0 {
+		copy(value[4:], opts.Cursor)
+	}
 
 	resp, err := w.client.sendAndCheck(OpWorkflowListDefinitions, namespace, nil, value, nil, false)
 	if err != nil {

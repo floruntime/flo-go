@@ -60,7 +60,7 @@ func (b *OptionsBuilder) Build() []byte {
 func computeCRC32(header, payload []byte) uint32 {
 	h := crc32.NewIEEE()
 	h.Write(header[0:16])  // magic, payload_length, request_id
-	h.Write(header[20:24]) // version, op_code/status, flags, reserved
+	h.Write(header[20:32]) // op_code/version/status, flags, reserved
 	h.Write(payload)
 	return h.Sum32()
 }
@@ -92,10 +92,10 @@ func serializeRequest(requestID uint64, opCode OpCode, namespace, key, value, op
 	binary.LittleEndian.PutUint32(buf[4:8], uint32(payloadLen))
 	binary.LittleEndian.PutUint64(buf[8:16], requestID)
 	// CRC32 at [16:20] - filled later
-	buf[20] = Version
-	buf[21] = byte(opCode)
-	buf[22] = 0 // flags
-	buf[23] = 0 // reserved
+	binary.LittleEndian.PutUint16(buf[20:22], uint16(opCode))
+	buf[22] = Version
+	buf[23] = 0 // flags
+	// bytes 24-31 are reserved (already zero)
 
 	// Build payload
 	offset := HeaderSize

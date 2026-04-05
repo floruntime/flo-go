@@ -1,0 +1,25 @@
+kind: Processing
+name: enrich-transactions
+namespace: e2e
+parallelism: 1
+batch_size: 50
+
+sources:
+  - name: txns
+    stream:
+      name: transactions
+      namespace: e2e
+
+sinks:
+  - name: enriched
+    stream:
+      name: enriched-txns
+      namespace: e2e
+
+operators:
+  - type: kv_lookup
+    name: enrich-account
+    lookup_key: "account:${$.account_id}"
+    namespace: e2e
+    mode: enrich
+    enrich_field: account_info

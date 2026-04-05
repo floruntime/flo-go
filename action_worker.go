@@ -40,8 +40,13 @@ type ActionWorkerOptions struct {
 type ActionWorker struct {
 	config ActionWorkerOptions
 
-	// Protocol client (dedicated connection for the worker)
+	// Protocol client (dedicated connection for polling/Await)
 	client *Client
+
+	// Separate connection for sending Complete/Fail results.
+	// This avoids mutex contention with the blocking Await call
+	// on the polling connection, which holds the lock for up to BlockMS.
+	resultClient *Client
 
 	// Action handlers
 	mu       sync.RWMutex
@@ -100,11 +105,26 @@ func (c *Client) NewActionWorker(opts ActionWorkerOptions) (*ActionWorker, error
 		return nil, fmt.Errorf("failed to connect worker: %w", err)
 	}
 
+	// Create a second connection for sending Complete/Fail results.
+	// The polling connection holds its mutex during blocking Await calls
+	// (up to BlockMS), so a separate connection prevents contention.
+	resultClient := NewClient(c.endpoint,
+		WithNamespace(c.namespace),
+		WithTimeout(opts.ActionTimeout),
+		WithDebug(c.debug),
+	)
+
+	if err := resultClient.Connect(); err != nil {
+		workerClient.Close()
+		return nil, fmt.Errorf("failed to connect result client: %w", err)
+	}
+
 	w := &ActionWorker{
-		config:   opts,
-		client:   workerClient,
-		handlers: make(map[string]ActionHandler),
-		logger:   opts.Logger,
+		config:       opts,
+		client:       workerClient,
+		resultClient: resultClient,
+		handlers:     make(map[string]ActionHandler),
+		logger:       opts.Logger,
 	}
 
 	return w, nil
@@ -164,17 +184,23 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 		processes = append(processes, ProcessEntry{Name: name, Kind: ProcessKindAction})
 	}
 
-	// Register worker in the worker registry
-	workerClient := w.client.workerClient(w.config.WorkerID)
-	if err := workerClient.Register(actionNames, &WorkerRegisterOptions{
+	// Build registration options (reused on reconnect)
+	regOpts := &WorkerRegisterOptions{
 		WorkerType:     WorkerTypeAction,
 		MaxConcurrency: uint32(w.config.Concurrency),
 		Processes:      processes,
 		MachineID:      w.config.MachineID,
-	}); err != nil {
+	}
+
+	// Register worker in the worker registry
+	workerClient := w.client.workerClient(w.config.WorkerID)
+	if err := workerClient.Register(actionNames, regOpts); err != nil {
 		return fmt.Errorf("failed to register worker: %w", err)
 	}
 	defer workerClient.Deregister(nil)
+
+	// Result worker client uses the separate connection for Complete/Fail
+	resultWorkerClient := w.resultClient.workerClient(w.config.WorkerID)
 
 	// Semaphore for concurrency control
 	sem := make(chan struct{}, w.config.Concurrency)
@@ -218,8 +244,30 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 			})
 			if err != nil {
 				<-sem // Release slot
-				w.logger.Printf("Await error: %v, retrying...", err)
-				time.Sleep(time.Second)
+				if IsConnectionError(err) {
+					w.logger.Printf("Connection lost, reconnecting...")
+					if reconErr := w.client.ReconnectWithContext(w.ctx); reconErr != nil {
+						if w.ctx.Err() != nil {
+							w.wg.Wait()
+							w.logger.Printf("Worker stopped")
+							return w.ctx.Err()
+						}
+						w.logger.Printf("Reconnect failed: %v, retrying...", reconErr)
+						continue
+					}
+					// Also reconnect result client
+					if reconErr := w.resultClient.ReconnectWithContext(w.ctx); reconErr != nil {
+						w.logger.Printf("Warning: failed to reconnect result client: %v", reconErr)
+					}
+					// Re-register worker after reconnect
+					if regErr := workerClient.Register(actionNames, regOpts); regErr != nil {
+						w.logger.Printf("Warning: failed to re-register worker: %v", regErr)
+					}
+					w.logger.Printf("Reconnected, resuming work")
+				} else {
+					w.logger.Printf("Await error: %v, retrying...", err)
+					time.Sleep(time.Second)
+				}
 				continue
 			}
 
@@ -233,7 +281,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 			go func(t *TaskAssignment) {
 				defer w.wg.Done()
 				defer func() { <-sem }()
-				w.executeTask(workerClient, t)
+				w.executeTask(resultWorkerClient, t)
 			}(task)
 		}
 	}
@@ -245,11 +293,22 @@ func (w *ActionWorker) Stop() {
 	if w.cancel != nil {
 		w.cancel()
 	}
+	// Interrupt connections to unblock any in-flight Await call immediately.
+	// Interrupt bypasses the mutex so it won't block behind a 30s Await.
+	if w.client != nil {
+		w.client.Interrupt()
+	}
+	if w.resultClient != nil {
+		w.resultClient.Interrupt()
+	}
 }
 
-// Close closes the connection.
+// Close closes the connections.
 func (w *ActionWorker) Close() error {
 	w.Stop()
+	if w.resultClient != nil {
+		w.resultClient.Close()
+	}
 	if w.client != nil {
 		return w.client.Close()
 	}
@@ -261,7 +320,9 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 	defer func() {
 		if r := recover(); r != nil {
 			w.logger.Printf("Action handler panicked: %v", r)
-			_ = workerClient.Fail(task.TaskType, task.TaskID, fmt.Sprintf("action panicked: %v", r), nil)
+			w.sendWithRetry("fail", func() error {
+				return workerClient.Fail(task.TaskType, task.TaskID, fmt.Sprintf("action panicked: %v", r), nil)
+			})
 		}
 	}()
 
@@ -275,7 +336,9 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 
 	if handler == nil {
 		w.logger.Printf("No handler registered for action: %s", task.TaskType)
-		_ = workerClient.Fail(task.TaskType, task.TaskID, fmt.Sprintf("no handler for: %s", task.TaskType), nil)
+		w.sendWithRetry("fail", func() error {
+			return workerClient.Fail(task.TaskType, task.TaskID, fmt.Sprintf("no handler for: %s", task.TaskType), nil)
+		})
 		return
 	}
 
@@ -303,16 +366,24 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 	if err != nil {
 		if err == context.DeadlineExceeded {
 			w.logger.Printf("Action timed out: %s", task.TaskType)
-			_ = workerClient.Fail(task.TaskType, task.TaskID, "action timed out", &WorkerFailOptions{Retry: false})
+			w.sendWithRetry("fail", func() error {
+				return workerClient.Fail(task.TaskType, task.TaskID, "action timed out", &WorkerFailOptions{Retry: false})
+			})
 		} else if err == context.Canceled {
 			w.logger.Printf("Action cancelled: %s", task.TaskType)
-			_ = workerClient.Fail(task.TaskType, task.TaskID, "action cancelled", &WorkerFailOptions{Retry: false})
+			w.sendWithRetry("fail", func() error {
+				return workerClient.Fail(task.TaskType, task.TaskID, "action cancelled", &WorkerFailOptions{Retry: false})
+			})
 		} else if IsNonRetryable(err) {
 			w.logger.Printf("Action failed (non-retryable): %s - %v", task.TaskType, err)
-			_ = workerClient.Fail(task.TaskType, task.TaskID, err.Error(), &WorkerFailOptions{Retry: false})
+			w.sendWithRetry("fail", func() error {
+				return workerClient.Fail(task.TaskType, task.TaskID, err.Error(), &WorkerFailOptions{Retry: false})
+			})
 		} else {
 			w.logger.Printf("Action failed: %s - %v", task.TaskType, err)
-			_ = workerClient.Fail(task.TaskType, task.TaskID, err.Error(), &WorkerFailOptions{Retry: true})
+			w.sendWithRetry("fail", func() error {
+				return workerClient.Fail(task.TaskType, task.TaskID, err.Error(), &WorkerFailOptions{Retry: true})
+			})
 		}
 		return
 	}
@@ -320,14 +391,18 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 	// Success — dispatch based on result type
 	switch v := result.(type) {
 	case *ActionResult:
-		if err := workerClient.Complete(task.TaskType, task.TaskID, v.Data, &WorkerCompleteOptions{Outcome: v.Outcome}); err != nil {
-			w.logger.Printf("Failed to report completion: %v", err)
+		if err := w.sendWithRetry("complete", func() error {
+			return workerClient.Complete(task.TaskType, task.TaskID, v.Data, &WorkerCompleteOptions{Outcome: v.Outcome})
+		}); err != nil {
+			w.logger.Printf("Failed to report completion after retries: %v", err)
 		} else {
 			w.logger.Printf("Action completed: %s (outcome: %s)", task.TaskType, v.Outcome)
 		}
 	case []byte:
-		if err := workerClient.Complete(task.TaskType, task.TaskID, v, nil); err != nil {
-			w.logger.Printf("Failed to report completion: %v", err)
+		if err := w.sendWithRetry("complete", func() error {
+			return workerClient.Complete(task.TaskType, task.TaskID, v, nil)
+		}); err != nil {
+			w.logger.Printf("Failed to report completion after retries: %v", err)
 		} else {
 			w.logger.Printf("Action completed: %s", task.TaskType)
 		}
@@ -336,15 +411,40 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 		data, marshalErr := json.Marshal(v)
 		if marshalErr != nil {
 			w.logger.Printf("Failed to marshal result: %v", marshalErr)
-			_ = workerClient.Fail(task.TaskType, task.TaskID, fmt.Sprintf("marshal error: %v", marshalErr), &WorkerFailOptions{Retry: false})
+			w.sendWithRetry("fail", func() error {
+				return workerClient.Fail(task.TaskType, task.TaskID, fmt.Sprintf("marshal error: %v", marshalErr), &WorkerFailOptions{Retry: false})
+			})
 			return
 		}
-		if err := workerClient.Complete(task.TaskType, task.TaskID, data, nil); err != nil {
-			w.logger.Printf("Failed to report completion: %v", err)
+		if err := w.sendWithRetry("complete", func() error {
+			return workerClient.Complete(task.TaskType, task.TaskID, data, nil)
+		}); err != nil {
+			w.logger.Printf("Failed to report completion after retries: %v", err)
 		} else {
 			w.logger.Printf("Action completed: %s", task.TaskType)
 		}
 	}
+}
+
+// sendWithRetry attempts to send a result (Complete/Fail) to the server,
+// reconnecting if the connection was lost while the task was being processed.
+// This prevents silent result loss when a connection drops mid-execution.
+func (w *ActionWorker) sendWithRetry(op string, fn func() error) error {
+	const maxAttempts = 3
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		if !IsConnectionError(err) || w.ctx.Err() != nil {
+			return err
+		}
+		w.logger.Printf("Connection lost while sending %s result (attempt %d/%d), reconnecting...", op, attempt, maxAttempts)
+		if reconErr := w.resultClient.ReconnectWithContext(w.ctx); reconErr != nil {
+			return reconErr
+		}
+	}
+	return fmt.Errorf("failed to send %s result after %d attempts", op, maxAttempts)
 }
 
 // ActionContext provides context to action handlers.

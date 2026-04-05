@@ -118,6 +118,10 @@ type StreamWorker struct {
 	wg     sync.WaitGroup
 	logger Logger
 
+	// Reconnection coordination
+	reconnectMu   sync.Mutex
+	lastReconnect time.Time
+
 	// Local counters (not sent in heartbeats — server tracks authoritatively)
 	messagesProcessed uint64
 	messagesFailed    uint64
@@ -314,7 +318,16 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 				},
 			)
 			if err != nil {
-				sw.logger.Printf("[%s] GroupRead error: %v, retrying...", stream, err)
+				if IsConnectionError(err) {
+					if reconErr := sw.handleReconnect(); reconErr != nil {
+						if sw.ctx.Err() != nil {
+							return sw.ctx.Err()
+						}
+						sw.logger.Printf("[%s] Reconnect failed: %v, retrying...", stream, reconErr)
+					}
+				} else {
+					sw.logger.Printf("[%s] GroupRead error: %v, retrying...", stream, err)
+				}
 				time.Sleep(time.Second)
 				continue
 			}
@@ -334,13 +347,62 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 	}
 }
 
+// handleReconnect reconnects the client and re-joins consumer groups.
+// Safe to call from multiple goroutines — only one reconnection happens at a time.
+func (sw *StreamWorker) handleReconnect() error {
+	sw.reconnectMu.Lock()
+	defer sw.reconnectMu.Unlock()
+
+	// If another goroutine just reconnected, skip
+	if time.Since(sw.lastReconnect) < 2*time.Second {
+		return nil
+	}
+
+	sw.logger.Printf("Connection lost, reconnecting...")
+	if err := sw.client.ReconnectWithContext(sw.ctx); err != nil {
+		return err
+	}
+	sw.lastReconnect = time.Now()
+
+	// Re-join consumer groups
+	for _, stream := range sw.streams {
+		if err := sw.client.Stream.GroupJoin(stream, sw.config.Group, sw.config.Consumer, nil); err != nil {
+			sw.logger.Printf("Warning: failed to re-join group on %s: %v", stream, err)
+		}
+	}
+
+	// Re-register in worker registry
+	wc := sw.client.workerClient(sw.config.WorkerID)
+	var processes []ProcessEntry
+	for _, stream := range sw.streams {
+		processes = append(processes, ProcessEntry{
+			Name: stream + "/" + sw.config.Group,
+			Kind: ProcessKindStreamConsumer,
+		})
+	}
+	metadata := fmt.Sprintf(`{"streams":%q,"group":"%s","consumer":"%s"}`,
+		sw.streams, sw.config.Group, sw.config.Consumer)
+	if err := wc.Register(nil, &WorkerRegisterOptions{
+		WorkerType:     WorkerTypeStream,
+		MaxConcurrency: uint32(sw.config.Concurrency),
+		Processes:      processes,
+		Metadata:       metadata,
+		MachineID:      sw.config.MachineID,
+	}); err != nil {
+		sw.logger.Printf("Warning: failed to re-register: %v", err)
+	}
+
+	sw.logger.Printf("Reconnected, resuming work")
+	return nil
+}
+
 // processRecord handles a single record with ack/nack.
 func (sw *StreamWorker) processRecord(stream string, record StreamRecord) {
 	defer func() {
 		if r := recover(); r != nil {
 			sw.logger.Printf("[%s] Stream handler panicked on id %s: %v", stream, record.ID, r)
 			atomic.AddUint64(&sw.messagesFailed, 1)
-			_ = sw.client.Stream.GroupNack(stream, sw.config.Group, []StreamID{record.ID}, nil)
+			sw.ackWithRetry(stream, record.ID, false)
 		}
 	}()
 
@@ -359,12 +421,40 @@ func (sw *StreamWorker) processRecord(stream string, record StreamRecord) {
 	if err := sw.handler(sctx); err != nil {
 		atomic.AddUint64(&sw.messagesFailed, 1)
 		sw.logger.Printf("[%s] Stream record %s failed: %v", stream, record.ID, err)
-		_ = sw.client.Stream.GroupNack(stream, sw.config.Group, []StreamID{record.ID}, nil)
+		sw.ackWithRetry(stream, record.ID, false)
 		return
 	}
 
 	atomic.AddUint64(&sw.messagesProcessed, 1)
-	_ = sw.client.Stream.GroupAck(stream, sw.config.Group, []StreamID{record.ID}, nil)
+	sw.ackWithRetry(stream, record.ID, true)
+}
+
+// ackWithRetry sends an ack (or nack) to the server, reconnecting if the
+// connection was lost while the record was being processed.
+func (sw *StreamWorker) ackWithRetry(stream string, id StreamID, ack bool) {
+	const maxAttempts = 3
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		var err error
+		if ack {
+			err = sw.client.Stream.GroupAck(stream, sw.config.Group, []StreamID{id}, nil)
+		} else {
+			err = sw.client.Stream.GroupNack(stream, sw.config.Group, []StreamID{id}, nil)
+		}
+		if err == nil {
+			return
+		}
+		if !IsConnectionError(err) || sw.ctx.Err() != nil {
+			return
+		}
+		op := "ack"
+		if !ack {
+			op = "nack"
+		}
+		sw.logger.Printf("[%s] Connection lost sending %s for %s (attempt %d/%d), reconnecting...", stream, op, id, attempt, maxAttempts)
+		if reconErr := sw.handleReconnect(); reconErr != nil {
+			return
+		}
+	}
 }
 
 // Stop gracefully stops the stream worker.
@@ -372,6 +462,11 @@ func (sw *StreamWorker) Stop() {
 	sw.logger.Printf("Stopping stream worker...")
 	if sw.cancel != nil {
 		sw.cancel()
+	}
+	// Interrupt the connection to unblock any in-flight GroupRead call immediately.
+	// Interrupt bypasses the mutex so it won't block behind a blocking read.
+	if sw.client != nil {
+		sw.client.Interrupt()
 	}
 }
 

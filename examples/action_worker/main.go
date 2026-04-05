@@ -1,6 +1,6 @@
 // Example: ActionWorker with 13 action handlers for the Flo Go SDK
 //
-// This worker registers all handlers required by the workflow e2e test 
+// This worker registers all handlers required by the workflow e2e test
 // (process-order, expense-approval, signal-timeout-test, order-review).
 //
 // Usage:
@@ -166,11 +166,14 @@ func validateOrder(actx *flo.ActionContext) (interface{}, error) {
 	time.Sleep(200 * time.Millisecond)
 
 	if data.OrderID == "" {
+		log.Printf("[validate-order] Order is invalid: missing orderId")
 		return nil, flo.NewNonRetryableErrorf("missing orderId")
 	}
 	if data.Amount > 2000 {
+		log.Printf("[validate-order] Order %s is invalid: amount $%.2f exceeds limit", data.OrderID, data.Amount)
 		return nil, flo.NewNonRetryableErrorf("order amount $%.0f exceeds $2000 limit", data.Amount)
 	}
+	log.Printf("[validate-order] Order %s is valid", data.OrderID)
 	return map[string]interface{}{"valid": true, "orderId": data.OrderID}, nil
 }
 
@@ -314,6 +317,145 @@ func manualReview(actx *flo.ActionContext) (interface{}, error) {
 }
 
 // =============================================================================
+// Order-Processing Workflow Actions (used by order-workflow.yaml)
+// =============================================================================
+
+// validatePayment validates payment info before charging.
+func validatePayment(actx *flo.ActionContext) (interface{}, error) {
+	var data struct {
+		OrderID    string  `json:"orderId"`
+		CustomerID string  `json:"customerId"`
+		Amount     float64 `json:"amount"`
+	}
+	if err := actx.Into(&data); err != nil {
+		return nil, flo.NewNonRetryableErrorf("invalid input: %v", err)
+	}
+	log.Printf("[validate-payment] Validating payment for order %s, customer %s ($%.2f)",
+		data.OrderID, data.CustomerID, data.Amount)
+	time.Sleep(200 * time.Millisecond)
+
+	if data.Amount <= 0 {
+		return nil, flo.NewNonRetryableErrorf("invalid amount: $%.2f", data.Amount)
+	}
+	return map[string]interface{}{
+		"valid":      true,
+		"orderId":    data.OrderID,
+		"customerId": data.CustomerID,
+		"amount":     data.Amount,
+	}, nil
+}
+
+// processPayment charges the customer's payment method.
+func processPayment(actx *flo.ActionContext) (interface{}, error) {
+	var data struct {
+		OrderID    string  `json:"orderId"`
+		CustomerID string  `json:"customerId"`
+		Amount     float64 `json:"amount"`
+	}
+	if err := actx.Into(&data); err != nil {
+		return nil, flo.NewNonRetryableErrorf("invalid input: %v", err)
+	}
+	log.Printf("[process-payment] Charging $%.2f for order %s", data.Amount, data.OrderID)
+	time.Sleep(300 * time.Millisecond)
+
+	if data.Amount > 5000 {
+		return nil, flo.NewNonRetryableErrorf("payment of $%.0f declined — exceeds limit", data.Amount)
+	}
+	// Simulate primary processor failure for orders starting with "FB-"
+	// This triggers the plan to fall back to process-payment-fallback.
+	if strings.HasPrefix(data.OrderID, "FB-") {
+		return nil, flo.NewNonRetryableErrorf("primary processor unavailable for order %s", data.OrderID)
+	}
+	return map[string]interface{}{
+		"charged":       true,
+		"orderId":       data.OrderID,
+		"transactionId": fmt.Sprintf("TXN-%d", time.Now().UnixMilli()),
+		"amount":        data.Amount,
+	}, nil
+}
+
+// processPaymentFallback is a fallback payment processor (used by @plan/payment).
+func processPaymentFallback(actx *flo.ActionContext) (interface{}, error) {
+	var data struct {
+		OrderID    string  `json:"orderId"`
+		CustomerID string  `json:"customerId"`
+		Amount     float64 `json:"amount"`
+	}
+	if err := actx.Into(&data); err != nil {
+		return nil, flo.NewNonRetryableErrorf("invalid input: %v", err)
+	}
+	log.Printf("[process-payment-fallback] Charging $%.2f for order %s via fallback", data.Amount, data.OrderID)
+	time.Sleep(500 * time.Millisecond)
+
+	if data.Amount > 5000 {
+		return nil, flo.NewNonRetryableErrorf("fallback payment of $%.0f declined — exceeds limit", data.Amount)
+	}
+	return map[string]interface{}{
+		"charged":       true,
+		"orderId":       data.OrderID,
+		"transactionId": fmt.Sprintf("FB-TXN-%d", time.Now().UnixMilli()),
+		"amount":        data.Amount,
+		"provider":      "fallback",
+	}, nil
+}
+
+// sendConfirmation sends an order confirmation notification.
+func sendConfirmation(actx *flo.ActionContext) (interface{}, error) {
+	var data struct {
+		OrderID    string `json:"orderId"`
+		CustomerID string `json:"customerId"`
+	}
+	_ = actx.Into(&data)
+	log.Printf("[send-confirmation] Sending confirmation for order %s to customer %s",
+		data.OrderID, data.CustomerID)
+	time.Sleep(200 * time.Millisecond)
+	return map[string]interface{}{
+		"sent":    true,
+		"orderId": data.OrderID,
+		"channel": "email",
+	}, nil
+}
+
+// sendRejection sends an order rejection notification.
+func sendRejection(actx *flo.ActionContext) (interface{}, error) {
+	var data struct {
+		OrderID    string `json:"orderId"`
+		CustomerID string `json:"customerId"`
+	}
+	_ = actx.Into(&data)
+	log.Printf("[send-rejection] Sending rejection for order %s to customer %s",
+		data.OrderID, data.CustomerID)
+	time.Sleep(200 * time.Millisecond)
+	return map[string]interface{}{
+		"sent":    true,
+		"orderId": data.OrderID,
+		"reason":  "payment_declined",
+	}, nil
+}
+
+// =============================================================================
+// Scheduled Workflow Actions
+// =============================================================================
+
+// reconcileSpend simulates a periodic spend reconciliation check.
+func reconcileSpend(actx *flo.ActionContext) (interface{}, error) {
+	log.Printf("[reconcile-spend] Running spend reconciliation (attempt %d)", actx.Attempt())
+	time.Sleep(500 * time.Millisecond)
+
+	// Simulate checking budgets and correcting discrepancies
+	checked := 12 + time.Now().UnixMilli()%8
+	corrected := time.Now().UnixMilli() % 3
+
+	log.Printf("[reconcile-spend] Checked %d budgets, corrected %d discrepancies", checked, corrected)
+	return map[string]interface{}{
+		"budgets_checked":         checked,
+		"discrepancies_corrected": corrected,
+		"reconciled_at":           fmt.Sprintf("%d", time.Now().UnixMilli()),
+		"status":                  "clean",
+	}, nil
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 
@@ -372,6 +514,16 @@ func main() {
 	w.MustRegisterAction("fulfill-order", fulfillOrder)
 	w.MustRegisterAction("notify-rejection", notifyRejection)
 	w.MustRegisterAction("manual-review", manualReview)
+
+	// Order-processing workflow actions (used by order-workflow.yaml)
+	w.MustRegisterAction("validate-payment", validatePayment)
+	w.MustRegisterAction("process-payment", processPayment)
+	w.MustRegisterAction("process-payment-fallback", processPaymentFallback)
+	w.MustRegisterAction("send-confirmation", sendConfirmation)
+	w.MustRegisterAction("send-rejection", sendRejection)
+
+	// Scheduled workflow actions
+	w.MustRegisterAction("reconcile-spend", reconcileSpend)
 
 	// Handle graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())

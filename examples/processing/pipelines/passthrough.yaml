@@ -1,0 +1,17 @@
+kind: Processing
+name: passthrough-pipe
+namespace: e2e
+parallelism: 1
+batch_size: 50
+
+sources:
+  - name: input
+    stream:
+      name: raw-events
+      namespace: e2e
+
+sinks:
+  - name: output
+    stream:
+      name: passthrough-out
+      namespace: e2e

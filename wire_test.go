@@ -105,13 +105,14 @@ func TestSerializeRequest(t *testing.T) {
 		}
 
 		// Check version
-		if data[20] != Version {
-			t.Errorf("expected version %d, got %d", Version, data[20])
+		if data[22] != Version {
+			t.Errorf("expected version %d, got %d", Version, data[22])
 		}
 
-		// Check opcode
-		if data[21] != byte(OpKVGet) {
-			t.Errorf("expected opcode 0x%02X, got 0x%02X", OpKVGet, data[21])
+		// Check opcode (u16 LE at bytes 20-21)
+		opcode := binary.LittleEndian.Uint16(data[20:22])
+		if opcode != uint16(OpKVGet) {
+			t.Errorf("expected opcode 0x%04X, got 0x%04X", OpKVGet, opcode)
 		}
 	})
 
@@ -150,7 +151,7 @@ func TestParseResponseHeader(t *testing.T) {
 		header[20] = Version
 		header[21] = byte(StatusOK)
 		header[22] = 0 // flags
-		header[23] = 0 // reserved
+		header[23] = 0 // pad
 
 		status, dataLen, requestID, _, err := parseResponseHeader(header)
 		if err != nil {
@@ -347,8 +348,8 @@ func TestComputeCRC32(t *testing.T) {
 	binary.LittleEndian.PutUint32(header[0:4], Magic)
 	binary.LittleEndian.PutUint32(header[4:8], 5)
 	binary.LittleEndian.PutUint64(header[8:16], 1)
-	header[20] = Version
-	header[21] = byte(OpKVGet)
+	binary.LittleEndian.PutUint16(header[20:22], uint16(OpKVGet))
+	header[22] = Version
 
 	payload := []byte("hello")
 

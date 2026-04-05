@@ -1,0 +1,47 @@
+kind: Processing
+name: event-router
+namespace: e2e
+parallelism: 1
+batch_size: 50
+
+sources:
+  - name: events
+    stream:
+      name: mixed-events
+      namespace: e2e
+
+operators:
+  - type: classify
+    name: route-by-level
+    default_tag: unclassified
+    rules:
+      - condition: "json:level=error"
+        tag: errors
+      - condition: "json:level=warn"
+        tag: warnings
+      - condition: "json:priority>8"
+        tag: critical
+
+sinks:
+  - name: all
+    stream:
+      name: all-classified
+      namespace: e2e
+
+  - name: errors-only
+    stream:
+      name: error-events
+      namespace: e2e
+    match: [errors]
+
+  - name: warnings-only
+    stream:
+      name: warning-events
+      namespace: e2e
+    match: [warnings]
+
+  - name: critical-errors
+    stream:
+      name: critical-error-events
+      namespace: e2e
+    match: [errors, critical]

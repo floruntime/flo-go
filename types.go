@@ -24,7 +24,7 @@ import (
 const (
 	Magic      uint32 = 0x004F4C46 // "FLO\0" in little-endian
 	Version    uint8  = 0x01
-	HeaderSize        = 24
+	HeaderSize        = 32
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -33,206 +33,210 @@ const (
 )
 
 // OpCode represents operation codes for Flo protocol requests.
-type OpCode uint8
+// Three-layer layout: Infra(0x000–0x0FF), Data(0x100–0x2FF), Compute(0x300–0x3FF)
+type OpCode uint16
 
 const (
-	// System Operations (0x00 - 0x0F)
-	OpPing          OpCode = 0x00
-	OpPong          OpCode = 0x01
-	OpErrorResponse OpCode = 0x02
-	OpAuth          OpCode = 0x03
-	OpSetDurability OpCode = 0x04
-	OpOK            OpCode = 0x05
+	// ── System (0x000 – 0x00F) ──
+	OpPing          OpCode = 0x000
+	OpPong          OpCode = 0x001
+	OpErrorResponse OpCode = 0x002
+	OpAuth          OpCode = 0x003
+	OpSetDurability OpCode = 0x004
+	OpOK            OpCode = 0x005
 
-	// Streams (0x10 - 0x1F)
-	OpStreamAppend         OpCode = 0x10
-	OpStreamRead           OpCode = 0x11
-	OpStreamTrim           OpCode = 0x12
-	OpStreamInfo           OpCode = 0x13
-	OpStreamAppendResponse OpCode = 0x14
-	OpStreamReadResponse   OpCode = 0x15
-	OpStreamEvent          OpCode = 0x16 // Server-push for subscriptions
-	OpStreamSubscribe      OpCode = 0x17 // Subscribe to stream (WebSocket continuous push)
-	OpStreamUnsubscribe    OpCode = 0x18 // Unsubscribe from stream
-	OpStreamSubscribed     OpCode = 0x19 // Response: subscription confirmed
-	OpStreamUnsubscribed   OpCode = 0x1A // Response: unsubscription confirmed
-	OpStreamList           OpCode = 0x1B // List all streams in namespace
-	OpStreamListResponse   OpCode = 0x1C
-	OpStreamCreate         OpCode = 0x1D // Create stream with partition count
-	OpStreamCreateResponse OpCode = 0x1E
-	OpStreamAlter          OpCode = 0x1F // Alter stream configuration (retention policy)
+	// ── Namespace (0x010 – 0x02F) ──
+	OpNamespaceCreate            OpCode = 0x010
+	OpNamespaceDelete            OpCode = 0x011
+	OpNamespaceList              OpCode = 0x012
+	OpNamespaceInfo              OpCode = 0x013
+	OpNamespaceConfigSet         OpCode = 0x014
+	OpNamespaceConfigGet         OpCode = 0x015
+	OpNamespaceCreateResponse    OpCode = 0x020
+	OpNamespaceDeleteResponse    OpCode = 0x021
+	OpNamespaceListResponse      OpCode = 0x022
+	OpNamespaceInfoResponse      OpCode = 0x023
+	OpNamespaceConfigSetResponse OpCode = 0x024
+	OpNamespaceConfigGetResponse OpCode = 0x025
 
-	// Stream Consumer Groups (0x20 - 0x2F)
-	OpStreamGroupCreate           OpCode = 0x20 // Create consumer group with configuration
-	OpStreamGroupJoin             OpCode = 0x21
-	OpStreamGroupLeave            OpCode = 0x22
-	OpStreamGroupRead             OpCode = 0x23
-	OpStreamGroupAck              OpCode = 0x24
-	OpStreamGroupClaim            OpCode = 0x25
-	OpStreamGroupPending          OpCode = 0x26
-	OpStreamGroupConfigureSweeper OpCode = 0x27
-	OpStreamGroupReadResponse     OpCode = 0x28
-	OpStreamGroupNack             OpCode = 0x29
-	OpStreamGroupTouch            OpCode = 0x2A // Extend ack deadline for pending messages
-	OpStreamGroupInfo             OpCode = 0x2B // Get consumer group info (config + consumers)
-	OpStreamGroupDelete           OpCode = 0x2C // Delete consumer group
+	// ── Cluster (0x030 – 0x04F) ──
+	OpClusterStatus          OpCode = 0x030
+	OpClusterMembers         OpCode = 0x031
+	OpClusterJoin            OpCode = 0x032
+	OpClusterLeave           OpCode = 0x033
+	OpClusterTransferLeader  OpCode = 0x034
+	OpClusterAddNode         OpCode = 0x035
+	OpClusterRemoveNode      OpCode = 0x036
+	OpClusterStatusResponse  OpCode = 0x040
+	OpClusterMembersResponse OpCode = 0x041
+	OpClusterJoinResponse    OpCode = 0x042
 
-	// KV Operations (0x30 - 0x3F)
-	OpKVPut             OpCode = 0x30
-	OpKVGet             OpCode = 0x31
-	OpKVDelete          OpCode = 0x32
-	OpKVScan            OpCode = 0x33
-	OpKVHistory         OpCode = 0x34
-	OpKVGetResponse     OpCode = 0x35
-	OpKVPutResponse     OpCode = 0x36
-	OpKVScanResponse    OpCode = 0x37
-	OpKVHistoryResponse OpCode = 0x38
+	// ── KV + Transactions + Snapshots (0x100 – 0x12F) ──
+	OpKVPut                    OpCode = 0x100
+	OpKVGet                    OpCode = 0x101
+	OpKVMGet                   OpCode = 0x102
+	OpKVDelete                 OpCode = 0x103
+	OpKVScan                   OpCode = 0x104
+	OpKVHistory                OpCode = 0x105
+	OpKVGetResponse            OpCode = 0x106
+	OpKVMGetResponse           OpCode = 0x107
+	OpKVPutResponse            OpCode = 0x108
+	OpKVScanResponse           OpCode = 0x109
+	OpKVHistoryResponse        OpCode = 0x10A
+	OpKVBeginTxn               OpCode = 0x110
+	OpKVCommitTxn              OpCode = 0x111
+	OpKVRollbackTxn            OpCode = 0x112
+	OpKVSnapshotCreate         OpCode = 0x120
+	OpKVSnapshotGet            OpCode = 0x121
+	OpKVSnapshotRelease        OpCode = 0x122
+	OpKVSnapshotCreateResponse OpCode = 0x123
 
-	// Transactions (0x39 - 0x3B)
-	OpKVBeginTxn    OpCode = 0x39
-	OpKVCommitTxn   OpCode = 0x3A
-	OpKVRollbackTxn OpCode = 0x3B
+	// ── Streams (0x130 – 0x14F) ──
+	OpStreamAppend         OpCode = 0x130
+	OpStreamRead           OpCode = 0x131
+	OpStreamTrim           OpCode = 0x132
+	OpStreamInfo           OpCode = 0x133
+	OpStreamAppendResponse OpCode = 0x134
+	OpStreamReadResponse   OpCode = 0x135
+	OpStreamEvent          OpCode = 0x136
+	OpStreamSubscribe      OpCode = 0x137
+	OpStreamUnsubscribe    OpCode = 0x138
+	OpStreamSubscribed     OpCode = 0x139
+	OpStreamUnsubscribed   OpCode = 0x13A
+	OpStreamList           OpCode = 0x13B
+	OpStreamListResponse   OpCode = 0x13C
+	OpStreamCreate         OpCode = 0x13D
+	OpStreamCreateResponse OpCode = 0x13E
+	OpStreamAlter          OpCode = 0x13F
 
-	// Snapshots (0x3C - 0x3F)
-	OpKVSnapshotCreate         OpCode = 0x3C
-	OpKVSnapshotGet            OpCode = 0x3D
-	OpKVSnapshotRelease        OpCode = 0x3E
-	OpKVSnapshotCreateResponse OpCode = 0x3F
+	// ── Stream Consumer Groups (0x150 – 0x16F) ──
+	OpStreamGroupCreate           OpCode = 0x150
+	OpStreamGroupJoin             OpCode = 0x151
+	OpStreamGroupLeave            OpCode = 0x152
+	OpStreamGroupRead             OpCode = 0x153
+	OpStreamGroupAck              OpCode = 0x154
+	OpStreamGroupClaim            OpCode = 0x155
+	OpStreamGroupPending          OpCode = 0x156
+	OpStreamGroupConfigureSweeper OpCode = 0x157
+	OpStreamGroupReadResponse     OpCode = 0x158
+	OpStreamGroupNack             OpCode = 0x159
+	OpStreamGroupTouch            OpCode = 0x15A
+	OpStreamGroupInfo             OpCode = 0x15B
+	OpStreamGroupDelete           OpCode = 0x15C
 
-	// Queues (0x40 - 0x5F)
-	OpQueueEnqueue      OpCode = 0x40
-	OpQueueDequeue      OpCode = 0x41
-	OpQueueComplete     OpCode = 0x42
-	OpQueueExtendLease  OpCode = 0x43
-	OpQueueFail         OpCode = 0x44
-	OpQueueFailAuto     OpCode = 0x45
-	OpQueueDLQList      OpCode = 0x46
-	OpQueueDLQDelete    OpCode = 0x47
-	OpQueueDLQRequeue   OpCode = 0x48
-	OpQueueDLQStats     OpCode = 0x49
-	OpQueuePromoteDue   OpCode = 0x4A
-	OpQueueStats        OpCode = 0x4B
-	OpQueuePeek         OpCode = 0x4C
-	OpQueueTouch        OpCode = 0x4D
-	OpQueueBatchEnqueue OpCode = 0x4E
-	OpQueuePurge        OpCode = 0x4F
+	// ── Queues (0x170 – 0x19F) ──
+	OpQueueEnqueue              OpCode = 0x170
+	OpQueueDequeue              OpCode = 0x171
+	OpQueueComplete             OpCode = 0x172
+	OpQueueExtendLease          OpCode = 0x173
+	OpQueueFail                 OpCode = 0x174
+	OpQueueFailAuto             OpCode = 0x175
+	OpQueueDLQList              OpCode = 0x176
+	OpQueueDLQDelete            OpCode = 0x177
+	OpQueueDLQRequeue           OpCode = 0x178
+	OpQueueDLQStats             OpCode = 0x179
+	OpQueuePromoteDue           OpCode = 0x17A
+	OpQueueStats                OpCode = 0x17B
+	OpQueuePeek                 OpCode = 0x17C
+	OpQueueTouch                OpCode = 0x17D
+	OpQueueBatchEnqueue         OpCode = 0x17E
+	OpQueuePurge                OpCode = 0x17F
+	OpQueueEnqueueResponse      OpCode = 0x190
+	OpQueueDequeueResponse      OpCode = 0x191
+	OpQueueDLQListResponse      OpCode = 0x192
+	OpQueueStatsResponse        OpCode = 0x193
+	OpQueuePeekResponse         OpCode = 0x194
+	OpQueueTouchResponse        OpCode = 0x195
+	OpQueueBatchEnqueueResponse OpCode = 0x196
+	OpQueuePurgeResponse        OpCode = 0x197
+	OpQueueList                 OpCode = 0x198
+	OpQueueListResponse         OpCode = 0x199
 
-	// Queue responses (0x50 - 0x5F)
-	OpQueueEnqueueResponse      OpCode = 0x50
-	OpQueueDequeueResponse      OpCode = 0x51
-	OpQueueDLQListResponse      OpCode = 0x52
-	OpQueueStatsResponse        OpCode = 0x53
-	OpQueuePeekResponse         OpCode = 0x54
-	OpQueueTouchResponse        OpCode = 0x55
-	OpQueueBatchEnqueueResponse OpCode = 0x56
-	OpQueuePurgeResponse        OpCode = 0x57
-	OpQueueList                 OpCode = 0x58 // List all queues in namespace
-	OpQueueListResponse         OpCode = 0x59
+	// ── Time-Series (0x1A0 – 0x1BF) ──
+	OpTSWrite             OpCode = 0x1A0
+	OpTSRead              OpCode = 0x1A1
+	OpTSQuery             OpCode = 0x1A2
+	OpTSFloQL             OpCode = 0x1A3
+	OpTSList              OpCode = 0x1A4
+	OpTSDelete            OpCode = 0x1A5
+	OpTSRetention         OpCode = 0x1A6
+	OpTSWriteResponse     OpCode = 0x1A7
+	OpTSReadResponse      OpCode = 0x1A8
+	OpTSQueryResponse     OpCode = 0x1A9
+	OpTSFloQLResponse     OpCode = 0x1AA
+	OpTSListResponse      OpCode = 0x1AB
+	OpTSDeleteResponse    OpCode = 0x1AC
+	OpTSRetentionResponse OpCode = 0x1AD
 
-	// Actions (0x60 - 0x6D)
-	OpActionRegister         OpCode = 0x60
-	OpActionInvoke           OpCode = 0x61
-	OpActionStatus           OpCode = 0x62
-	OpActionList             OpCode = 0x63
-	OpActionDelete           OpCode = 0x64
-	OpActionAwait            OpCode = 0x65 // Worker blocks waiting for task
-	OpActionComplete         OpCode = 0x66 // Worker completes task
-	OpActionFail             OpCode = 0x67 // Worker fails task
-	OpActionTouch            OpCode = 0x68 // Worker extends task lease
-	OpActionRegisterResponse OpCode = 0x69
-	OpActionInvokeResponse   OpCode = 0x6A
-	OpActionStatusResponse   OpCode = 0x6B
-	OpActionListResponse     OpCode = 0x6C
-	OpActionTaskAssignment   OpCode = 0x6D // Server pushes task to worker
+	// ── Actions (0x300 – 0x31F) ──
+	OpActionRegister         OpCode = 0x300
+	OpActionInvoke           OpCode = 0x301
+	OpActionStatus           OpCode = 0x302
+	OpActionList             OpCode = 0x303
+	OpActionListRuns         OpCode = 0x304
+	OpActionDelete           OpCode = 0x305
+	OpActionAwait            OpCode = 0x306
+	OpActionComplete         OpCode = 0x307
+	OpActionFail             OpCode = 0x308
+	OpActionTouch            OpCode = 0x309
+	OpActionRegisterResponse OpCode = 0x310
+	OpActionInvokeResponse   OpCode = 0x311
+	OpActionStatusResponse   OpCode = 0x312
+	OpActionListResponse     OpCode = 0x313
+	OpActionListRunsResponse OpCode = 0x314
+	OpActionTaskAssignment   OpCode = 0x315
 
-	// Workers — physical worker registry (0x70 - 0x77)
-	OpWorkerRegister         OpCode = 0x70
-	OpWorkerHeartbeat        OpCode = 0x71
-	OpWorkerDeregister       OpCode = 0x72
-	OpWorkerList             OpCode = 0x73
-	OpWorkerInfo             OpCode = 0x74
-	OpWorkerRegisterResponse OpCode = 0x75
-	OpWorkerListResponse     OpCode = 0x76
-	OpWorkerInfoResponse     OpCode = 0x77
-	OpWorkerDrain            OpCode = 0x78
+	// ── Workers (0x320 – 0x33F) ──
+	OpWorkerRegister         OpCode = 0x320
+	OpWorkerHeartbeat        OpCode = 0x321
+	OpWorkerDeregister       OpCode = 0x322
+	OpWorkerList             OpCode = 0x323
+	OpWorkerInfo             OpCode = 0x324
+	OpWorkerDrain            OpCode = 0x325
+	OpWorkerRegisterResponse OpCode = 0x330
+	OpWorkerListResponse     OpCode = 0x331
+	OpWorkerInfoResponse     OpCode = 0x332
+	OpWorkerDrainResponse    OpCode = 0x333
 
-	// Workflows (0x80 - 0x91)
-	OpWorkflowCreate                  OpCode = 0x80 // Create workflow from YAML definition
-	OpWorkflowStart                   OpCode = 0x81 // Start a workflow run
-	OpWorkflowSignal                  OpCode = 0x82 // Send signal to running workflow
-	OpWorkflowCancel                  OpCode = 0x83 // Cancel a workflow run
-	OpWorkflowStatus                  OpCode = 0x84 // Get workflow run status
-	OpWorkflowHistory                 OpCode = 0x85 // Get workflow run history
-	OpWorkflowListRuns                OpCode = 0x86 // List workflow runs
-	OpWorkflowGetDefinition           OpCode = 0x87 // Get workflow definition
-	OpWorkflowCreateResponse          OpCode = 0x88
-	OpWorkflowStartResponse           OpCode = 0x89
-	OpWorkflowStatusResponse          OpCode = 0x8A
-	OpWorkflowHistoryResponse         OpCode = 0x8B
-	OpWorkflowListRunsResponse        OpCode = 0x8C
-	OpWorkflowGetDefinitionResponse   OpCode = 0x8D
-	OpWorkflowDisable                 OpCode = 0x8E
-	OpWorkflowEnable                  OpCode = 0x8F
-	OpWorkflowDisableResponse         OpCode = 0x90
-	OpWorkflowEnableResponse          OpCode = 0x91
-	OpWorkflowListDefinitions         OpCode = 0x92
-	OpWorkflowListDefinitionsResponse OpCode = 0x93
+	// ── Workflows (0x340 – 0x35F) ──
+	OpWorkflowCreate                  OpCode = 0x340
+	OpWorkflowStart                   OpCode = 0x341
+	OpWorkflowSignal                  OpCode = 0x342
+	OpWorkflowCancel                  OpCode = 0x343
+	OpWorkflowStatus                  OpCode = 0x344
+	OpWorkflowHistory                 OpCode = 0x345
+	OpWorkflowListRuns                OpCode = 0x346
+	OpWorkflowGetDefinition           OpCode = 0x347
+	OpWorkflowDisable                 OpCode = 0x348
+	OpWorkflowEnable                  OpCode = 0x349
+	OpWorkflowListDefinitions         OpCode = 0x34A
+	OpWorkflowCreateResponse          OpCode = 0x350
+	OpWorkflowStartResponse           OpCode = 0x351
+	OpWorkflowStatusResponse          OpCode = 0x352
+	OpWorkflowHistoryResponse         OpCode = 0x353
+	OpWorkflowListRunsResponse        OpCode = 0x354
+	OpWorkflowGetDefinitionResponse   OpCode = 0x355
+	OpWorkflowDisableResponse         OpCode = 0x356
+	OpWorkflowEnableResponse          OpCode = 0x357
+	OpWorkflowListDefinitionsResponse OpCode = 0x358
 
-	// Cluster Management (0xA0 - 0xAF)
-	OpClusterStatus          OpCode = 0xA0 // Get cluster status (leader, term, health)
-	OpClusterMembers         OpCode = 0xA1 // List cluster members
-	OpClusterJoin            OpCode = 0xA2 // Request to join cluster
-	OpClusterLeave           OpCode = 0xA3 // Request to leave cluster gracefully
-	OpClusterTransferLeader  OpCode = 0xA4 // Transfer leadership to another node
-	OpClusterAddNode         OpCode = 0xA5 // Admin: add node to cluster (leader only)
-	OpClusterRemoveNode      OpCode = 0xA6 // Admin: remove node from cluster (leader only)
-	OpClusterStatusResponse  OpCode = 0xA8
-	OpClusterMembersResponse OpCode = 0xA9
-	OpClusterJoinResponse    OpCode = 0xAA
-
-	// Namespace Management (0xB0 - 0xBF)
-	OpNamespaceCreate         OpCode = 0xB0 // Create a new namespace
-	OpNamespaceDelete         OpCode = 0xB1 // Delete an existing namespace
-	OpNamespaceList           OpCode = 0xB2 // List all namespaces
-	OpNamespaceInfo           OpCode = 0xB3 // Get namespace info/config
-	OpNamespaceCreateResponse OpCode = 0xB4
-	OpNamespaceDeleteResponse OpCode = 0xB5
-	OpNamespaceListResponse   OpCode = 0xB6
-	OpNamespaceInfoResponse   OpCode = 0xB7
-
-	// Processing / Stream Processing (0xC0 - 0xD1)
-	OpProcessingSubmit            OpCode = 0xC0 // Submit a processing job
-	OpProcessingStop              OpCode = 0xC1 // Gracefully stop a processing job
-	OpProcessingCancel            OpCode = 0xC2 // Force cancel a processing job
-	OpProcessingStatus            OpCode = 0xC3 // Get processing job status
-	OpProcessingList              OpCode = 0xC4 // List processing jobs
-	OpProcessingSavepoint         OpCode = 0xC6 // Trigger a savepoint
-	OpProcessingRestore           OpCode = 0xC7 // Restore from a savepoint
-	OpProcessingRescale           OpCode = 0xC8 // Rescale job parallelism
-	OpProcessingSubmitResponse    OpCode = 0xC9
-	OpProcessingStopResponse      OpCode = 0xCA
-	OpProcessingCancelResponse    OpCode = 0xCB
-	OpProcessingStatusResponse    OpCode = 0xCC
-	OpProcessingListResponse      OpCode = 0xCD
-	OpProcessingSavepointResponse OpCode = 0xCF
-	OpProcessingRestoreResponse   OpCode = 0xD0
-	OpProcessingRescaleResponse   OpCode = 0xD1
-
-	// Time-Series Operations (0xE0 - 0xED)
-	OpTSWrite             OpCode = 0xE0 // Write data point(s) to a time-series
-	OpTSRead              OpCode = 0xE1 // Read raw data points from a time-series
-	OpTSQuery             OpCode = 0xE2 // Aggregated query over a time range
-	OpTSFloQL             OpCode = 0xE3 // FloQL query string
-	OpTSList              OpCode = 0xE4 // List measurements or series
-	OpTSDelete            OpCode = 0xE5 // Delete a series and its metadata
-	OpTSRetention         OpCode = 0xE6 // Configure retention / downsampling policy
-	OpTSWriteResponse     OpCode = 0xE7
-	OpTSReadResponse      OpCode = 0xE8
-	OpTSQueryResponse     OpCode = 0xE9
-	OpTSFloQLResponse     OpCode = 0xEA
-	OpTSListResponse      OpCode = 0xEB
-	OpTSDeleteResponse    OpCode = 0xEC
-	OpTSRetentionResponse OpCode = 0xED
+	// ── Processing (0x360 – 0x37F) ──
+	OpProcessingSubmit            OpCode = 0x360
+	OpProcessingStop              OpCode = 0x361
+	OpProcessingCancel            OpCode = 0x362
+	OpProcessingStatus            OpCode = 0x363
+	OpProcessingList              OpCode = 0x364
+	OpProcessingSavepoint         OpCode = 0x365
+	OpProcessingRestore           OpCode = 0x366
+	OpProcessingRescale           OpCode = 0x367
+	OpProcessingSubmitResponse    OpCode = 0x370
+	OpProcessingStopResponse      OpCode = 0x371
+	OpProcessingCancelResponse    OpCode = 0x372
+	OpProcessingStatusResponse    OpCode = 0x373
+	OpProcessingListResponse      OpCode = 0x374
+	OpProcessingSavepointResponse OpCode = 0x375
+	OpProcessingRestoreResponse   OpCode = 0x376
+	OpProcessingRescaleResponse   OpCode = 0x377
 )
 
 // StatusCode represents status codes for Flo protocol responses.
@@ -629,7 +633,6 @@ type ActionType uint8
 
 const (
 	ActionTypeUser ActionType = 0 // User-defined action (external worker processes tasks)
-	ActionTypeWASM ActionType = 1 // WASM action (executed inline by the server)
 )
 
 // RunStatus represents the status of an action run.
@@ -646,13 +649,13 @@ const (
 
 // TaskAssignment represents a task assigned to a worker.
 type TaskAssignment struct {
-	TaskID              string
-	TaskType            string
-	Payload             []byte
-	CreatedAt           int64
-	Attempt             uint32
-	CallerRunID         string
-	CallerWorkflowName  string
+	TaskID             string
+	TaskType           string
+	Payload            []byte
+	CreatedAt          int64
+	Attempt            uint32
+	CallerRunID        string
+	CallerWorkflowName string
 }
 
 // ActionRunStatus represents the status of an action invocation.
@@ -669,13 +672,10 @@ type ActionRunStatus struct {
 
 // ActionRegisterOptions contains options for action registration.
 type ActionRegisterOptions struct {
-	Namespace      string
-	Description    string
-	TimeoutMS      *uint64
-	MaxRetries     *uint8
-	WasmModule     []byte  // WASM module bytes (for ActionTypeWASM)
-	WasmEntrypoint string  // Custom WASM entrypoint function (default: "handle")
-	MemoryLimitMB  *uint32 // WASM memory limit in MB
+	Namespace   string
+	Description string
+	TimeoutMS   *uint64
+	MaxRetries  *uint8
 }
 
 // ActionInvokeOptions contains options for action invocation.
@@ -688,8 +688,7 @@ type ActionInvokeOptions struct {
 
 // ActionInvokeResult represents the result of an action invocation.
 type ActionInvokeResult struct {
-	RunID  string // Unique run ID for tracking
-	Output []byte // WASM output (populated inline for WASM actions, nil for user actions)
+	RunID string // Unique run ID for tracking
 }
 
 // ActionStatusOptions contains options for action status query.
@@ -840,6 +839,7 @@ type WorkflowGetDefinitionOptions struct {
 // WorkflowStartOptions contains options for starting a workflow run.
 type WorkflowStartOptions struct {
 	Namespace      string
+	Version        string // Workflow version (default: "latest")
 	IdempotencyKey string // Prevents duplicate runs with the same key
 	RunID          string // Explicit run ID (auto-generated if empty)
 }
@@ -861,6 +861,7 @@ type WorkflowStatusResult struct {
 	StartedAt   *int64
 	CompletedAt *int64
 	WaitSignal  *string
+	Output      []byte
 }
 
 // WorkflowSignalOptions contains options for sending a signal to a workflow.
@@ -897,12 +898,16 @@ type WorkflowHistoryOptions struct {
 type WorkflowListRunsOptions struct {
 	Namespace string
 	Limit     uint32
+	Status    string // Filter by run status (e.g. "running", "completed", "failed")
+	Cursor    string // Cursor for pagination (last run_id from previous page)
+	Search    string // Case-insensitive search across run fields
 }
 
 // WorkflowListDefinitionsOptions contains options for listing workflow definitions.
 type WorkflowListDefinitionsOptions struct {
 	Namespace string
 	Limit     uint32
+	Cursor    []byte
 }
 
 // =============================================================================
@@ -923,6 +928,7 @@ type ProcessingStatusOptions struct {
 type ProcessingListOptions struct {
 	Namespace string
 	Limit     uint32
+	Cursor    []byte
 }
 
 // ProcessingStopOptions contains options for stopping a processing job.

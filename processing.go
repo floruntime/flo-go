@@ -59,8 +59,13 @@ func (p *ProcessingClient) List(opts *ProcessingListOptions) ([]*ProcessingListE
 	if limit == 0 {
 		limit = 100
 	}
-	value := make([]byte, 4)
-	binary.LittleEndian.PutUint32(value, limit)
+
+	// Wire format: [limit:u32][cursor...]
+	value := make([]byte, 4+len(opts.Cursor))
+	binary.LittleEndian.PutUint32(value[0:4], limit)
+	if len(opts.Cursor) > 0 {
+		copy(value[4:], opts.Cursor)
+	}
 
 	resp, err := p.client.sendAndCheck(OpProcessingList, namespace, nil, value, nil, false)
 	if err != nil {

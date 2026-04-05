@@ -24,7 +24,8 @@ func (a *ActionClient) Register(name string, actionType ActionType, opts *Action
 
 	// Build value: [action_type:u8][timeout_ms:u32][max_retries:u32]
 	//              [has_desc:u8][desc_len:u16]?[desc]?
-	//              [has_wasm_module:u8]...[has_trigger_stream:u8]...[has_trigger_group:u8]
+	//              [has_wasm_module:u8=0][has_wasm_entrypoint:u8=0][has_wasm_memory_limit:u8=0]
+	//              [has_trigger_stream:u8]...[has_trigger_group:u8]
 	value := make([]byte, 0, 256)
 
 	// Action type
@@ -58,37 +59,10 @@ func (a *ActionClient) Register(name string, actionType ActionType, opts *Action
 		value = append(value, 0) // no desc
 	}
 
-	// WASM module (optional)
-	if len(opts.WasmModule) > 0 {
-		value = append(value, 1) // has_wasm_module
-		buf = make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, uint32(len(opts.WasmModule)))
-		value = append(value, buf...)
-		value = append(value, opts.WasmModule...)
-	} else {
-		value = append(value, 0) // no wasm_module
-	}
-
-	// WASM entrypoint (optional)
-	if opts.WasmEntrypoint != "" {
-		value = append(value, 1) // has_wasm_entrypoint
-		buf = make([]byte, 2)
-		binary.LittleEndian.PutUint16(buf, uint16(len(opts.WasmEntrypoint)))
-		value = append(value, buf...)
-		value = append(value, []byte(opts.WasmEntrypoint)...)
-	} else {
-		value = append(value, 0) // no wasm_entrypoint
-	}
-
-	// WASM memory limit (optional)
-	if opts.MemoryLimitMB != nil {
-		value = append(value, 1) // has_wasm_memory_limit
-		buf = make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, *opts.MemoryLimitMB)
-		value = append(value, buf...)
-	} else {
-		value = append(value, 0) // no wasm_memory_limit
-	}
+	// WASM fields (reserved, always zero for wire compat)
+	value = append(value, 0) // no wasm_module
+	value = append(value, 0) // no wasm_entrypoint
+	value = append(value, 0) // no wasm_memory_limit
 
 	value = append(value, 0) // has_trigger_stream
 	value = append(value, 0) // has_trigger_group
@@ -98,8 +72,7 @@ func (a *ActionClient) Register(name string, actionType ActionType, opts *Action
 }
 
 // Invoke invokes an action and returns the result.
-// For WASM actions, Output contains the inline execution result.
-// For user actions, Output is nil (use Status to poll for results).
+// Use Status to poll for results.
 func (a *ActionClient) Invoke(name string, input []byte, opts *ActionInvokeOptions) (*ActionInvokeResult, error) {
 	if opts == nil {
 		opts = &ActionInvokeOptions{}
@@ -212,16 +185,13 @@ func parseActionInvokeResult(data []byte) (*ActionInvokeResult, error) {
 
 	result := &ActionInvokeResult{RunID: runID}
 
-	// Read optional output
+	// Skip optional output field (wire compat — always empty now)
 	if pos < len(data) && data[pos] == 1 {
 		pos++
 		if pos+4 <= len(data) {
 			outputLen := int(binary.LittleEndian.Uint32(data[pos:]))
-			pos += 4
-			if pos+outputLen <= len(data) {
-				result.Output = make([]byte, outputLen)
-				copy(result.Output, data[pos:pos+outputLen])
-			}
+			pos += 4 + outputLen // skip output bytes
+			_ = pos              // suppress unused warning
 		}
 	}
 
