@@ -81,7 +81,8 @@ func (a *ActionClient) Invoke(name string, input []byte, opts *ActionInvokeOptio
 	namespace := a.client.getNamespace(opts.Namespace)
 
 	// Build value: [priority:u8][delay_ms:i64][has_caller:u8]
-	//              [has_idempotency_key:u8][key_len:u16]?[key]?[input...]
+	//              [has_idempotency_key:u8][key_len:u16]?[key]?
+	//              [has_labels:u8][labels_len:u16]?[labels]?[input...]
 	value := make([]byte, 0, len(input)+32)
 
 	// Priority (default 10)
@@ -113,6 +114,9 @@ func (a *ActionClient) Invoke(name string, input []byte, opts *ActionInvokeOptio
 	} else {
 		value = append(value, 0)
 	}
+
+	// Labels (none)
+	value = append(value, 0)
 
 	// Input
 	value = append(value, input...)

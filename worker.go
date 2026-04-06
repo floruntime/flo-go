@@ -383,7 +383,6 @@ func parseTaskAssignment(data []byte) (*TaskAssignment, error) {
 	attempt := binary.LittleEndian.Uint32(data[pos:])
 	pos += 4
 
-	// Read optional caller block: [has_caller:u8][run_id_len:u16][run_id][wf_name_len:u16][wf_name]
 	// caller block: [has_caller:u8][run_id_len:u16][run_id][wf_name_len:u16][wf_name]
 	if pos+1 > len(data) {
 		return nil, fmt.Errorf("incomplete task assignment: missing has_caller")
