@@ -368,3 +368,39 @@ func TestComputeCRC32(t *testing.T) {
 		t.Error("CRC32 should change with different payload")
 	}
 }
+
+func TestExtractBlockMS(t *testing.T) {
+	t.Run("Present", func(t *testing.T) {
+		opts := NewOptionsBuilder().
+			AddU8(OptPriority, 5).
+			AddU32(OptBlockMS, 30000).
+			AddFlag(OptIfNotExists).
+			Build()
+
+		if got := extractBlockMS(opts); got != 30000 {
+			t.Errorf("expected 30000, got %d", got)
+		}
+	})
+
+	t.Run("Absent", func(t *testing.T) {
+		opts := NewOptionsBuilder().
+			AddU8(OptPriority, 5).
+			Build()
+
+		if got := extractBlockMS(opts); got != 0 {
+			t.Errorf("expected 0, got %d", got)
+		}
+	})
+
+	t.Run("Nil", func(t *testing.T) {
+		if got := extractBlockMS(nil); got != 0 {
+			t.Errorf("expected 0, got %d", got)
+		}
+	})
+
+	t.Run("Empty", func(t *testing.T) {
+		if got := extractBlockMS([]byte{}); got != 0 {
+			t.Errorf("expected 0, got %d", got)
+		}
+	})
+}

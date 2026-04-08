@@ -56,6 +56,21 @@ func (b *OptionsBuilder) Build() []byte {
 	return b.buf
 }
 
+// extractBlockMS scans TLV-encoded options for OptBlockMS (0x17) and returns
+// its value in milliseconds. Returns 0 if not found.
+func extractBlockMS(options []byte) uint32 {
+	for i := 0; i+1 < len(options); {
+		tag := options[i]
+		length := int(options[i+1])
+		i += 2
+		if tag == byte(OptBlockMS) && length == 4 && i+4 <= len(options) {
+			return binary.LittleEndian.Uint32(options[i : i+4])
+		}
+		i += length
+	}
+	return 0
+}
+
 // computeCRC32 computes CRC32 for header (excluding crc32 field) + payload.
 func computeCRC32(header, payload []byte) uint32 {
 	h := crc32.NewIEEE()

@@ -279,9 +279,15 @@ func (c *Client) sendRequest(opCode OpCode, namespace string, key, value, option
 		log.Printf("[flo] -> %d ns=%s key=%q", opCode, namespace, key)
 	}
 
-	// Set timeout
+	// Set timeout — extend deadline for blocking operations (Stream Read,
+	// Queue Dequeue, Action Await) so the TCP deadline doesn't fire before
+	// the server's blocking period expires.
 	if c.timeout > 0 {
-		c.conn.SetDeadline(time.Now().Add(c.timeout))
+		deadline := c.timeout
+		if blockMS := extractBlockMS(options); blockMS > 0 {
+			deadline += time.Duration(blockMS) * time.Millisecond
+		}
+		c.conn.SetDeadline(time.Now().Add(deadline))
 	}
 
 	// Send request
