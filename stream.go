@@ -370,7 +370,8 @@ func parseStreamReadResponse(data []byte) (*StreamReadResult, error) {
 		keyPresent := data[pos]
 		pos += 1
 
-		// Skip key if present
+		// Read key (stream name) if present
+		var streamName string
 		if keyPresent != 0 {
 			if pos+4 > len(data) {
 				return nil, fmt.Errorf("incomplete stream record: missing key length")
@@ -380,6 +381,7 @@ func parseStreamReadResponse(data []byte) (*StreamReadResult, error) {
 			if pos+int(keyLen) > len(data) {
 				return nil, fmt.Errorf("incomplete stream record: missing key data")
 			}
+			streamName = string(data[pos : pos+int(keyLen)])
 			pos += int(keyLen)
 		}
 
@@ -397,11 +399,40 @@ func parseStreamReadResponse(data []byte) (*StreamReadResult, error) {
 		copy(payload, data[pos:pos+int(payloadLen)])
 		pos += int(payloadLen)
 
-		// Skip header_count (TODO: parse headers)
+		// Read headers: [header_count:u32]([key_len:u32][key][val_len:u32][val])*
 		if pos+4 > len(data) {
 			return nil, fmt.Errorf("incomplete stream record: missing header count")
 		}
+		headerCount := binary.LittleEndian.Uint32(data[pos:])
 		pos += 4
+
+		var headers map[string]string
+		if headerCount > 0 {
+			headers = make(map[string]string, headerCount)
+			for h := uint32(0); h < headerCount; h++ {
+				if pos+4 > len(data) {
+					return nil, fmt.Errorf("incomplete stream record: missing header key length")
+				}
+				hKeyLen := binary.LittleEndian.Uint32(data[pos:])
+				pos += 4
+				if pos+int(hKeyLen) > len(data) {
+					return nil, fmt.Errorf("incomplete stream record: missing header key")
+				}
+				hKey := string(data[pos : pos+int(hKeyLen)])
+				pos += int(hKeyLen)
+				if pos+4 > len(data) {
+					return nil, fmt.Errorf("incomplete stream record: missing header value length")
+				}
+				hValLen := binary.LittleEndian.Uint32(data[pos:])
+				pos += 4
+				if pos+int(hValLen) > len(data) {
+					return nil, fmt.Errorf("incomplete stream record: missing header value")
+				}
+				hVal := string(data[pos : pos+int(hValLen)])
+				pos += int(hValLen)
+				headers[hKey] = hVal
+			}
+		}
 
 		records = append(records, StreamRecord{
 			ID: StreamID{
@@ -409,8 +440,9 @@ func parseStreamReadResponse(data []byte) (*StreamReadResult, error) {
 				Sequence:    sequence,
 			},
 			Tier:    tier,
+			Stream:  streamName,
 			Payload: payload,
-			Headers: nil,
+			Headers: headers,
 		})
 	}
 

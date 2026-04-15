@@ -537,6 +537,7 @@ const (
 type StreamRecord struct {
 	ID      StreamID
 	Tier    StorageTier
+	Stream  string
 	Payload []byte
 	Headers map[string]string
 }
