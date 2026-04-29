@@ -71,25 +71,35 @@ const (
 	OpClusterMembersResponse OpCode = 0x041
 	OpClusterJoinResponse    OpCode = 0x042
 
-	// ── KV + Transactions + Snapshots (0x100 – 0x12F) ──
-	OpKVPut                    OpCode = 0x100
-	OpKVGet                    OpCode = 0x101
-	OpKVMGet                   OpCode = 0x102
-	OpKVDelete                 OpCode = 0x103
-	OpKVScan                   OpCode = 0x104
-	OpKVHistory                OpCode = 0x105
-	OpKVGetResponse            OpCode = 0x106
-	OpKVMGetResponse           OpCode = 0x107
-	OpKVPutResponse            OpCode = 0x108
-	OpKVScanResponse           OpCode = 0x109
-	OpKVHistoryResponse        OpCode = 0x10A
-	OpKVBeginTxn               OpCode = 0x110
-	OpKVCommitTxn              OpCode = 0x111
-	OpKVRollbackTxn            OpCode = 0x112
-	OpKVSnapshotCreate         OpCode = 0x120
-	OpKVSnapshotGet            OpCode = 0x121
-	OpKVSnapshotRelease        OpCode = 0x122
-	OpKVSnapshotCreateResponse OpCode = 0x123
+	// ── KV (0x100 – 0x12F) ──
+	OpKVPut             OpCode = 0x100
+	OpKVGet             OpCode = 0x101
+	OpKVMGet            OpCode = 0x102
+	OpKVDelete          OpCode = 0x103
+	OpKVScan            OpCode = 0x104
+	OpKVHistory         OpCode = 0x105
+	OpKVGetResponse     OpCode = 0x106
+	OpKVMGetResponse    OpCode = 0x107
+	OpKVPutResponse     OpCode = 0x108
+	OpKVScanResponse    OpCode = 0x109
+	OpKVHistoryResponse OpCode = 0x10A
+	// KV Extended (atomic counters, JSON ops)
+	OpKVIncr    OpCode = 0x10B
+	OpKVJsonGet OpCode = 0x10C
+	OpKVJsonSet OpCode = 0x10D
+	OpKVJsonDel OpCode = 0x10E
+	// KV Per-Shard Transactions
+	OpKVBeginTxn    OpCode = 0x110
+	OpKVCommitTxn   OpCode = 0x111
+	OpKVRollbackTxn OpCode = 0x112
+	// KV Extended (TTL lifecycle, exists)
+	OpKVTouch          OpCode = 0x113
+	OpKVPersist        OpCode = 0x114
+	OpKVExists         OpCode = 0x115
+	OpKVIncrResponse   OpCode = 0x116
+	OpKVJsonResponse   OpCode = 0x117
+	OpKVExistsResponse OpCode = 0x118
+	OpKVTxnResponse    OpCode = 0x119
 
 	// ── Streams (0x130 – 0x14F) ──
 	OpStreamAppend         OpCode = 0x130
@@ -302,6 +312,7 @@ const (
 	OptKeysOnly    OptionTag = 0x06 // u8: Skip values in scan response (0/1)
 	OptCursor      OptionTag = 0x07 // bytes: Pagination cursor (ShardWalker format)
 	OptRoutingKey  OptionTag = 0x08 // string: Explicit routing key for shard co-location
+	OptTxnID       OptionTag = 0x09 // u64: Transaction ID for per-shard transactions
 
 	// Queue Options (0x10 - 0x1F)
 	OptPriority            OptionTag = 0x10 // u8: Message priority (0-255, higher = more urgent)
@@ -386,6 +397,51 @@ type VersionEntry struct {
 	Version   uint64
 	Timestamp int64
 	Value     []byte
+}
+
+// PutResult is returned by KV writes that succeed. The Version field is the
+// new version assigned to the key by the server, suitable for CAS on the next
+// write via PutOptions.CASVersion.
+type PutResult struct {
+	Version uint64
+}
+
+// KVBeginResult is returned by a successful KV transaction begin. TxnID is the
+// server-assigned transaction handle (use it on subsequent ops via
+// KVTransaction). PinnedHash is the partition hash that the transaction is
+// bound to — every op inside the transaction must hash to the same partition.
+type KVBeginResult struct {
+	TxnID      uint64
+	PinnedHash uint64
+}
+
+// KVCommitResult is returned by a successful KV transaction commit. CommitIndex
+// is the Raft log index of the committed batch; OpCount is the number of
+// buffered operations that were applied atomically.
+type KVCommitResult struct {
+	CommitIndex uint64
+	OpCount     uint16
+}
+
+// GetResult is returned by KV reads that find a key. Get returns nil when the
+// key is missing; callers should check for nil before dereferencing.
+type GetResult struct {
+	Value   []byte
+	Version uint64
+}
+
+// MGetEntry is one entry in an MGet response. Found is false when the key did
+// not exist; in that case Value is nil and Version is 0.
+type MGetEntry struct {
+	Key     string
+	Value   []byte
+	Version uint64
+	Found   bool
+}
+
+// KVMGetOptions contains options for KV MGet operations.
+type KVMGetOptions struct {
+	Namespace string
 }
 
 // Message represents a queue message.
