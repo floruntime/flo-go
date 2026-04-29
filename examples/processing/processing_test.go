@@ -507,7 +507,7 @@ func TestKVEnrichmentPipeline(t *testing.T) {
 		"account:acct-003": `{"tier":"bronze","region":"ap-south"}`,
 	}
 	for k, v := range accounts {
-		if err := client.KV.Put(k, []byte(v), nil); err != nil {
+		if _, err := client.KV.Put(k, []byte(v), nil); err != nil {
 			t.Fatalf("KV Put %s failed: %v", k, err)
 		}
 	}

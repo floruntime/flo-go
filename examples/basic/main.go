@@ -28,21 +28,22 @@ func main() {
 	fmt.Println("\n=== KV Operations ===")
 
 	// Put a value
-	if err := client.KV.Put("user:123", []byte("John Doe"), nil); err != nil {
+	putResult, err := client.KV.Put("user:123", []byte("John Doe"), nil)
+	if err != nil {
 		log.Fatalf("Put failed: %v", err)
 	}
-	fmt.Println("Put user:123")
+	fmt.Printf("Put user:123 (version=%d)\n", putResult.Version)
 
 	// Get the value
-	value, err := client.KV.Get("user:123", nil)
+	got, err := client.KV.Get("user:123", nil)
 	if err != nil {
 		log.Fatalf("Get failed: %v", err)
 	}
-	fmt.Printf("Get user:123 = %s\n", value)
+	fmt.Printf("Get user:123 = %s (version=%d)\n", got.Value, got.Version)
 
 	// Put with TTL
 	ttl := uint64(3600) // 1 hour
-	if err := client.KV.Put("session:abc", []byte("session-data"), &flo.PutOptions{
+	if _, err := client.KV.Put("session:abc", []byte("session-data"), &flo.PutOptions{
 		TTLSeconds: &ttl,
 	}); err != nil {
 		log.Fatalf("Put with TTL failed: %v", err)
@@ -51,7 +52,7 @@ func main() {
 
 	// Put with CAS (optimistic locking)
 	casVersion := uint64(1)
-	err = client.KV.Put("counter", []byte("2"), &flo.PutOptions{
+	_, err = client.KV.Put("counter", []byte("2"), &flo.PutOptions{
 		CASVersion: &casVersion,
 	})
 	if err != nil {
@@ -93,11 +94,11 @@ func main() {
 	fmt.Println("Deleted user:123")
 
 	// Get returns nil for non-existent key
-	value, err = client.KV.Get("nonexistent", nil)
+	missing, err := client.KV.Get("nonexistent", nil)
 	if err != nil {
 		log.Fatalf("Get failed: %v", err)
 	}
-	if value == nil {
+	if missing == nil {
 		fmt.Println("Key 'nonexistent' not found (as expected)")
 	}
 
