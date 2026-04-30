@@ -473,6 +473,10 @@ type PutOptions struct {
 // DeleteOptions contains options for KV delete operations.
 type DeleteOptions struct {
 	Namespace string
+	// IfMatch — if non-nil, the delete only succeeds when the current key
+	// version equals *IfMatch. Returns ErrCASFailed otherwise. Use this for
+	// race-free "only the owner deletes" patterns (locks, leases, claims).
+	IfMatch *uint64
 }
 
 // ScanOptions contains options for KV scan operations.

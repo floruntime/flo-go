@@ -169,15 +169,23 @@ func (kv *KVClient) MGet(keys []string, opts *KVMGetOptions) ([]MGetEntry, error
 }
 
 // Delete removes a key.
-// This operation succeeds even if the key doesn't exist.
+// This operation succeeds even if the key doesn't exist (unless IfMatch is set,
+// in which case a missing key is treated as a CAS mismatch with version 0).
 func (kv *KVClient) Delete(key string, opts *DeleteOptions) error {
 	if opts == nil {
 		opts = &DeleteOptions{}
 	}
 	namespace := kv.client.getNamespace(opts.Namespace)
 
-	// Delete succeeds for both OK and NOT_FOUND
-	_, err := kv.client.sendAndCheck(OpKVDelete, namespace, []byte(key), nil, nil, true)
+	var options []byte
+	if opts.IfMatch != nil {
+		builder := NewOptionsBuilder()
+		builder.AddU64(OptCASVersion, *opts.IfMatch)
+		options = builder.Build()
+	}
+
+	// Delete succeeds for both OK and NOT_FOUND (when IfMatch is unset).
+	_, err := kv.client.sendAndCheck(OpKVDelete, namespace, []byte(key), nil, options, true)
 	return err
 }
 
@@ -274,6 +282,10 @@ func (kv *KVClient) Incr(key string, opts *KVIncrOptions) (int64, error) {
 // KVTouchOptions contains options for KV Touch / Persist operations.
 type KVTouchOptions struct {
 	Namespace string
+	// IfMatch — if non-nil, the touch/persist only succeeds when the current
+	// key version equals *IfMatch. Returns ErrCASFailed otherwise. Use this
+	// for race-free lease renewal ("only the owner extends the TTL").
+	IfMatch *uint64
 }
 
 // Touch updates the TTL on an existing key. ttlSeconds=0 clears the TTL
@@ -285,7 +297,15 @@ func (kv *KVClient) Touch(key string, ttlSeconds uint64, opts *KVTouchOptions) e
 	namespace := kv.client.getNamespace(opts.Namespace)
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], ttlSeconds)
-	_, err := kv.client.sendAndCheck(OpKVTouch, namespace, []byte(key), buf[:], nil, true)
+
+	var options []byte
+	if opts.IfMatch != nil {
+		builder := NewOptionsBuilder()
+		builder.AddU64(OptCASVersion, *opts.IfMatch)
+		options = builder.Build()
+	}
+
+	_, err := kv.client.sendAndCheck(OpKVTouch, namespace, []byte(key), buf[:], options, true)
 	return err
 }
 
@@ -296,7 +316,15 @@ func (kv *KVClient) Persist(key string, opts *KVTouchOptions) error {
 		opts = &KVTouchOptions{}
 	}
 	namespace := kv.client.getNamespace(opts.Namespace)
-	_, err := kv.client.sendAndCheck(OpKVPersist, namespace, []byte(key), nil, nil, true)
+
+	var options []byte
+	if opts.IfMatch != nil {
+		builder := NewOptionsBuilder()
+		builder.AddU64(OptCASVersion, *opts.IfMatch)
+		options = builder.Build()
+	}
+
+	_, err := kv.client.sendAndCheck(OpKVPersist, namespace, []byte(key), nil, options, true)
 	return err
 }
 
