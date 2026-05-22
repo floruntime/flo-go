@@ -10,6 +10,30 @@ type StreamClient struct {
 	client *Client
 }
 
+// buildStreamBatchValue frames a single record into the batch wire format the
+// server's stream_append handler expects. A single append is a batch of one:
+//
+//	[record_count:u32=1][payload_len:u32][payload]
+//	[header_count:u16]([key_len:u16][key][val_len:u16][val])*
+func buildStreamBatchValue(payload []byte, headers map[string]string) []byte {
+	size := 4 + 4 + len(payload) + 2
+	for k, v := range headers {
+		size += 2 + len(k) + 2 + len(v)
+	}
+	buf := make([]byte, 0, size)
+	buf = binary.LittleEndian.AppendUint32(buf, 1) // record_count
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(payload)))
+	buf = append(buf, payload...)
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(headers)))
+	for k, v := range headers {
+		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(k)))
+		buf = append(buf, k...)
+		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(v)))
+		buf = append(buf, v...)
+	}
+	return buf
+}
+
 // Append appends a record to a stream.
 func (s *StreamClient) Append(stream string, payload []byte, opts *StreamAppendOptions) (*StreamAppendResult, error) {
 	if opts == nil {
@@ -18,7 +42,12 @@ func (s *StreamClient) Append(stream string, payload []byte, opts *StreamAppendO
 
 	namespace := s.client.getNamespace(opts.Namespace)
 
-	resp, err := s.client.sendAndCheck(OpStreamAppend, namespace, []byte(stream), payload, nil, true)
+	// The server's stream_append expects the value batch-framed (a single
+	// append is a batch of one record); raw payloads are stored but read back
+	// as zero records.
+	value := buildStreamBatchValue(payload, opts.Headers)
+
+	resp, err := s.client.sendAndCheck(OpStreamAppend, namespace, []byte(stream), value, nil, true)
 	if err != nil {
 		return nil, err
 	}
