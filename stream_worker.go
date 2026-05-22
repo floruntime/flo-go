@@ -45,6 +45,12 @@ type StreamWorkerOptions struct {
 	// MessageTimeout defines the maximum duration allowed for a message handler.
 	MessageTimeout time.Duration
 
+	// NetworkTimeout is the TCP connect and per-request timeout for the
+	// worker's connection. Blocking reads extend it by BlockMS automatically,
+	// so it only needs to cover a normal request round-trip. Defaults to the
+	// parent client's timeout (it is NOT tied to MessageTimeout).
+	NetworkTimeout time.Duration
+
 	// Logger for worker output (optional, defaults to log.Printf).
 	Logger Logger
 }
@@ -169,6 +175,11 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 	if opts.MessageTimeout == 0 {
 		opts.MessageTimeout = 5 * time.Minute
 	}
+	if opts.NetworkTimeout == 0 {
+		// Inherit the parent client's timeout — NOT MessageTimeout, which is
+		// the handler execution budget and unrelated to the network deadline.
+		opts.NetworkTimeout = c.timeout
+	}
 	if opts.Logger == nil {
 		opts.Logger = &streamStdLogger{}
 	}
@@ -191,7 +202,7 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 
 	workerClient := NewClient(c.endpoint,
 		WithNamespace(c.namespace),
-		WithTimeout(opts.MessageTimeout),
+		WithTimeout(opts.NetworkTimeout),
 		WithDebug(c.debug),
 	)
 
@@ -221,11 +232,11 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 	sw.logger.Printf("Starting stream worker (id=%s, streams=%v, group=%s, consumer=%s)",
 		sw.config.WorkerID, sw.streams, sw.config.Group, sw.config.Consumer)
 
-	// Join consumer group on each stream
-	for _, stream := range sw.streams {
-		if err := sw.client.Stream.GroupJoin(stream, sw.config.Group, sw.config.Consumer, nil); err != nil {
-			return fmt.Errorf("failed to join consumer group on stream %s: %w", stream, err)
-		}
+	// Join consumer group on each stream. Connection errors here (a stalled
+	// or dropped connection at startup) are retried with reconnect rather
+	// than killing the worker — mirroring the poll loop and ackWithRetry.
+	if err := sw.joinGroups(); err != nil {
+		return err
 	}
 
 	// Register in worker registry with a process entry per stream
@@ -301,6 +312,35 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 		}
 	}
 	return sw.ctx.Err()
+}
+
+// joinGroups joins the consumer group on every configured stream.
+//
+// A connection error (a stalled or dropped connection at startup) triggers a
+// reconnect-and-retry instead of failing the worker — handleReconnect retries
+// with backoff until the context is cancelled. Non-connection errors (e.g. an
+// invalid request) remain fatal and are returned immediately.
+func (sw *StreamWorker) joinGroups() error {
+	for _, stream := range sw.streams {
+		for {
+			if sw.ctx.Err() != nil {
+				return sw.ctx.Err()
+			}
+			err := sw.client.Stream.GroupJoin(stream, sw.config.Group, sw.config.Consumer, nil)
+			if err == nil {
+				break
+			}
+			if !IsConnectionError(err) {
+				return fmt.Errorf("failed to join consumer group on stream %s: %w", stream, err)
+			}
+			sw.logger.Printf("[%s] Connection lost during group join: %v, reconnecting...", stream, err)
+			if reconErr := sw.handleReconnect(); reconErr != nil && sw.ctx.Err() != nil {
+				return sw.ctx.Err()
+			}
+			time.Sleep(time.Second)
+		}
+	}
+	return nil
 }
 
 // pollStream runs a single stream's poll loop.
