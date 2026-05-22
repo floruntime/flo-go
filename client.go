@@ -204,7 +204,28 @@ func (c *Client) Namespace() string {
 }
 
 // parseEndpoint parses an endpoint string into host and port.
+//
+// An optional URI scheme is accepted: "flo://" (plaintext) is stripped, bare
+// "host:port" remains valid, "flos://" (TLS) is reserved but not yet
+// implemented, and any other scheme is rejected so it fails here rather than
+// as a confusing DNS error at dial time.
 func parseEndpoint(endpoint string) (string, int, error) {
+	if idx := strings.Index(endpoint, "://"); idx != -1 {
+		scheme := strings.ToLower(endpoint[:idx])
+		switch scheme {
+		case "flo":
+			// Drop the scheme and any trailing path/query (reserved for future use).
+			endpoint = endpoint[idx+3:]
+			if slash := strings.IndexByte(endpoint, '/'); slash != -1 {
+				endpoint = endpoint[:slash]
+			}
+		case "flos":
+			return "", 0, fmt.Errorf("%w: %s (flos:// TLS is not yet supported)", ErrInvalidEndpoint, endpoint)
+		default:
+			return "", 0, fmt.Errorf("%w: %s (unsupported scheme %q://, expected flo:// or bare host:port)", ErrInvalidEndpoint, endpoint, scheme)
+		}
+	}
+
 	// Handle IPv6 addresses in brackets
 	if strings.HasPrefix(endpoint, "[") {
 		idx := strings.LastIndex(endpoint, "]:")
