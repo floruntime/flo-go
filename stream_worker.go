@@ -263,6 +263,11 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 	sw.logger.Printf("Starting stream worker (id=%s, streams=%v, group=%s, consumer=%s)",
 		sw.config.WorkerID, sw.streams, sw.config.Group, sw.config.Consumer)
 
+	// Semaphore must exist before joinGroups: a connection error during join
+	// calls handleReconnect → drainPending, which acquires sw.sem.
+	sw.sem = make(chan struct{}, sw.config.Concurrency)
+	sem := sw.sem
+
 	// Join consumer group on each stream. Connection errors here (a stalled
 	// or dropped connection at startup) are retried with reconnect rather
 	// than killing the worker — mirroring the poll loop and ackWithRetry.
@@ -292,10 +297,6 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 	} else {
 		defer wc.Deregister(nil)
 	}
-
-	// Shared concurrency semaphore across all streams
-	sem := make(chan struct{}, sw.config.Concurrency)
-	sw.sem = sem
 
 	// Start heartbeat
 	go func() {
@@ -484,6 +485,11 @@ func (sw *StreamWorker) handleReconnect() error {
 // a pathological backlog can't wedge the reconnect indefinitely; remaining
 // entries are picked up on the next reconnect or by GroupRead once acked.
 func (sw *StreamWorker) drainPending() {
+	if sw.sem == nil {
+		// Start has not initialized the concurrency gate yet.
+		return
+	}
+
 	const maxPagesPerStream = 1000 // safety cap: maxPages * BatchSize entries
 
 	for _, stream := range sw.streams {
