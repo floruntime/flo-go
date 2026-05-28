@@ -226,7 +226,15 @@ func (s *StreamClient) GroupLeave(stream, group, consumer string, opts *StreamGr
 	return err
 }
 
-// GroupRead reads from a consumer group.
+// GroupRead reads new records from a consumer group, advancing the group's
+// last_delivered_id and adding the delivered records to the consumer's Pending
+// Entry List (PEL) until acked.
+//
+// Crash recovery: GroupRead alone is NOT sufficient. It only returns records
+// past last_delivered_id, so a record delivered-but-unacked at crash time is
+// never re-surfaced by a subsequent GroupRead. To re-process in-flight work
+// after a reconnect, drain the PEL with GroupClaim (StreamWorker does this
+// automatically — see RedeliverPendingOnReconnect).
 func (s *StreamClient) GroupRead(stream, group, consumer string, opts *StreamGroupReadOptions) (*StreamReadResult, error) {
 	if opts == nil {
 		opts = &StreamGroupReadOptions{}
