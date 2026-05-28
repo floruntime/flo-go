@@ -346,9 +346,13 @@ func (s *StreamClient) GroupClaim(stream, group, consumer string, minIdleMS uint
 	if err != nil {
 		return nil, err
 	}
+	return parseClaimResponse(resp.Data)
+}
 
-	// Response = <records blob> + [next_ts:u64][next_seq:u64] trailer.
-	data := resp.Data
+// parseClaimResponse decodes a stream_group_claim response:
+// <records blob> + [next_ts:u64][next_seq:u64] 16-byte cursor trailer.
+// A StreamID.MAX (max,max) cursor sets Done (PEL fully scanned).
+func parseClaimResponse(data []byte) (*StreamClaimResult, error) {
 	if len(data) < 16 {
 		return &StreamClaimResult{Records: []StreamRecord{}, Done: true}, nil
 	}
@@ -361,7 +365,6 @@ func (s *StreamClient) GroupClaim(stream, group, consumer string, minIdleMS uint
 		return nil, err
 	}
 
-	// StreamID.MAX (max,max) is the "fully scanned" sentinel.
 	done := nextTS == math.MaxUint64 && nextSeq == math.MaxUint64
 	return &StreamClaimResult{
 		Records:    read.Records,
