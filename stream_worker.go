@@ -51,6 +51,20 @@ type StreamWorkerOptions struct {
 	// parent client's timeout (it is NOT tied to MessageTimeout).
 	NetworkTimeout time.Duration
 
+	// RedeliverPendingOnReconnect controls whether the worker drains its
+	// consumer's pending (delivered-but-unacked) entries via GroupClaim after
+	// a reconnect, before resuming normal GroupRead. Defaults to true —
+	// bare GroupRead only returns records past last_delivered_id and will NOT
+	// re-surface in-flight work after a crash/reconnect, so this is required
+	// for at-least-once delivery across reconnects. Set false for at-most-once.
+	RedeliverPendingOnReconnect *bool
+
+	// ClaimMinIdleMS is the minimum idle time (ms) an entry must have before
+	// the reconnect drain claims it. Default 0 — drain everything this
+	// consumer already owns. Set > 0 to additionally steal entries abandoned
+	// by other (dead) consumers that have been idle at least this long.
+	ClaimMinIdleMS uint32
+
 	// Logger for worker output (optional, defaults to log.Printf).
 	Logger Logger
 }
@@ -128,6 +142,9 @@ type StreamWorker struct {
 	reconnectMu   sync.Mutex
 	lastReconnect time.Time
 
+	// Shared concurrency gate (set in Start); reused by the reconnect PEL drain.
+	sem chan struct{}
+
 	// Local counters (not sent in heartbeats — server tracks authoritatively)
 	messagesProcessed uint64
 	messagesFailed    uint64
@@ -151,6 +168,11 @@ func resolveStreams(opts StreamWorkerOptions) ([]string, error) {
 }
 
 // NewStreamWorker creates a new stream worker from an existing client.
+//
+// The worker always opens its own TCP connection (endpoint/namespace come from
+// the parent) so blocking GroupRead does not block other RPCs on the parent.
+// Avoid keeping a second idle connection to the same namespace while the
+// worker runs — see Flo server issue with concurrent connections per namespace.
 func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordHandler) (*StreamWorker, error) {
 	streams, err := resolveStreams(opts)
 	if err != nil {
@@ -180,6 +202,12 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 		// the handler execution budget and unrelated to the network deadline.
 		opts.NetworkTimeout = c.timeout
 	}
+	if opts.RedeliverPendingOnReconnect == nil {
+		// Default true: at-least-once across reconnects requires draining the
+		// PEL, since GroupRead alone only returns records past last_delivered_id.
+		dflt := true
+		opts.RedeliverPendingOnReconnect = &dflt
+	}
 	if opts.Logger == nil {
 		opts.Logger = &streamStdLogger{}
 	}
@@ -200,6 +228,9 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 		opts.Consumer = opts.WorkerID
 	}
 
+	// Dedicated connection so blocking GroupRead does not hold the parent
+	// client's mutex (mirrors ActionWorker). The parent can stay connected for
+	// other RPCs while the worker long-polls.
 	workerClient := NewClient(c.endpoint,
 		WithNamespace(c.namespace),
 		WithTimeout(opts.NetworkTimeout),
@@ -232,6 +263,11 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 	sw.logger.Printf("Starting stream worker (id=%s, streams=%v, group=%s, consumer=%s)",
 		sw.config.WorkerID, sw.streams, sw.config.Group, sw.config.Consumer)
 
+	// Semaphore must exist before joinGroups: a connection error during join
+	// calls handleReconnect → drainPending, which acquires sw.sem.
+	sw.sem = make(chan struct{}, sw.config.Concurrency)
+	sem := sw.sem
+
 	// Join consumer group on each stream. Connection errors here (a stalled
 	// or dropped connection at startup) are retried with reconnect rather
 	// than killing the worker — mirroring the poll loop and ackWithRetry.
@@ -261,9 +297,6 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 	} else {
 		defer wc.Deregister(nil)
 	}
-
-	// Shared concurrency semaphore across all streams
-	sem := make(chan struct{}, sw.config.Concurrency)
 
 	// Start heartbeat
 	go func() {
@@ -432,8 +465,65 @@ func (sw *StreamWorker) handleReconnect() error {
 		sw.logger.Printf("Warning: failed to re-register: %v", err)
 	}
 
+	// Redeliver this consumer's pending (delivered-but-unacked) entries before
+	// resuming normal reads. GroupRead only returns records past
+	// last_delivered_id, so without this an in-flight record at crash time is
+	// never re-surfaced. See RedeliverPendingOnReconnect.
+	if sw.config.RedeliverPendingOnReconnect != nil && *sw.config.RedeliverPendingOnReconnect {
+		sw.drainPending()
+	}
+
 	sw.logger.Printf("Reconnected, resuming work")
 	return nil
+}
+
+// drainPending re-processes this consumer's pending (delivered-but-unacked)
+// entries via a GroupClaim cursor loop, for every subscribed stream, before
+// normal GroupRead resumes. Records go through the same processRecord path
+// (and concurrency gate) as live reads, so a handler that succeeds will ack
+// and clear the entry from the PEL. Bounded per stream by a max page count so
+// a pathological backlog can't wedge the reconnect indefinitely; remaining
+// entries are picked up on the next reconnect or by GroupRead once acked.
+func (sw *StreamWorker) drainPending() {
+	if sw.sem == nil {
+		// Start has not initialized the concurrency gate yet.
+		return
+	}
+
+	const maxPagesPerStream = 1000 // safety cap: maxPages * BatchSize entries
+
+	for _, stream := range sw.streams {
+		cursor := StreamID{} // MIN — scan from the start of the PEL
+		pages := 0
+		for {
+			if sw.ctx.Err() != nil {
+				return
+			}
+			res, err := sw.client.Stream.GroupClaim(
+				stream, sw.config.Group, sw.config.Consumer,
+				sw.config.ClaimMinIdleMS, cursor, sw.config.BatchSize, nil,
+			)
+			if err != nil {
+				// Don't fail the reconnect on a drain error; normal reads resume.
+				sw.logger.Printf("[%s] pending drain claim failed: %v", stream, err)
+				break
+			}
+			for _, record := range res.Records {
+				sw.sem <- struct{}{} // same concurrency gate as live reads
+				// Pass stream + record explicitly: under Go 1.21 the range
+				// variables are shared across iterations.
+				go func(st string, rec StreamRecord) {
+					defer func() { <-sw.sem }()
+					sw.processRecord(st, rec)
+				}(stream, record)
+			}
+			pages++
+			if res.Done || len(res.Records) == 0 || pages >= maxPagesPerStream {
+				break
+			}
+			cursor = res.NextCursor
+		}
+	}
 }
 
 // processRecord handles a single record with ack/nack.
@@ -510,7 +600,7 @@ func (sw *StreamWorker) Stop() {
 	}
 }
 
-// Close closes the connection.
+// Close stops the worker and closes its dedicated connection.
 func (sw *StreamWorker) Close() error {
 	sw.Stop()
 	if sw.client != nil {

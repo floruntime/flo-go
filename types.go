@@ -615,6 +615,25 @@ type StreamReadResult struct {
 	Records []StreamRecord
 }
 
+// PendingEntry describes one entry in a consumer group's Pending Entry List
+// (delivered-but-unacked message).
+type PendingEntry struct {
+	ID            StreamID
+	Consumer      string
+	DeliveryCount uint32
+}
+
+// StreamClaimResult is the result of a GroupClaim cursor page (FLO-102).
+//
+// Records carry payload + headers (same shape as GroupRead). NextCursor is the
+// start_id to pass on the next GroupClaim call; when Done is true the PEL has
+// been fully scanned and the loop should stop.
+type StreamClaimResult struct {
+	Records    []StreamRecord
+	NextCursor StreamID
+	Done       bool
+}
+
 // StreamAppendResult represents the result of a stream append operation.
 type StreamAppendResult struct {
 	ID StreamID
