@@ -16,6 +16,8 @@ func main() {
 	client := flo.NewClient(getEnv("FLO_ENDPOINT", "localhost:3000"),
 		flo.WithNamespace(getEnv("FLO_NAMESPACE", "myapp")),
 	)
+	// Parent connection: use for setup, health checks, or other RPCs while the worker runs.
+	// StreamWorker opens its own connection for blocking group reads.
 	if err := client.Connect(); err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}

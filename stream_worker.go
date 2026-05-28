@@ -151,6 +151,11 @@ func resolveStreams(opts StreamWorkerOptions) ([]string, error) {
 }
 
 // NewStreamWorker creates a new stream worker from an existing client.
+//
+// The worker always opens its own TCP connection (endpoint/namespace come from
+// the parent) so blocking GroupRead does not block other RPCs on the parent.
+// Avoid keeping a second idle connection to the same namespace while the
+// worker runs — see Flo server issue with concurrent connections per namespace.
 func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordHandler) (*StreamWorker, error) {
 	streams, err := resolveStreams(opts)
 	if err != nil {
@@ -200,6 +205,9 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 		opts.Consumer = opts.WorkerID
 	}
 
+	// Dedicated connection so blocking GroupRead does not hold the parent
+	// client's mutex (mirrors ActionWorker). The parent can stay connected for
+	// other RPCs while the worker long-polls.
 	workerClient := NewClient(c.endpoint,
 		WithNamespace(c.namespace),
 		WithTimeout(opts.NetworkTimeout),
@@ -510,7 +518,7 @@ func (sw *StreamWorker) Stop() {
 	}
 }
 
-// Close closes the connection.
+// Close stops the worker and closes its dedicated connection.
 func (sw *StreamWorker) Close() error {
 	sw.Stop()
 	if sw.client != nil {

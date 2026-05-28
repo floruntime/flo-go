@@ -144,13 +144,11 @@ func (c *Client) Reconnect() error {
 // the connection succeeds or the context is cancelled.
 func (c *Client) ReconnectWithContext(ctx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Close existing connection
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
 	}
+	c.mu.Unlock()
 
 	host, port, err := parseEndpoint(c.endpoint)
 	if err != nil {
@@ -171,7 +169,9 @@ func (c *Client) ReconnectWithContext(ctx context.Context) error {
 		dialer := net.Dialer{Timeout: c.timeout}
 		conn, dialErr := dialer.DialContext(ctx, "tcp", addr)
 		if dialErr == nil {
+			c.mu.Lock()
 			c.conn = conn
+			c.mu.Unlock()
 			if c.debug {
 				log.Printf("[flo] Reconnected to %s (attempt %d)", c.endpoint, attempt)
 			}
