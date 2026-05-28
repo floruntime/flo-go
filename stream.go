@@ -3,6 +3,7 @@ package flo
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 )
 
 // StreamClient provides stream operations.
@@ -262,6 +263,147 @@ func (s *StreamClient) GroupRead(stream, group, consumer string, opts *StreamGro
 	}
 
 	return parseStreamReadResponse(resp.Data)
+}
+
+// GroupPending lists a consumer group's pending (delivered-but-unacked)
+// entries. If consumer is non-empty, only that consumer's entries are returned;
+// otherwise the whole group's PEL is returned. (FLO-102)
+func (s *StreamClient) GroupPending(stream, group, consumer string, opts *StreamGroupReadOptions) ([]PendingEntry, error) {
+	if opts == nil {
+		opts = &StreamGroupReadOptions{}
+	}
+	namespace := s.client.getNamespace(opts.Namespace)
+
+	// Wire: [group_len:u16][group]([consumer_len:u16][consumer])?
+	size := 2 + len(group)
+	if consumer != "" {
+		size += 2 + len(consumer)
+	}
+	value := make([]byte, size)
+	offset := 0
+	binary.LittleEndian.PutUint16(value[offset:], uint16(len(group)))
+	offset += 2
+	copy(value[offset:], group)
+	offset += len(group)
+	if consumer != "" {
+		binary.LittleEndian.PutUint16(value[offset:], uint16(len(consumer)))
+		offset += 2
+		copy(value[offset:], consumer)
+	}
+
+	resp, err := s.client.sendAndCheck(OpStreamGroupPending, namespace, []byte(stream), value, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	return parsePendingEntries(resp.Data)
+}
+
+// GroupClaim claims a page of a consumer group's pending entries for `consumer`,
+// scanning the PEL in StreamID order from `startID` and taking up to `count`
+// entries idle for at least `minIdleMS`. Returns the claimed records (payload +
+// headers) plus a cursor for the next page. (FLO-102)
+//
+//   - Drain own pending (reconnect): minIdleMS = 0, startID = StreamID{}.
+//   - Steal from idle consumers (rebalance): minIdleMS > 0.
+//
+// Loop until result.Done to fully drain:
+//
+//	cursor := StreamID{}
+//	for {
+//	    r, err := c.Stream.GroupClaim(stream, group, consumer, 0, cursor, 100, nil)
+//	    if err != nil { return err }
+//	    for _, rec := range r.Records { process(rec) }
+//	    if r.Done || len(r.Records) == 0 { break }
+//	    cursor = r.NextCursor
+//	}
+func (s *StreamClient) GroupClaim(stream, group, consumer string, minIdleMS uint32, startID StreamID, count uint32, opts *StreamGroupReadOptions) (*StreamClaimResult, error) {
+	if opts == nil {
+		opts = &StreamGroupReadOptions{}
+	}
+	namespace := s.client.getNamespace(opts.Namespace)
+
+	// Wire: [group_len:u16][group][consumer_len:u16][consumer]
+	//       [min_idle_ms:u32][start_ts:u64][start_seq:u64][count:u32]
+	value := make([]byte, 2+len(group)+2+len(consumer)+4+8+8+4)
+	offset := 0
+	binary.LittleEndian.PutUint16(value[offset:], uint16(len(group)))
+	offset += 2
+	copy(value[offset:], group)
+	offset += len(group)
+	binary.LittleEndian.PutUint16(value[offset:], uint16(len(consumer)))
+	offset += 2
+	copy(value[offset:], consumer)
+	offset += len(consumer)
+	binary.LittleEndian.PutUint32(value[offset:], minIdleMS)
+	offset += 4
+	binary.LittleEndian.PutUint64(value[offset:], startID.TimestampMS)
+	offset += 8
+	binary.LittleEndian.PutUint64(value[offset:], startID.Sequence)
+	offset += 8
+	binary.LittleEndian.PutUint32(value[offset:], count)
+
+	resp, err := s.client.sendAndCheck(OpStreamGroupClaim, namespace, []byte(stream), value, nil, true)
+	if err != nil {
+		return nil, err
+	}
+
+	// Response = <records blob> + [next_ts:u64][next_seq:u64] trailer.
+	data := resp.Data
+	if len(data) < 16 {
+		return &StreamClaimResult{Records: []StreamRecord{}, Done: true}, nil
+	}
+	cursorOff := len(data) - 16
+	nextTS := binary.LittleEndian.Uint64(data[cursorOff:])
+	nextSeq := binary.LittleEndian.Uint64(data[cursorOff+8:])
+
+	read, err := parseStreamReadResponse(data[:cursorOff])
+	if err != nil {
+		return nil, err
+	}
+
+	// StreamID.MAX (max,max) is the "fully scanned" sentinel.
+	done := nextTS == math.MaxUint64 && nextSeq == math.MaxUint64
+	return &StreamClaimResult{
+		Records:    read.Records,
+		NextCursor: StreamID{TimestampMS: nextTS, Sequence: nextSeq},
+		Done:       done,
+	}, nil
+}
+
+// parsePendingEntries decodes the PEL wire format:
+// [count:u32]([ts:u64][seq:u64][delivery_count:u32][consumer_len:u16][consumer])*
+func parsePendingEntries(data []byte) ([]PendingEntry, error) {
+	if len(data) < 4 {
+		return []PendingEntry{}, nil
+	}
+	pos := 0
+	count := binary.LittleEndian.Uint32(data[pos:])
+	pos += 4
+	entries := make([]PendingEntry, 0, count)
+	for i := uint32(0); i < count; i++ {
+		if pos+8+8+4+2 > len(data) {
+			return nil, fmt.Errorf("incomplete pending entry")
+		}
+		ts := binary.LittleEndian.Uint64(data[pos:])
+		pos += 8
+		seq := binary.LittleEndian.Uint64(data[pos:])
+		pos += 8
+		dc := binary.LittleEndian.Uint32(data[pos:])
+		pos += 4
+		clen := int(binary.LittleEndian.Uint16(data[pos:]))
+		pos += 2
+		if pos+clen > len(data) {
+			return nil, fmt.Errorf("incomplete pending entry consumer")
+		}
+		consumer := string(data[pos : pos+clen])
+		pos += clen
+		entries = append(entries, PendingEntry{
+			ID:            StreamID{TimestampMS: ts, Sequence: seq},
+			Consumer:      consumer,
+			DeliveryCount: dc,
+		})
+	}
+	return entries, nil
 }
 
 // GroupAck acknowledges records in a consumer group.
