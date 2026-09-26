@@ -197,6 +197,9 @@ func (w *WorkerClient) Await(taskTypes []string, opts *WorkerAwaitOptions) (*Tas
 	// Build options for blocking/timeout
 	builder := NewOptionsBuilder()
 
+	if err := checkBlockMS(opts.BlockMS); err != nil {
+		return nil, err
+	}
 	if opts.BlockMS != nil {
 		builder.AddU32(OptBlockMS, *opts.BlockMS)
 	}

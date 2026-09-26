@@ -39,6 +39,11 @@ var (
 
 	// ErrValueTooLarge indicates the value exceeds maximum size.
 	ErrValueTooLarge = errors.New("flo: value too large (max 16 MB)")
+
+	// ErrBlockTooLong indicates a blocking wait (BlockMS / WaitMS) over
+	// MaxBlockMS. The server refuses it with bad_request, so the SDK refuses
+	// it first.
+	ErrBlockTooLong = errors.New("flo: a blocking wait (BlockMS/WaitMS) is at most 300000 ms (5 minutes)")
 )
 
 // ServerError represents an error returned by the Flo server.

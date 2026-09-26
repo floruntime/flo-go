@@ -2,6 +2,7 @@ package flo
 
 import (
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 )
 
@@ -54,6 +55,19 @@ func (b *OptionsBuilder) AddFlag(tag OptionTag) *OptionsBuilder {
 // Build returns the built options as bytes.
 func (b *OptionsBuilder) Build() []byte {
 	return b.buf
+}
+
+// MaxBlockMS is the longest blocking wait (BlockMS / WaitMS) the server
+// accepts: 5 minutes. 0 means don't wait.
+const MaxBlockMS uint32 = 300000
+
+// checkBlockMS refuses a blocking wait the server would refuse, before the
+// round trip. nil (no option) and 0 (don't wait) are fine.
+func checkBlockMS(blockMS *uint32) error {
+	if blockMS != nil && *blockMS > MaxBlockMS {
+		return fmt.Errorf("%w, got %d", ErrBlockTooLong, *blockMS)
+	}
+	return nil
 }
 
 // extractBlockMS scans TLV-encoded options for OptBlockMS (0x17) and returns

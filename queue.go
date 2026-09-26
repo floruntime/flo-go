@@ -51,6 +51,9 @@ func (q *QueueClient) Dequeue(queue string, count int, opts *DequeueOptions) (*D
 		builder.AddU32(OptVisibilityTimeoutMS, *opts.VisibilityTimeoutMS)
 	}
 
+	if err := checkBlockMS(opts.BlockMS); err != nil {
+		return nil, err
+	}
 	if opts.BlockMS != nil {
 		builder.AddU32(OptBlockMS, *opts.BlockMS)
 	}

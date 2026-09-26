@@ -39,7 +39,9 @@ type StreamWorkerOptions struct {
 	// BatchSize is the number of messages to read per poll (default: 10).
 	BatchSize uint32
 
-	// BlockMS is the timeout for blocking read (default: 30000).
+	// BlockMS is the long-poll wait per read, at most 300000 ms. 0 means the
+	// 30000 default: a worker always long-polls, since 0 (don't wait) would
+	// spin its poll loop against the server.
 	BlockMS uint32
 
 	// MessageTimeout defines the maximum duration allowed for a message handler.
@@ -193,6 +195,9 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 	}
 	if opts.BlockMS == 0 {
 		opts.BlockMS = 30000
+	}
+	if err := checkBlockMS(&opts.BlockMS); err != nil {
+		return nil, err
 	}
 	if opts.MessageTimeout == 0 {
 		opts.MessageTimeout = 5 * time.Minute
