@@ -30,6 +30,11 @@ const (
 	MaxNamespaceSize = 255
 	MaxKeySize       = 64 * 1024        // 64 KB
 	MaxValueSize     = 16 * 1024 * 1024 // 16 MB practical limit
+
+	// MaxBlockMS is the longest blocking wait (BlockMS) the server accepts.
+	MaxBlockMS uint32 = 300000 // 5 minutes
+
+	defaultWorkerBlockMS uint32 = 30000
 )
 
 // OpCode represents operation codes for Flo protocol requests.
@@ -322,8 +327,8 @@ const (
 	OptMaxRetries          OptionTag = 0x14 // u8: Maximum retry attempts before DLQ
 	OptCount               OptionTag = 0x15 // u32: Number of messages to dequeue
 	OptSendToDLQ           OptionTag = 0x16 // u8: Whether to send failed messages to DLQ (0/1)
-	OptBlockMS             OptionTag = 0x17 // u32: Blocking timeout for dequeue (0 = infinite)
-	OptWaitMS              OptionTag = 0x18 // u32: Watch timeout - wait for NEXT version change (0=forever)
+	OptBlockMS             OptionTag = 0x17 // u32: Blocking timeout (0 = don't wait, max 300000)
+	OptWaitMS              OptionTag = 0x18 // u32: Watch timeout - wait for NEXT version change (0 = don't wait, max 300000)
 
 	// Stream Options (0x20 - 0x2F) - StreamID-native ONLY
 	// All stream positioning uses StreamID (timestamp_ms + sequence) - no legacy offset/timestamp modes
@@ -458,7 +463,7 @@ type DequeueResult struct {
 // GetOptions contains options for KV get operations.
 type GetOptions struct {
 	Namespace string
-	BlockMS   *uint32 // Blocking timeout for long polling (nil = no blocking)
+	BlockMS   *uint32 // Long-poll wait (nil or 0 = don't wait, max 300000)
 }
 
 // PutOptions contains options for KV put operations.
@@ -505,7 +510,7 @@ type EnqueueOptions struct {
 type DequeueOptions struct {
 	Namespace           string
 	VisibilityTimeoutMS *uint32
-	BlockMS             *uint32
+	BlockMS             *uint32 // Long-poll wait (nil or 0 = don't wait, max 300000)
 }
 
 // AckOptions contains options for queue ack operations.
@@ -662,7 +667,7 @@ type StreamReadOptions struct {
 	Tail      bool      // Start from end of stream (mutually exclusive with Start)
 	Partition *uint32   // Explicit partition index
 	Count     *uint32   // Maximum number of records to return
-	BlockMS   *uint32   // Blocking timeout (0 = infinite)
+	BlockMS   *uint32   // Long-poll wait (nil or 0 = don't wait, max 300000)
 }
 
 // StreamTrimOptions contains options for stream trim operations.
@@ -688,7 +693,7 @@ type StreamGroupJoinOptions struct {
 type StreamGroupReadOptions struct {
 	Namespace string
 	Count     *uint32
-	BlockMS   *uint32
+	BlockMS   *uint32 // Long-poll wait (nil or 0 = don't wait, max 300000)
 }
 
 // StreamGroupAckOptions contains options for consumer group ack.
@@ -820,7 +825,7 @@ type ProcessStats struct {
 type WorkerAwaitOptions struct {
 	Namespace string
 	TimeoutMS *uint64
-	BlockMS   *uint32
+	BlockMS   *uint32 // Long-poll wait (nil or 0 = don't wait, max 300000)
 }
 
 // WorkerCompleteOptions contains options for action_complete.

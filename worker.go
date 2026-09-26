@@ -170,6 +170,9 @@ func (w *WorkerClient) Await(taskTypes []string, opts *WorkerAwaitOptions) (*Tas
 	if opts == nil {
 		opts = &WorkerAwaitOptions{}
 	}
+	if err := checkBlockMS(opts.BlockMS); err != nil {
+		return nil, err
+	}
 
 	namespace := w.client.getNamespace(opts.Namespace)
 

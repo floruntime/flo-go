@@ -29,7 +29,8 @@ type ActionWorkerOptions struct {
 	// ActionTimeout defines the maximum duration allowed for an action handler
 	ActionTimeout time.Duration
 
-	// BlockMS is the timeout for blocking dequeue (default: 30000)
+	// BlockMS is the long-poll wait per await, at most MaxBlockMS.
+	// 0 means the default (see workerBlockMS).
 	BlockMS uint32
 
 	// Logger for worker output (optional, defaults to log.Printf)
@@ -70,9 +71,11 @@ func (c *Client) NewActionWorker(opts ActionWorkerOptions) (*ActionWorker, error
 	if opts.ActionTimeout == 0 {
 		opts.ActionTimeout = 5 * time.Minute
 	}
-	if opts.BlockMS == 0 {
-		opts.BlockMS = 30000
+	blockMS, err := workerBlockMS(opts.BlockMS)
+	if err != nil {
+		return nil, err
 	}
+	opts.BlockMS = blockMS
 	if opts.Logger == nil {
 		opts.Logger = &stdLogger{}
 	}
