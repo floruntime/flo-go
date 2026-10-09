@@ -61,8 +61,8 @@ func (kv *KVClient) Put(key string, value []byte, opts *PutOptions) (PutResult, 
 
 	builder := NewOptionsBuilder()
 
-	if opts.TTLSeconds != nil {
-		builder.AddU64(OptTTLSeconds, *opts.TTLSeconds)
+	if opts.TTLMs != nil {
+		builder.AddU64(OptTTLMs, *opts.TTLMs)
 	}
 	if opts.CASVersion != nil {
 		builder.AddU64(OptCASVersion, *opts.CASVersion)
@@ -292,15 +292,15 @@ type KVTouchOptions struct {
 	IfMatch *uint64
 }
 
-// Touch updates the TTL on an existing key. ttlSeconds=0 clears the TTL
+// Touch sets the TTL on an existing key to ttlMs milliseconds; 0 clears the TTL
 // (equivalent to Persist). Returns ErrNotFound if the key does not exist.
-func (kv *KVClient) Touch(key string, ttlSeconds uint64, opts *KVTouchOptions) error {
+func (kv *KVClient) Touch(key string, ttlMs uint64, opts *KVTouchOptions) error {
 	if opts == nil {
 		opts = &KVTouchOptions{}
 	}
 	namespace := kv.client.getNamespace(opts.Namespace)
 	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], ttlSeconds)
+	binary.LittleEndian.PutUint64(buf[:], ttlMs)
 
 	var options []byte
 	if opts.IfMatch != nil {
