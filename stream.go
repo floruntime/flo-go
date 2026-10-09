@@ -281,7 +281,8 @@ func (s *StreamClient) GroupRead(stream, group, consumer string, opts *StreamGro
 
 // GroupPending lists a consumer group's pending (delivered-but-unacked)
 // entries. If consumer is non-empty, only that consumer's entries are returned;
-// otherwise the whole group's PEL is returned. (FLO-102)
+// otherwise the whole group's PEL is returned. Use it to inspect what a
+// crashed or slow consumer left unacked before claiming it with GroupClaim.
 func (s *StreamClient) GroupPending(stream, group, consumer string, opts *StreamGroupReadOptions) ([]PendingEntry, error) {
 	if opts == nil {
 		opts = &StreamGroupReadOptions{}
@@ -315,7 +316,8 @@ func (s *StreamClient) GroupPending(stream, group, consumer string, opts *Stream
 // GroupClaim claims a page of a consumer group's pending entries for `consumer`,
 // scanning the PEL in StreamID order from `startID` and taking up to `count`
 // entries idle for at least `minIdleMS`. Returns the claimed records (payload +
-// headers) plus a cursor for the next page. (FLO-102)
+// headers) plus a cursor for the next page, so a large PEL is drained in
+// bounded round trips.
 //
 //   - Drain own pending (reconnect): minIdleMS = 0, startID = StreamID{}.
 //   - Steal from idle consumers (rebalance): minIdleMS > 0.
