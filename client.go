@@ -46,7 +46,8 @@ func WithNamespace(namespace string) ClientOption {
 	}
 }
 
-// WithTimeout sets the connection and operation timeout.
+// WithTimeout sets the connection and operation timeout. After any I/O
+// error, including a timeout, calls return ErrNotConnected until Reconnect.
 func WithTimeout(timeout time.Duration) ClientOption {
 	return func(c *Client) {
 		c.timeout = timeout
@@ -131,7 +132,7 @@ func (c *Client) Close() error {
 // the caller should not reuse the client afterward without reconnecting.
 func (c *Client) Interrupt() {
 	// net.Conn.Close is safe to call concurrently and more than once.
-	if conn := c.live.Load(); conn != nil {
+	if conn := c.live.Swap(nil); conn != nil {
 		(*conn).Close()
 	}
 }
@@ -176,6 +177,15 @@ func (c *Client) ReconnectWithContext(ctx context.Context) error {
 		conn, dialErr := dialer.DialContext(ctx, "tcp", addr)
 		if dialErr == nil {
 			c.mu.Lock()
+			if c.live.Load() != nil {
+				// A concurrent reconnect got there first; keep its connection.
+				c.mu.Unlock()
+				conn.Close()
+				return nil
+			}
+			if c.conn != nil {
+				c.conn.Close() // interrupted, but not yet dropped by a request
+			}
 			c.conn = conn
 			c.live.Store(&conn)
 			c.mu.Unlock()
@@ -309,12 +319,13 @@ func (c *Client) sendRequest(opCode OpCode, namespace string, key, value, option
 	}
 
 	resp, err := c.exchange(request, options)
+	if err == nil && resp.RequestID != requestID {
+		err = fmt.Errorf("flo: response is for request %d, expected %d", resp.RequestID, requestID)
+	}
 	if err != nil {
-		// The server may still answer this request (for example after a
-		// client-side deadline). On a reused connection that late reply —
-		// possibly an already-claimed task or message — would be read as the
-		// next call's response, so the connection is dropped instead and
-		// callers see ErrNotConnected until they reconnect.
+		// The server may still answer this request (e.g. after a client-side
+		// deadline); on a reused connection that late reply would be read as
+		// the next call's response, so drop the connection.
 		c.conn.Close()
 		c.conn = nil
 		c.live.Store(nil)

@@ -301,7 +301,7 @@ if errors.Is(err, flo.ErrConnectionFailed) {
 
 ## Thread Safety
 
-The client uses a mutex to ensure thread-safe access to the connection. Multiple goroutines can safely use the same client instance.
+The client uses a mutex to ensure thread-safe access to the connection. Multiple goroutines can safely use the same client instance. After any I/O error, including a timeout, calls return `ErrNotConnected` until `Reconnect`.
 
 ## Example: Worker Pattern
 
