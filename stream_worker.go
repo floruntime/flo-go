@@ -386,6 +386,7 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 		case <-sw.ctx.Done():
 			return sw.ctx.Err()
 		default:
+			polled := time.Now()
 			result, err := sw.client.Stream.GroupRead(
 				stream, sw.config.Group, sw.config.Consumer,
 				&StreamGroupReadOptions{
@@ -409,6 +410,7 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 			}
 
 			if result == nil || len(result.Records) == 0 {
+				pauseAfterEmptyPoll(sw.ctx, polled, sw.config.BlockMS)
 				continue
 			}
 

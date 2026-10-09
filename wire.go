@@ -1,9 +1,11 @@
 package flo
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"time"
 )
 
 // OptionsBuilder builds TLV-encoded options.
@@ -74,6 +76,26 @@ func workerBlockMS(blockMS uint32) (uint32, error) {
 		return defaultWorkerBlockMS, nil
 	}
 	return blockMS, checkBlockMS(&blockMS)
+}
+
+// emptyPollPause is how long a worker waits before polling again after a
+// blocking poll came back empty well before its BlockMS. The server answers
+// a blocking read empty at once when it has no room to park it, so
+// re-polling straight away would spin against a server that is already full.
+const emptyPollPause = 100 * time.Millisecond
+
+// pauseAfterEmptyPoll applies emptyPollPause when a poll that started at
+// started with the given BlockMS returned nothing in under half that time.
+func pauseAfterEmptyPoll(ctx context.Context, started time.Time, blockMS uint32) {
+	if time.Since(started) >= time.Duration(blockMS)*time.Millisecond/2 {
+		return
+	}
+	t := time.NewTimer(emptyPollPause)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
 }
 
 // extractBlockMS scans TLV-encoded options for OptBlockMS (0x17) and returns

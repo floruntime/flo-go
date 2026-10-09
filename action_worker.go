@@ -242,6 +242,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 			sem <- struct{}{}
 
 			// Await task
+			polled := time.Now()
 			task, err := workerClient.Await(actionNames, &WorkerAwaitOptions{
 				BlockMS: &w.config.BlockMS,
 			})
@@ -276,6 +277,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 
 			if task == nil {
 				<-sem // Release slot - no task available
+				pauseAfterEmptyPoll(w.ctx, polled, w.config.BlockMS)
 				continue
 			}
 
