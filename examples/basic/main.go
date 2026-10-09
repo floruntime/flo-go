@@ -42,9 +42,9 @@ func main() {
 	fmt.Printf("Get user:123 = %s (version=%d)\n", got.Value, got.Version)
 
 	// Put with TTL
-	ttl := uint64(3600) // 1 hour
+	ttl := uint64(3_600_000) // 1 hour, in milliseconds
 	if _, err := client.KV.Put("session:abc", []byte("session-data"), &flo.PutOptions{
-		TTLSeconds: &ttl,
+		TTLMs: &ttl,
 	}); err != nil {
 		log.Fatalf("Put with TTL failed: %v", err)
 	}

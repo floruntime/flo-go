@@ -35,13 +35,13 @@ func TestOptionsBuilder(t *testing.T) {
 
 	t.Run("AddU64", func(t *testing.T) {
 		b := NewOptionsBuilder()
-		b.AddU64(OptTTLSeconds, 3600)
+		b.AddU64(OptTTLMs, 3_600_000)
 		result := b.Build()
 
 		expected := make([]byte, 10)
-		expected[0] = byte(OptTTLSeconds)
+		expected[0] = byte(OptTTLMs)
 		expected[1] = 8
-		binary.LittleEndian.PutUint64(expected[2:], 3600)
+		binary.LittleEndian.PutUint64(expected[2:], 3_600_000)
 
 		if !bytes.Equal(result, expected) {
 			t.Errorf("expected %v, got %v", expected, result)

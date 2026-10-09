@@ -309,7 +309,7 @@ type OptionTag uint8
 
 const (
 	// KV Options (0x01 - 0x0F)
-	OptTTLSeconds  OptionTag = 0x01 // u64: Time-to-live in seconds (0 = no expiration)
+	OptTTLMs       OptionTag = 0x01 // u64: Time-to-live in milliseconds (0 = no expiration)
 	OptCASVersion  OptionTag = 0x02 // u64: Expected version for compare-and-swap
 	OptIfNotExists OptionTag = 0x03 // void: Only set if key doesn't exist (NX)
 	OptIfExists    OptionTag = 0x04 // void: Only set if key exists (XX)
@@ -469,7 +469,7 @@ type GetOptions struct {
 // PutOptions contains options for KV put operations.
 type PutOptions struct {
 	Namespace   string
-	TTLSeconds  *uint64
+	TTLMs       *uint64 // Time-to-live in milliseconds (nil or 0 = no expiration)
 	CASVersion  *uint64
 	IfNotExists bool
 	IfExists    bool

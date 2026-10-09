@@ -104,9 +104,9 @@ value, err := client.KV.Get("key", &flo.GetOptions{
 err := client.KV.Put("key", []byte("value"), nil)
 
 // Put with TTL (expires in 1 hour)
-ttl := uint64(3600)
+ttl := uint64(3_600_000) // milliseconds
 err := client.KV.Put("key", []byte("value"), &flo.PutOptions{
-    TTLSeconds: &ttl,
+    TTLMs: &ttl,
 })
 
 // Put with CAS (optimistic locking)
