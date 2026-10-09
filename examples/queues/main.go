@@ -31,8 +31,8 @@ func main() {
 
 	// Simple enqueue
 	task1 := map[string]interface{}{
-		"task":   "send-email",
-		"to":     "user@example.com",
+		"task":    "send-email",
+		"to":      "user@example.com",
 		"subject": "Welcome!",
 	}
 	payload1, _ := json.Marshal(task1)
