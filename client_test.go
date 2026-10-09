@@ -304,6 +304,32 @@ func TestBadReplyDropsConnection(t *testing.T) {
 	}
 }
 
+// A request the server can't parse is refused with id 0; the caller gets the
+// server's error, not a request-id mismatch.
+func TestRefusalWithIDZeroKeepsServerError(t *testing.T) {
+	refusal := func(uint64) []byte {
+		f := fakeReply(0, "")
+		msg := []byte("Invalid request")
+		f = append(f[:HeaderSize], msg...)
+		binary.LittleEndian.PutUint32(f[4:8], uint32(len(msg)))
+		f[21] = byte(StatusBadRequest)
+		binary.LittleEndian.PutUint32(f[16:20], computeCRC32(f[:HeaderSize], msg))
+		return f
+	}
+	ln := serveAll(t, refusal)
+	c := NewClient(ln.Addr().String(), WithTimeout(time.Second))
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.KV.Get("k", nil); !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("got %v, want ErrBadRequest", err)
+	}
+	if c.IsConnected() {
+		t.Error("still connected after a refusal")
+	}
+}
+
 // eofServer answers one request with reply(id) and then closes the connection.
 func eofServer(t *testing.T, reply func(id uint64) []byte) net.Listener {
 	t.Helper()

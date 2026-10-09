@@ -320,7 +320,13 @@ func (c *Client) sendRequest(opCode OpCode, namespace string, key, value, option
 
 	resp, err := c.exchange(request, options)
 	if err == nil && resp.RequestID != requestID {
-		err = fmt.Errorf("flo: response is for request %d, expected %d", resp.RequestID, requestID)
+		if resp.RequestID == 0 && resp.Status != StatusOK {
+			// The server answers a request it can't parse with id 0, then
+			// closes the connection; its error says why.
+			err = newServerError(resp.Status, resp.Data)
+		} else {
+			err = fmt.Errorf("flo: response is for request %d, expected %d", resp.RequestID, requestID)
+		}
 	}
 	if err != nil {
 		// The server may still answer this request (e.g. after a client-side
