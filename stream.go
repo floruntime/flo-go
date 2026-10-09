@@ -149,8 +149,11 @@ func (s *StreamClient) Info(stream string, opts *StreamInfoOptions) (*StreamInfo
 	}, nil
 }
 
-// Trim trims a stream.
-func (s *StreamClient) Trim(stream string, opts *StreamTrimOptions) error {
+// Trim removes a stream's oldest records by exactly one bound: Before,
+// MaxLen or MaxAgeSeconds. With DryRun it removes nothing and reports what
+// it would remove. Trim cuts whole append batches, so MaxLen may keep a few
+// more records than asked.
+func (s *StreamClient) Trim(stream string, opts *StreamTrimOptions) (*StreamTrimResult, error) {
 	if opts == nil {
 		opts = &StreamTrimOptions{}
 	}
@@ -159,24 +162,33 @@ func (s *StreamClient) Trim(stream string, opts *StreamTrimOptions) error {
 
 	builder := NewOptionsBuilder()
 
+	if opts.Before != nil {
+		builder.AddBytes(OptStreamStart, opts.Before.ToBytes())
+	}
+
 	if opts.MaxLen != nil {
-		builder.AddU64(OptRetentionCount, *opts.MaxLen)
+		builder.AddU64(OptLimit, *opts.MaxLen)
 	}
 
 	if opts.MaxAgeSeconds != nil {
-		builder.AddU64(OptRetentionAge, *opts.MaxAgeSeconds)
-	}
-
-	if opts.MaxBytes != nil {
-		builder.AddU64(OptRetentionBytes, *opts.MaxBytes)
+		builder.AddU64(OptMaxAgeSeconds, *opts.MaxAgeSeconds)
 	}
 
 	if opts.DryRun {
 		builder.AddFlag(OptDryRun)
 	}
 
-	_, err := s.client.sendAndCheck(OpStreamTrim, namespace, []byte(stream), nil, builder.Build(), true)
-	return err
+	resp, err := s.client.sendAndCheck(OpStreamTrim, namespace, []byte(stream), nil, builder.Build(), false)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Data) != 16 {
+		return nil, fmt.Errorf("stream trim: response is %d bytes, want 16", len(resp.Data))
+	}
+	return &StreamTrimResult{
+		Removed:  binary.LittleEndian.Uint64(resp.Data[0:8]),
+		FirstSeq: binary.LittleEndian.Uint64(resp.Data[8:16]),
+	}, nil
 }
 
 // GroupJoin joins a consumer group.

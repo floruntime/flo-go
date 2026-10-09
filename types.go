@@ -333,17 +333,13 @@ const (
 	// Stream Options (0x20 - 0x2F) - StreamID-native ONLY
 	// All stream positioning uses StreamID (timestamp_ms + sequence) - no legacy offset/timestamp modes
 	// 0x20 reserved
-	OptStreamStart    OptionTag = 0x21 // [16]u8: Start StreamID for reads (inclusive)
-	OptStreamEnd      OptionTag = 0x22 // [16]u8: End StreamID for reads (inclusive)
-	OptStreamTail     OptionTag = 0x23 // void: Flag indicating tail read (start from end)
-	OptPartition      OptionTag = 0x24 // u32: Explicit partition index
-	OptPartitionKey   OptionTag = 0x25 // string: Key for partition routing
-	OptMaxAgeSeconds  OptionTag = 0x26 // u64: Maximum age in seconds for retention
-	OptMaxBytes       OptionTag = 0x27 // u64: Maximum size in bytes for retention
-	OptDryRun         OptionTag = 0x28 // void: Flag to preview what would be deleted
-	OptRetentionCount OptionTag = 0x29 // u64: Retention policy - max event count
-	OptRetentionAge   OptionTag = 0x2A // u64: Retention policy - max age in seconds
-	OptRetentionBytes OptionTag = 0x2B // u64: Retention policy - max bytes
+	OptStreamStart   OptionTag = 0x21 // [16]u8: Start StreamID for reads (inclusive)
+	OptStreamEnd     OptionTag = 0x22 // [16]u8: End StreamID for reads (inclusive)
+	OptStreamTail    OptionTag = 0x23 // void: Flag indicating tail read (start from end)
+	OptPartition     OptionTag = 0x24 // u32: Explicit partition index
+	OptPartitionKey  OptionTag = 0x25 // string: Key for partition routing
+	OptMaxAgeSeconds OptionTag = 0x26 // u64: Maximum age in seconds for retention
+	OptDryRun        OptionTag = 0x28 // void: Flag to preview what would be deleted
 
 	// Consumer Group Options (0x30 - 0x3F)
 	OptAckTimeoutMS      OptionTag = 0x30 // u32: Time before unacked message auto-redelivers
@@ -670,13 +666,20 @@ type StreamReadOptions struct {
 	BlockMS   *uint32   // Long-poll wait (nil or 0 = don't wait, max 300000)
 }
 
-// StreamTrimOptions contains options for stream trim operations.
+// StreamTrimOptions contains options for stream trim operations. Set exactly
+// one of Before, MaxLen or MaxAgeSeconds; the server refuses none or several.
 type StreamTrimOptions struct {
 	Namespace     string
-	MaxLen        *uint64 // Retention policy - max event count
-	MaxAgeSeconds *uint64 // Retention policy - max age in seconds
-	MaxBytes      *uint64 // Retention policy - max bytes
-	DryRun        bool    // Preview what would be deleted without deleting
+	Before        *StreamID // Remove records up to and including this id
+	MaxLen        *uint64   // Keep only the newest N records (> 0)
+	MaxAgeSeconds *uint64   // Remove records older than this (> 0)
+	DryRun        bool      // Report what would be removed, removing nothing
+}
+
+// StreamTrimResult is what a trim removed, or with DryRun would remove.
+type StreamTrimResult struct {
+	Removed  uint64 // Records removed
+	FirstSeq uint64 // Sequence of the first record left (0 if none)
 }
 
 // StreamInfoOptions contains options for stream info operations.
