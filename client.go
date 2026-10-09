@@ -300,6 +300,23 @@ func (c *Client) sendRequest(opCode OpCode, namespace string, key, value, option
 		log.Printf("[flo] -> %d ns=%s key=%q", opCode, namespace, key)
 	}
 
+	resp, err := c.exchange(request, options)
+	if err != nil {
+		// The server may still answer this request (for example after a
+		// client-side deadline). On a reused connection that late reply —
+		// possibly an already-claimed task or message — would be read as the
+		// next call's response, so the connection is dropped instead and
+		// callers see ErrNotConnected until they reconnect.
+		c.conn.Close()
+		c.conn = nil
+		return nil, err
+	}
+	return resp, nil
+}
+
+// exchange writes a serialized request and reads its response. The caller
+// holds c.mu.
+func (c *Client) exchange(request, options []byte) (*rawResponse, error) {
 	// Set timeout — extend deadline for blocking operations (Stream Read,
 	// Queue Dequeue, Action Await) so the TCP deadline doesn't fire before
 	// the server's blocking period expires.
