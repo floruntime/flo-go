@@ -40,7 +40,7 @@ type StreamWorkerOptions struct {
 	BatchSize uint32
 
 	// BlockMS is the long-poll wait per read, at most MaxBlockMS.
-	// 0 means the default (see workerBlockMS).
+	// 0 means 30000.
 	BlockMS uint32
 
 	// MessageTimeout defines the maximum duration allowed for a message handler.

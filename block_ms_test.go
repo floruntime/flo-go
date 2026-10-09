@@ -2,6 +2,7 @@ package flo
 
 import (
 	"errors"
+	"net"
 	"testing"
 )
 
@@ -73,5 +74,43 @@ func TestWorkersRefuseOverLongBlockMS(t *testing.T) {
 	handler := func(*StreamContext) error { return nil }
 	if _, err := c.NewStreamWorker(StreamWorkerOptions{Stream: "s", BlockMS: MaxBlockMS + 1}, handler); !errors.Is(err, ErrBlockTooLong) {
 		t.Errorf("NewStreamWorker: got %v, want ErrBlockTooLong", err)
+	}
+}
+
+// A worker never polls with BlockMS 0: that would spin against the server.
+func TestWorkersDefaultZeroBlockMS(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+		}
+	}()
+	c := NewClient(ln.Addr().String())
+	handler := func(*StreamContext) error { return nil }
+	for in, want := range map[uint32]uint32{0: 30000, 1000: 1000} {
+		aw, err := c.NewActionWorker(ActionWorkerOptions{BlockMS: in})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if aw.config.BlockMS != want {
+			t.Errorf("ActionWorker BlockMS %d: got %d, want %d", in, aw.config.BlockMS, want)
+		}
+		aw.Close()
+		sw, err := c.NewStreamWorker(StreamWorkerOptions{Stream: "s", BlockMS: in}, handler)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sw.config.BlockMS != want {
+			t.Errorf("StreamWorker BlockMS %d: got %d, want %d", in, sw.config.BlockMS, want)
+		}
+		sw.Close()
 	}
 }

@@ -30,7 +30,7 @@ type ActionWorkerOptions struct {
 	ActionTimeout time.Duration
 
 	// BlockMS is the long-poll wait per await, at most MaxBlockMS.
-	// 0 means the default (see workerBlockMS).
+	// 0 means 30000.
 	BlockMS uint32
 
 	// Logger for worker output (optional, defaults to log.Printf)

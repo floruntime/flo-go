@@ -825,7 +825,7 @@ type ProcessStats struct {
 type WorkerAwaitOptions struct {
 	Namespace string
 	TimeoutMS *uint64
-	BlockMS   *uint32 // Long-poll wait (nil or 0 = don't wait, max 300000)
+	BlockMS   *uint32 // Long-poll wait (nil = 30000, 0 = don't wait, max 300000)
 }
 
 // WorkerCompleteOptions contains options for action_complete.
