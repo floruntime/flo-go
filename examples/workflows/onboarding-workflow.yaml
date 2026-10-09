@@ -10,10 +10,10 @@ start:
 
 steps:
   wait_verification:
-    waitForSignal:
+    wait_for_signal:
       type: "email_verified"
-      timeoutMs: 86400000
-      onTimeout: expired
+      timeout_ms: 86400000
+      on_timeout: expired
     transitions:
       success: create_profile
       failure: flo.Failed
