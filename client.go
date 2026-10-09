@@ -21,9 +21,9 @@ type Client struct {
 	debug     bool
 
 	conn net.Conn
-	// connected mirrors conn != nil for readers that don't hold mu, which a
-	// blocking request holds for its whole wait.
-	connected atomic.Bool
+	// live mirrors conn for readers that don't hold mu (IsConnected,
+	// Interrupt), which a blocking request holds for its whole wait.
+	live      atomic.Pointer[net.Conn]
 	requestID uint64
 	mu        sync.Mutex
 
@@ -99,7 +99,7 @@ func (c *Client) Connect() error {
 	}
 
 	c.conn = conn
-	c.connected.Store(true)
+	c.live.Store(&conn)
 
 	if c.debug {
 		log.Printf("[flo] Connected to %s", c.endpoint)
@@ -116,7 +116,7 @@ func (c *Client) Close() error {
 	if c.conn != nil {
 		err := c.conn.Close()
 		c.conn = nil
-		c.connected.Store(false)
+		c.live.Store(nil)
 		if c.debug {
 			log.Printf("[flo] Disconnected")
 		}
@@ -130,10 +130,9 @@ func (c *Client) Close() error {
 // that is holding the mutex. The interrupted call will return an error, and
 // the caller should not reuse the client afterward without reconnecting.
 func (c *Client) Interrupt() {
-	// Read conn without lock — racy but safe: net.Conn.Close is safe to call
-	// concurrently and multiple times.
-	if conn := c.conn; conn != nil {
-		conn.Close()
+	// net.Conn.Close is safe to call concurrently and more than once.
+	if conn := c.live.Load(); conn != nil {
+		(*conn).Close()
 	}
 }
 
@@ -153,7 +152,7 @@ func (c *Client) ReconnectWithContext(ctx context.Context) error {
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
-		c.connected.Store(false)
+		c.live.Store(nil)
 	}
 	c.mu.Unlock()
 
@@ -178,7 +177,7 @@ func (c *Client) ReconnectWithContext(ctx context.Context) error {
 		if dialErr == nil {
 			c.mu.Lock()
 			c.conn = conn
-			c.connected.Store(true)
+			c.live.Store(&conn)
 			c.mu.Unlock()
 			if c.debug {
 				log.Printf("[flo] Reconnected to %s (attempt %d)", c.endpoint, attempt)
@@ -201,9 +200,10 @@ func (c *Client) ReconnectWithContext(ctx context.Context) error {
 	}
 }
 
-// IsConnected returns true if the client is connected.
+// IsConnected returns true if the client is connected. A request that fails
+// (a timeout included) closes the connection, so callers must Reconnect.
 func (c *Client) IsConnected() bool {
-	return c.connected.Load()
+	return c.live.Load() != nil
 }
 
 // Namespace returns the default namespace.
@@ -317,7 +317,7 @@ func (c *Client) sendRequest(opCode OpCode, namespace string, key, value, option
 		// callers see ErrNotConnected until they reconnect.
 		c.conn.Close()
 		c.conn = nil
-		c.connected.Store(false)
+		c.live.Store(nil)
 		return nil, err
 	}
 	return resp, nil

@@ -188,3 +188,39 @@ func TestIsConnectedWhileRequestDropsConnection(t *testing.T) {
 		t.Error("client still connected after a timed-out request")
 	}
 }
+
+// Stop and Close call Interrupt, often while the interrupted request is
+// dropping the connection; under -race this must not report a data race.
+func TestInterruptWhileRequestDropsConnection(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() { conn.Close() })
+		readRequestID(conn) // never answered
+	}()
+
+	c := NewClient(ln.Addr().String(), WithTimeout(time.Second))
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			c.Interrupt()
+			time.Sleep(100 * time.Microsecond)
+		}
+	}()
+	if _, err := c.KV.Get("k", nil); err == nil {
+		t.Error("interrupted request succeeded")
+	}
+	<-done
+}
