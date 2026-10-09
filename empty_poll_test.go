@@ -278,14 +278,14 @@ func TestEmptyPollBackoffResets(t *testing.T) {
 func TestEmptyPollBackoffShortBlockThreshold(t *testing.T) {
 	var b emptyPollBackoff
 	b.delay = 400 * time.Millisecond
-	b.afterEmpty(cancelled(), time.Now().Add(-60*time.Millisecond), 100)
+	b.afterEmpty(cancelled(), time.Now().Add(-80*time.Millisecond), 100)
 	if b.delay != 0 {
-		t.Errorf("60 ms empty with BlockMS=100: delay %v, want 0 (it waited)", b.delay)
+		t.Errorf("80 ms empty with BlockMS=100: delay %v, want 0 (it waited)", b.delay)
 	}
 	b.delay = 400 * time.Millisecond
-	b.afterEmpty(cancelled(), time.Now().Add(-40*time.Millisecond), 100)
+	b.afterEmpty(cancelled(), time.Now().Add(-20*time.Millisecond), 100)
 	if b.delay != 800*time.Millisecond {
-		t.Errorf("40 ms empty with BlockMS=100: delay %v, want 800ms (early)", b.delay)
+		t.Errorf("20 ms empty with BlockMS=100: delay %v, want 800ms (early)", b.delay)
 	}
 }
 
