@@ -1,9 +1,11 @@
 package flo
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"time"
 )
 
 // OptionsBuilder builds TLV-encoded options.
@@ -74,6 +76,49 @@ func workerBlockMS(blockMS uint32) (uint32, error) {
 		return defaultWorkerBlockMS, nil
 	}
 	return blockMS, checkBlockMS(&blockMS)
+}
+
+// emptyPollBackoff paces a worker's re-polls after empty answers to blocking
+// polls. The server answers empty in two cases that look the same on the
+// wire: a blocking read or await it has no room to park is refused at once,
+// and a parked group read is woken empty by every append as a cue to read
+// again (every parked reader wakes). A refusal comes back within a round
+// trip, while a wake comes whenever data arrives, so an empty answer counts
+// as early only under min(250 ms, BlockMS/2). A single early empty may still
+// be a fast wake and is re-polled at once; back-to-back early empties mean a
+// full server and back off from 50 ms, doubling up to 1 s.
+type emptyPollBackoff struct {
+	delay time.Duration
+}
+
+const (
+	earlyEmptyPollBound = 250 * time.Millisecond
+	minEmptyPollDelay   = 50 * time.Millisecond
+	maxEmptyPollDelay   = time.Second
+)
+
+// reset clears the backoff.
+func (b *emptyPollBackoff) reset() { b.delay = 0 }
+
+// afterEmpty is called when a poll sent at started, waiting up to blockMS,
+// returns nothing. It returns as soon as ctx is done.
+func (b *emptyPollBackoff) afterEmpty(ctx context.Context, started time.Time, blockMS uint32) {
+	early := min(earlyEmptyPollBound, time.Duration(blockMS)*time.Millisecond/2)
+	if time.Since(started) >= early {
+		b.reset()
+		return
+	}
+	if b.delay == 0 {
+		b.delay = minEmptyPollDelay
+		return
+	}
+	t := time.NewTimer(b.delay)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
+	b.delay = min(2*b.delay, maxEmptyPollDelay)
 }
 
 // extractBlockMS scans TLV-encoded options for OptBlockMS (0x17) and returns

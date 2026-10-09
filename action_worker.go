@@ -231,6 +231,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 	}()
 
 	// Main polling loop
+	var backoff emptyPollBackoff
 	for {
 		select {
 		case <-w.ctx.Done():
@@ -242,6 +243,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 			sem <- struct{}{}
 
 			// Await task
+			polled := time.Now()
 			task, err := workerClient.Await(actionNames, &WorkerAwaitOptions{
 				BlockMS: &w.config.BlockMS,
 			})
@@ -276,8 +278,10 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 
 			if task == nil {
 				<-sem // Release slot - no task available
+				backoff.afterEmpty(w.ctx, polled, w.config.BlockMS)
 				continue
 			}
+			backoff.reset()
 
 			// Execute task in background
 			w.wg.Add(1)
