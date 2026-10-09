@@ -1,9 +1,11 @@
 package flo
 
 import (
+	"bytes"
 	"errors"
 	"net"
 	"testing"
+	"time"
 )
 
 func TestCheckBlockMS(t *testing.T) {
@@ -90,7 +92,7 @@ func TestWorkersDefaultZeroBlockMS(t *testing.T) {
 			if err != nil {
 				return
 			}
-			defer conn.Close()
+			t.Cleanup(func() { conn.Close() })
 		}
 	}()
 	c := NewClient(ln.Addr().String())
@@ -112,5 +114,37 @@ func TestWorkersDefaultZeroBlockMS(t *testing.T) {
 			t.Errorf("StreamWorker BlockMS %d: got %d, want %d", in, sw.config.BlockMS, want)
 		}
 		sw.Close()
+	}
+}
+
+// Await sends the server's 30000 default when BlockMS is unset, so the client
+// deadline (timeout + BlockMS) covers the wait instead of failing at 5 s.
+func TestAwaitSendsDefaultBlockMS(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	got := make(chan []byte, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 4096)
+		n, _ := conn.Read(buf)
+		got <- buf[:n]
+	}()
+	c := NewClient(ln.Addr().String(), WithTimeout(time.Second))
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.workerClient("w").Await([]string{"t"}, nil) // the fake server never answers
+	req := <-got
+	i := bytes.Index(req, []byte{byte(OptBlockMS), 4})
+	if i < 0 || extractBlockMS(req[i:]) != 30000 {
+		t.Errorf("Await(nil) request carries no block_ms 30000: % x", req)
 	}
 }

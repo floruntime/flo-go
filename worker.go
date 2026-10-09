@@ -200,9 +200,13 @@ func (w *WorkerClient) Await(taskTypes []string, opts *WorkerAwaitOptions) (*Tas
 	// Build options for blocking/timeout
 	builder := NewOptionsBuilder()
 
+	// Send the server's 30000 default explicitly when unset, so the client
+	// deadline covers the wait.
+	blockMS := defaultWorkerBlockMS
 	if opts.BlockMS != nil {
-		builder.AddU32(OptBlockMS, *opts.BlockMS)
+		blockMS = *opts.BlockMS
 	}
+	builder.AddU32(OptBlockMS, blockMS)
 
 	if opts.TimeoutMS != nil {
 		builder.AddU64(OptTimeoutMS, *opts.TimeoutMS)
