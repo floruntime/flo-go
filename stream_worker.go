@@ -134,6 +134,13 @@ type StreamWorker struct {
 	client  *Client
 	handler StreamRecordHandler
 
+	// ackClient carries acks and nacks. client is held by a blocking
+	// GroupRead for up to BlockMS, which can outlast the server's ack timeout
+	// and get finished records redelivered.
+	ackClient        *Client
+	ackReconnectMu   sync.Mutex
+	lastAckReconnect time.Time
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -170,10 +177,9 @@ func resolveStreams(opts StreamWorkerOptions) ([]string, error) {
 
 // NewStreamWorker creates a new stream worker from an existing client.
 //
-// The worker always opens its own TCP connection (endpoint/namespace come from
-// the parent) so blocking GroupRead does not block other RPCs on the parent.
-// Avoid keeping a second idle connection to the same namespace while the
-// worker runs — see Flo server issue with concurrent connections per namespace.
+// The worker opens two connections of its own (endpoint/namespace come from
+// the parent): one for the blocking GroupRead, and one for acks and nacks so
+// they don't wait behind it.
 func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordHandler) (*StreamWorker, error) {
 	streams, err := resolveStreams(opts)
 	if err != nil {
@@ -244,17 +250,28 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 		return nil, fmt.Errorf("failed to connect stream worker: %w", err)
 	}
 
+	ackClient := NewClient(c.endpoint,
+		WithNamespace(c.namespace),
+		WithTimeout(opts.NetworkTimeout),
+		WithDebug(c.debug),
+	)
+	if err := ackClient.Connect(); err != nil {
+		workerClient.Close()
+		return nil, fmt.Errorf("failed to connect stream worker ack client: %w", err)
+	}
+
 	// Backfill Stream for single-stream backward compat (used by processRecord/logging)
 	if opts.Stream == "" {
 		opts.Stream = streams[0]
 	}
 
 	return &StreamWorker{
-		config:  opts,
-		streams: streams,
-		client:  workerClient,
-		handler: handler,
-		logger:  opts.Logger,
+		config:    opts,
+		streams:   streams,
+		client:    workerClient,
+		ackClient: ackClient,
+		handler:   handler,
+		logger:    opts.Logger,
 	}, nil
 }
 
@@ -433,8 +450,10 @@ func (sw *StreamWorker) handleReconnect() error {
 	sw.reconnectMu.Lock()
 	defer sw.reconnectMu.Unlock()
 
-	// If another goroutine just reconnected, skip
-	if time.Since(sw.lastReconnect) < 2*time.Second {
+	// If another goroutine just reconnected, skip. A client drops its
+	// connection on any I/O error, so a recent reconnect only counts while
+	// the connection is still up.
+	if time.Since(sw.lastReconnect) < 2*time.Second && sw.client.IsConnected() {
 		return nil
 	}
 
@@ -569,29 +588,51 @@ func (sw *StreamWorker) processRecord(stream string, record StreamRecord) {
 // ackWithRetry sends an ack (or nack) to the server, reconnecting if the
 // connection was lost while the record was being processed.
 func (sw *StreamWorker) ackWithRetry(stream string, id StreamID, ack bool) {
+	op := "ack"
+	if !ack {
+		op = "nack"
+	}
 	const maxAttempts = 3
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		var err error
 		if ack {
-			err = sw.client.Stream.GroupAck(stream, sw.config.Group, []StreamID{id}, nil)
+			err = sw.ackClient.Stream.GroupAck(stream, sw.config.Group, []StreamID{id}, nil)
 		} else {
-			err = sw.client.Stream.GroupNack(stream, sw.config.Group, []StreamID{id}, nil)
+			err = sw.ackClient.Stream.GroupNack(stream, sw.config.Group, []StreamID{id}, nil)
 		}
 		if err == nil {
 			return
 		}
 		if !IsConnectionError(err) || sw.ctx.Err() != nil {
+			sw.logger.Printf("Warning: [%s] %s for %s failed, the record will be redelivered: %v", stream, op, id, err)
 			return
 		}
-		op := "ack"
-		if !ack {
-			op = "nack"
+		if attempt == maxAttempts {
+			sw.logger.Printf("Warning: [%s] %s for %s failed after %d attempts, the record will be redelivered: %v", stream, op, id, maxAttempts, err)
+			return
 		}
 		sw.logger.Printf("[%s] Connection lost sending %s for %s (attempt %d/%d), reconnecting...", stream, op, id, attempt, maxAttempts)
-		if reconErr := sw.handleReconnect(); reconErr != nil {
+		if reconErr := sw.reconnectAck(); reconErr != nil {
+			sw.logger.Printf("Warning: [%s] %s for %s not sent, reconnect failed, the record will be redelivered: %v", stream, op, id, reconErr)
 			return
 		}
 	}
+}
+
+// reconnectAck reconnects the ack connection. Concurrent handlers that hit
+// the same broken connection reconnect it once rather than tearing down each
+// other's fresh connection.
+func (sw *StreamWorker) reconnectAck() error {
+	sw.ackReconnectMu.Lock()
+	defer sw.ackReconnectMu.Unlock()
+	if time.Since(sw.lastAckReconnect) < 2*time.Second && sw.ackClient.IsConnected() {
+		return nil
+	}
+	if err := sw.ackClient.ReconnectWithContext(sw.ctx); err != nil {
+		return err
+	}
+	sw.lastAckReconnect = time.Now()
+	return nil
 }
 
 // Stop gracefully stops the stream worker.
@@ -607,9 +648,15 @@ func (sw *StreamWorker) Stop() {
 	}
 }
 
-// Close stops the worker and closes its dedicated connection.
+// Close stops the worker and closes its dedicated connections.
 func (sw *StreamWorker) Close() error {
 	sw.Stop()
+	if sw.ackClient != nil {
+		// Stop leaves the ack connection up so in-flight acks land during a
+		// drain; Close doesn't wait out a stalled one.
+		sw.ackClient.Interrupt()
+		sw.ackClient.Close()
+	}
 	if sw.client != nil {
 		return sw.client.Close()
 	}

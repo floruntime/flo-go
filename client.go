@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,7 +20,10 @@ type Client struct {
 	timeout   time.Duration
 	debug     bool
 
-	conn      net.Conn
+	conn net.Conn
+	// live mirrors conn for readers that don't hold mu (IsConnected,
+	// Interrupt), which a blocking request holds for its whole wait.
+	live      atomic.Pointer[net.Conn]
 	requestID uint64
 	mu        sync.Mutex
 
@@ -42,7 +46,8 @@ func WithNamespace(namespace string) ClientOption {
 	}
 }
 
-// WithTimeout sets the connection and operation timeout.
+// WithTimeout sets the connection and operation timeout. After any I/O
+// error, including a timeout, calls return ErrNotConnected until Reconnect.
 func WithTimeout(timeout time.Duration) ClientOption {
 	return func(c *Client) {
 		c.timeout = timeout
@@ -95,6 +100,7 @@ func (c *Client) Connect() error {
 	}
 
 	c.conn = conn
+	c.live.Store(&conn)
 
 	if c.debug {
 		log.Printf("[flo] Connected to %s", c.endpoint)
@@ -111,6 +117,7 @@ func (c *Client) Close() error {
 	if c.conn != nil {
 		err := c.conn.Close()
 		c.conn = nil
+		c.live.Store(nil)
 		if c.debug {
 			log.Printf("[flo] Disconnected")
 		}
@@ -124,10 +131,9 @@ func (c *Client) Close() error {
 // that is holding the mutex. The interrupted call will return an error, and
 // the caller should not reuse the client afterward without reconnecting.
 func (c *Client) Interrupt() {
-	// Read conn without lock — racy but safe: net.Conn.Close is safe to call
-	// concurrently and multiple times.
-	if conn := c.conn; conn != nil {
-		conn.Close()
+	// net.Conn.Close is safe to call concurrently and more than once.
+	if conn := c.live.Swap(nil); conn != nil {
+		(*conn).Close()
 	}
 }
 
@@ -147,6 +153,7 @@ func (c *Client) ReconnectWithContext(ctx context.Context) error {
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
+		c.live.Store(nil)
 	}
 	c.mu.Unlock()
 
@@ -170,7 +177,17 @@ func (c *Client) ReconnectWithContext(ctx context.Context) error {
 		conn, dialErr := dialer.DialContext(ctx, "tcp", addr)
 		if dialErr == nil {
 			c.mu.Lock()
+			if c.live.Load() != nil {
+				// A concurrent reconnect got there first; keep its connection.
+				c.mu.Unlock()
+				conn.Close()
+				return nil
+			}
+			if c.conn != nil {
+				c.conn.Close() // interrupted, but not yet dropped by a request
+			}
 			c.conn = conn
+			c.live.Store(&conn)
 			c.mu.Unlock()
 			if c.debug {
 				log.Printf("[flo] Reconnected to %s (attempt %d)", c.endpoint, attempt)
@@ -193,9 +210,10 @@ func (c *Client) ReconnectWithContext(ctx context.Context) error {
 	}
 }
 
-// IsConnected returns true if the client is connected.
+// IsConnected returns true if the client is connected. A request that fails
+// (a timeout included) closes the connection, so callers must Reconnect.
 func (c *Client) IsConnected() bool {
-	return c.conn != nil
+	return c.live.Load() != nil
 }
 
 // Namespace returns the default namespace.
@@ -300,6 +318,31 @@ func (c *Client) sendRequest(opCode OpCode, namespace string, key, value, option
 		log.Printf("[flo] -> %d ns=%s key=%q", opCode, namespace, key)
 	}
 
+	resp, err := c.exchange(request, options)
+	if err == nil && resp.RequestID != requestID {
+		if resp.RequestID == 0 && resp.Status != StatusOK {
+			// The server answers a request it can't parse with id 0, then
+			// closes the connection; its error says why.
+			err = newServerError(resp.Status, resp.Data)
+		} else {
+			err = fmt.Errorf("flo: response is for request %d, expected %d", resp.RequestID, requestID)
+		}
+	}
+	if err != nil {
+		// The server may still answer this request (e.g. after a client-side
+		// deadline); on a reused connection that late reply would be read as
+		// the next call's response, so drop the connection.
+		c.conn.Close()
+		c.conn = nil
+		c.live.Store(nil)
+		return nil, err
+	}
+	return resp, nil
+}
+
+// exchange writes a serialized request and reads its response. The caller
+// holds c.mu.
+func (c *Client) exchange(request, options []byte) (*rawResponse, error) {
 	// Set timeout — extend deadline for blocking operations (Stream Read,
 	// Queue Dequeue, Action Await) so the TCP deadline doesn't fire before
 	// the server's blocking period expires.

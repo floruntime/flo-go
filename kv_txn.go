@@ -96,8 +96,8 @@ func (t *KVTransaction) Put(key string, value []byte, opts *PutOptions) (PutResu
 		opts = &PutOptions{}
 	}
 	builder := t.txnOptionsBuilder()
-	if opts.TTLSeconds != nil {
-		builder.AddU64(OptTTLSeconds, *opts.TTLSeconds)
+	if opts.TTLMs != nil {
+		builder.AddU64(OptTTLMs, *opts.TTLMs)
 	}
 	if opts.CASVersion != nil {
 		builder.AddU64(OptCASVersion, *opts.CASVersion)
@@ -169,14 +169,15 @@ func (t *KVTransaction) Incr(key string, delta int64) (int64, error) {
 	return int64(binary.LittleEndian.Uint64(resp.Data[0:8])), nil
 }
 
-// Touch updates the TTL of an existing key inside the transaction.
-func (t *KVTransaction) Touch(key string, ttlSeconds uint64) error {
+// Touch sets the TTL of an existing key inside the transaction to ttlMs
+// milliseconds; 0 clears the TTL.
+func (t *KVTransaction) Touch(key string, ttlMs uint64) error {
 	if t.done {
 		return fmt.Errorf("flo: transaction already finished")
 	}
 	builder := t.txnOptionsBuilder()
 	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], ttlSeconds)
+	binary.LittleEndian.PutUint64(buf[:], ttlMs)
 	_, err := t.client.sendAndCheck(OpKVTouch, t.namespace, []byte(key), buf[:], builder.Build(), true)
 	return err
 }
