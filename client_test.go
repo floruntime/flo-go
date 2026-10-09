@@ -1,6 +1,7 @@
 package flo
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -102,5 +103,51 @@ func TestLateReplyNotReadByNextCall(t *testing.T) {
 	res, err = c.KV.Get("k", nil)
 	if err != nil || string(res.Value) != "fresh" {
 		t.Fatalf("Get after reconnect: got %v, %v; want fresh", res, err)
+	}
+}
+
+// A connection dropped right after a reconnect must still be reconnected:
+// the client drops its connection on any I/O error, so the 2 s throttle in
+// handleReconnect cannot assume the last reconnect left it up.
+func TestStreamWorkerReconnectsDroppedConnWithinThrottle(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { conn.Close() })
+			go func() {
+				for {
+					id, err := readRequestID(conn)
+					if err != nil {
+						return
+					}
+					conn.Write(fakeReply(id, ""))
+				}
+			}()
+		}
+	}()
+
+	c := NewClient(ln.Addr().String(), WithTimeout(time.Second))
+	sw, err := c.NewStreamWorker(StreamWorkerOptions{Stream: "s"}, func(*StreamContext) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sw.Close()
+
+	sw.ctx = context.Background()
+	sw.lastReconnect = time.Now()
+	sw.client.Close()
+	if err := sw.handleReconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if !sw.client.IsConnected() {
+		t.Error("handleReconnect skipped a dropped connection because a reconnect was recent")
 	}
 }
