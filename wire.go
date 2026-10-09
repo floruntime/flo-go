@@ -82,12 +82,11 @@ func workerBlockMS(blockMS uint32) (uint32, error) {
 // polls. The server answers empty in two cases that look the same on the
 // wire: a blocking read or await it has no room to park is refused at once,
 // and a parked group read is woken empty by every append as a cue to read
-// again (every consumer in the group wakes; one gets the record). A refusal
-// comes back within a round trip, while a wake comes whenever data arrives,
-// so an empty answer counts as early only under min(250 ms, BlockMS/2). A
-// single early empty may still be a fast wake and is re-polled at once; back-
-// to-back early empties mean a full server and back off from 50 ms, doubling
-// up to 1 s.
+// again (every parked reader wakes). A refusal comes back within a round
+// trip, while a wake comes whenever data arrives, so an empty answer counts
+// as early only under min(250 ms, BlockMS/2). A single early empty may still
+// be a fast wake and is re-polled at once; back-to-back early empties mean a
+// full server and back off from 50 ms, doubling up to 1 s.
 type emptyPollBackoff struct {
 	delay time.Duration
 }
@@ -98,7 +97,7 @@ const (
 	maxEmptyPollDelay   = time.Second
 )
 
-// reset is called when a poll returns work.
+// reset clears the backoff.
 func (b *emptyPollBackoff) reset() { b.delay = 0 }
 
 // afterEmpty is called when a poll sent at started, waiting up to blockMS,

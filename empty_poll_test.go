@@ -240,3 +240,114 @@ func TestWorkerStopEndsBackoffPause(t *testing.T) {
 		t.Fatal("Start did not return after Stop")
 	}
 }
+
+// cancelled makes afterEmpty return without sleeping, so the tests below
+// check its bookkeeping alone.
+func cancelled() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+func TestEmptyPollBackoffDoublesToCap(t *testing.T) {
+	var b emptyPollBackoff
+	want := []time.Duration{50, 100, 200, 400, 800, 1000, 1000}
+	for i, w := range want {
+		b.afterEmpty(cancelled(), time.Now(), 30000)
+		if b.delay != w*time.Millisecond {
+			t.Fatalf("early empty %d: delay %v, want %v", i+1, b.delay, w*time.Millisecond)
+		}
+	}
+}
+
+func TestEmptyPollBackoffResets(t *testing.T) {
+	var b emptyPollBackoff
+	b.delay = 400 * time.Millisecond
+	b.afterEmpty(cancelled(), time.Now().Add(-300*time.Millisecond), 30000)
+	if b.delay != 0 {
+		t.Errorf("after an empty that waited: delay %v, want 0", b.delay)
+	}
+	b.delay = 400 * time.Millisecond
+	b.reset()
+	if b.delay != 0 {
+		t.Errorf("after reset: delay %v, want 0", b.delay)
+	}
+}
+
+// With BlockMS=100 an empty counts as early only under 50 ms.
+func TestEmptyPollBackoffShortBlockThreshold(t *testing.T) {
+	var b emptyPollBackoff
+	b.delay = 400 * time.Millisecond
+	b.afterEmpty(cancelled(), time.Now().Add(-60*time.Millisecond), 100)
+	if b.delay != 0 {
+		t.Errorf("60 ms empty with BlockMS=100: delay %v, want 0 (it waited)", b.delay)
+	}
+	b.delay = 400 * time.Millisecond
+	b.afterEmpty(cancelled(), time.Now().Add(-40*time.Millisecond), 100)
+	if b.delay != 800*time.Millisecond {
+		t.Errorf("40 ms empty with BlockMS=100: delay %v, want 800ms (early)", b.delay)
+	}
+}
+
+// pollAfterWork answers polls 1-3 empty at once, poll 4 with work, polls 5-6
+// empty at once, and parks the rest. It records when each poll arrives.
+func pollAfterWork(pollOp OpCode, work []byte) (func(OpCode) []byte, func() []time.Time) {
+	var mu sync.Mutex
+	var arrivals []time.Time
+	answer := func(op OpCode) []byte {
+		if op != pollOp {
+			return nil
+		}
+		mu.Lock()
+		arrivals = append(arrivals, time.Now())
+		n := len(arrivals)
+		mu.Unlock()
+		switch {
+		case n == 4:
+			return work
+		case n > 6:
+			time.Sleep(3 * time.Second)
+		}
+		return nil
+	}
+	return answer, func() []time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]time.Time(nil), arrivals...)
+	}
+}
+
+// Work resets the backoff: the first early empty after it is re-polled at
+// once instead of waiting out the pause built up before the work.
+func checkResetAfterWork(t *testing.T, arrivals func() []time.Time) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(arrivals()) < 6 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	a := arrivals()
+	if len(a) < 6 {
+		t.Fatalf("only %d polls", len(a))
+	}
+	if gap := a[5].Sub(a[4]); gap > 50*time.Millisecond {
+		t.Errorf("re-poll after the first empty following work took %v", gap)
+	}
+}
+
+func TestActionWorkerResetsBackoffAfterWork(t *testing.T) {
+	task := []byte{2, 0, 't', '1', 1, 0, 'a'}
+	task = binary.LittleEndian.AppendUint64(task, 0) // created_at
+	task = binary.LittleEndian.AppendUint32(task, 1) // attempt
+	task = append(task, 0)                           // has_caller
+	answer, arrivals := pollAfterWork(OpActionAwait, task)
+	w := newTestActionWorker(t, fakeServer(t, answer))
+	go w.Start(context.Background())
+	checkResetAfterWork(t, arrivals)
+}
+
+func TestStreamWorkerResetsBackoffAfterWork(t *testing.T) {
+	answer, arrivals := pollAfterWork(OpStreamGroupRead, oneRecord)
+	sw := newTestStreamWorker(t, fakeServer(t, answer), 30000, func(*StreamContext) error { return nil })
+	go sw.Start(context.Background())
+	checkResetAfterWork(t, arrivals)
+}
