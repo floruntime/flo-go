@@ -429,8 +429,10 @@ func (sw *StreamWorker) handleReconnect() error {
 	sw.reconnectMu.Lock()
 	defer sw.reconnectMu.Unlock()
 
-	// If another goroutine just reconnected, skip
-	if time.Since(sw.lastReconnect) < 2*time.Second {
+	// If another goroutine just reconnected, skip. A client drops its
+	// connection on any I/O error, so a recent reconnect only counts while
+	// the connection is still up.
+	if time.Since(sw.lastReconnect) < 2*time.Second && sw.client.IsConnected() {
 		return nil
 	}
 
