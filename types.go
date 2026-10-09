@@ -679,7 +679,7 @@ type StreamTrimOptions struct {
 // StreamTrimResult is what a trim removed, or with DryRun would remove.
 type StreamTrimResult struct {
 	Removed  uint64 // Records removed
-	FirstSeq uint64 // Sequence of the first record left (0 if none)
+	FirstSeq uint64 // Sequence of the first record left; meaningful only when records remain
 }
 
 // StreamInfoOptions contains options for stream info operations.

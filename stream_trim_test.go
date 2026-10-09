@@ -2,7 +2,9 @@ package flo
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
+	"time"
 )
 
 // Trim sends the bounds the server reads: limit (0x05), max_age_seconds
@@ -33,5 +35,27 @@ func TestTrimSendsServerBounds(t *testing.T) {
 				t.Fatalf("first option tag %#x is not a trim bound", opts[0])
 			}
 		})
+	}
+}
+
+// The 16-byte trim answer decodes as [removed:u64][first_seq:u64], little-endian.
+func TestTrimDecodesTheAnswer(t *testing.T) {
+	addr := fakeServer(t, func(OpCode) []byte {
+		body := make([]byte, 16)
+		binary.LittleEndian.PutUint64(body[0:8], 6)
+		binary.LittleEndian.PutUint64(body[8:16], 42)
+		return body
+	})
+	c := NewClient(addr, WithTimeout(time.Second))
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	got, err := c.Stream.Trim("s", &StreamTrimOptions{MaxLen: Uint64Ptr(4), DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Removed != 6 || got.FirstSeq != 42 {
+		t.Fatalf("got %+v, want Removed 6, FirstSeq 42", *got)
 	}
 }
