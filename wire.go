@@ -243,78 +243,65 @@ func parseResponseHeader(header []byte) (StatusCode, uint32, uint64, uint32, err
 }
 
 // parseScanResponse parses scan response data.
+// Wire format: [count:u32]([key_len:u16][key][value_len:u32][value])*
+// [has_more:u8][cursor_len:u16][cursor]
 func parseScanResponse(data []byte) (*ScanResult, error) {
-	if len(data) < 9 {
+	if len(data) < 4 {
 		return nil, ErrIncompleteResponse
 	}
 
-	offset := 0
+	count := binary.LittleEndian.Uint32(data[0:])
+	offset := 4
 
-	// has_more
-	hasMore := data[offset] != 0
-	offset++
-
-	// cursor
-	cursorLen := binary.LittleEndian.Uint32(data[offset:])
-	offset += 4
-
-	if len(data) < offset+int(cursorLen) {
-		return nil, ErrIncompleteResponse
-	}
-
-	var cursor []byte
-	if cursorLen > 0 {
-		cursor = make([]byte, cursorLen)
-		copy(cursor, data[offset:offset+int(cursorLen)])
-	}
-	offset += int(cursorLen)
-
-	// count
-	if len(data) < offset+4 {
-		return nil, ErrIncompleteResponse
-	}
-
-	count := binary.LittleEndian.Uint32(data[offset:])
-	offset += 4
-
-	// entries
-	entries := make([]KVEntry, 0, count)
+	entries := make([]KVEntry, 0, min(count, uint32(len(data)/6)))
 	for i := uint32(0); i < count; i++ {
-		// key
 		if len(data) < offset+2 {
 			return nil, ErrIncompleteResponse
 		}
-
-		keyLen := binary.LittleEndian.Uint16(data[offset:])
+		keyLen := int(binary.LittleEndian.Uint16(data[offset:]))
 		offset += 2
 
-		if len(data) < offset+int(keyLen) {
+		if len(data) < offset+keyLen {
 			return nil, ErrIncompleteResponse
 		}
-
 		key := make([]byte, keyLen)
-		copy(key, data[offset:offset+int(keyLen)])
-		offset += int(keyLen)
+		copy(key, data[offset:offset+keyLen])
+		offset += keyLen
 
-		// value
 		if len(data) < offset+4 {
 			return nil, ErrIncompleteResponse
 		}
-
-		valueLen := binary.LittleEndian.Uint32(data[offset:])
+		valueLen := int(binary.LittleEndian.Uint32(data[offset:]))
 		offset += 4
 
 		var value []byte
 		if valueLen > 0 {
-			if len(data) < offset+int(valueLen) {
+			if len(data) < offset+valueLen {
 				return nil, ErrIncompleteResponse
 			}
 			value = make([]byte, valueLen)
-			copy(value, data[offset:offset+int(valueLen)])
-			offset += int(valueLen)
+			copy(value, data[offset:offset+valueLen])
+			offset += valueLen
 		}
 
 		entries = append(entries, KVEntry{Key: key, Value: value})
+	}
+
+	if len(data) < offset+3 {
+		return nil, ErrIncompleteResponse
+	}
+	hasMore := data[offset] != 0
+	offset++
+	cursorLen := int(binary.LittleEndian.Uint16(data[offset:]))
+	offset += 2
+
+	if len(data) < offset+cursorLen {
+		return nil, ErrIncompleteResponse
+	}
+	var cursor []byte
+	if cursorLen > 0 {
+		cursor = make([]byte, cursorLen)
+		copy(cursor, data[offset:offset+cursorLen])
 	}
 
 	return &ScanResult{

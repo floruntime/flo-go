@@ -43,51 +43,32 @@ type OpCode uint16
 
 const (
 	// ── System (0x000 – 0x00F) ──
-	OpPing          OpCode = 0x000
-	OpPong          OpCode = 0x001
-	OpErrorResponse OpCode = 0x002
-	OpAuth          OpCode = 0x003
-	OpSetDurability OpCode = 0x004
-	OpOK            OpCode = 0x005
+	OpPing OpCode = 0x000
 
 	// ── Namespace (0x010 – 0x02F) ──
-	OpNamespaceCreate            OpCode = 0x010
-	OpNamespaceDelete            OpCode = 0x011
-	OpNamespaceList              OpCode = 0x012
-	OpNamespaceInfo              OpCode = 0x013
-	OpNamespaceConfigSet         OpCode = 0x014
-	OpNamespaceConfigGet         OpCode = 0x015
-	OpNamespaceCreateResponse    OpCode = 0x020
-	OpNamespaceDeleteResponse    OpCode = 0x021
-	OpNamespaceListResponse      OpCode = 0x022
-	OpNamespaceInfoResponse      OpCode = 0x023
-	OpNamespaceConfigSetResponse OpCode = 0x024
-	OpNamespaceConfigGetResponse OpCode = 0x025
+	OpNamespaceCreate    OpCode = 0x010
+	OpNamespaceDelete    OpCode = 0x011
+	OpNamespaceList      OpCode = 0x012
+	OpNamespaceInfo      OpCode = 0x013
+	OpNamespaceConfigSet OpCode = 0x014
+	OpNamespaceConfigGet OpCode = 0x015
 
 	// ── Cluster (0x030 – 0x04F) ──
-	OpClusterStatus          OpCode = 0x030
-	OpClusterMembers         OpCode = 0x031
-	OpClusterJoin            OpCode = 0x032
-	OpClusterLeave           OpCode = 0x033
-	OpClusterTransferLeader  OpCode = 0x034
-	OpClusterAddNode         OpCode = 0x035
-	OpClusterRemoveNode      OpCode = 0x036
-	OpClusterStatusResponse  OpCode = 0x040
-	OpClusterMembersResponse OpCode = 0x041
-	OpClusterJoinResponse    OpCode = 0x042
+	OpClusterStatus         OpCode = 0x030
+	OpClusterMembers        OpCode = 0x031
+	OpClusterJoin           OpCode = 0x032
+	OpClusterLeave          OpCode = 0x033
+	OpClusterTransferLeader OpCode = 0x034
+	OpClusterAddNode        OpCode = 0x035
+	OpClusterRemoveNode     OpCode = 0x036
 
 	// ── KV (0x100 – 0x12F) ──
-	OpKVPut             OpCode = 0x100
-	OpKVGet             OpCode = 0x101
-	OpKVMGet            OpCode = 0x102
-	OpKVDelete          OpCode = 0x103
-	OpKVScan            OpCode = 0x104
-	OpKVHistory         OpCode = 0x105
-	OpKVGetResponse     OpCode = 0x106
-	OpKVMGetResponse    OpCode = 0x107
-	OpKVPutResponse     OpCode = 0x108
-	OpKVScanResponse    OpCode = 0x109
-	OpKVHistoryResponse OpCode = 0x10A
+	OpKVPut     OpCode = 0x100
+	OpKVGet     OpCode = 0x101
+	OpKVMGet    OpCode = 0x102
+	OpKVDelete  OpCode = 0x103
+	OpKVScan    OpCode = 0x104
+	OpKVHistory OpCode = 0x105
 	// KV Extended (atomic counters, JSON ops)
 	OpKVIncr    OpCode = 0x10B
 	OpKVJsonGet OpCode = 0x10C
@@ -98,31 +79,18 @@ const (
 	OpKVCommitTxn   OpCode = 0x111
 	OpKVRollbackTxn OpCode = 0x112
 	// KV Extended (TTL lifecycle, exists)
-	OpKVTouch          OpCode = 0x113
-	OpKVPersist        OpCode = 0x114
-	OpKVExists         OpCode = 0x115
-	OpKVIncrResponse   OpCode = 0x116
-	OpKVJsonResponse   OpCode = 0x117
-	OpKVExistsResponse OpCode = 0x118
-	OpKVTxnResponse    OpCode = 0x119
+	OpKVTouch   OpCode = 0x113
+	OpKVPersist OpCode = 0x114
+	OpKVExists  OpCode = 0x115
 
 	// ── Streams (0x130 – 0x14F) ──
-	OpStreamAppend         OpCode = 0x130
-	OpStreamRead           OpCode = 0x131
-	OpStreamTrim           OpCode = 0x132
-	OpStreamInfo           OpCode = 0x133
-	OpStreamAppendResponse OpCode = 0x134
-	OpStreamReadResponse   OpCode = 0x135
-	OpStreamEvent          OpCode = 0x136
-	OpStreamSubscribe      OpCode = 0x137
-	OpStreamUnsubscribe    OpCode = 0x138
-	OpStreamSubscribed     OpCode = 0x139
-	OpStreamUnsubscribed   OpCode = 0x13A
-	OpStreamList           OpCode = 0x13B
-	OpStreamListResponse   OpCode = 0x13C
-	OpStreamCreate         OpCode = 0x13D
-	OpStreamCreateResponse OpCode = 0x13E
-	OpStreamAlter          OpCode = 0x13F
+	OpStreamAppend OpCode = 0x130
+	OpStreamRead   OpCode = 0x131
+	OpStreamTrim   OpCode = 0x132
+	OpStreamInfo   OpCode = 0x133
+	OpStreamList   OpCode = 0x13B
+	OpStreamCreate OpCode = 0x13D
+	OpStreamAlter  OpCode = 0x13F
 
 	// ── Stream Consumer Groups (0x150 – 0x16F) ──
 	OpStreamGroupCreate           OpCode = 0x150
@@ -133,125 +101,75 @@ const (
 	OpStreamGroupClaim            OpCode = 0x155
 	OpStreamGroupPending          OpCode = 0x156
 	OpStreamGroupConfigureSweeper OpCode = 0x157
-	OpStreamGroupReadResponse     OpCode = 0x158
 	OpStreamGroupNack             OpCode = 0x159
 	OpStreamGroupTouch            OpCode = 0x15A
 	OpStreamGroupInfo             OpCode = 0x15B
 	OpStreamGroupDelete           OpCode = 0x15C
 
 	// ── Queues (0x170 – 0x19F) ──
-	OpQueueEnqueue              OpCode = 0x170
-	OpQueueDequeue              OpCode = 0x171
-	OpQueueComplete             OpCode = 0x172
-	OpQueueExtendLease          OpCode = 0x173
-	OpQueueFail                 OpCode = 0x174
-	OpQueueFailAuto             OpCode = 0x175
-	OpQueueDLQList              OpCode = 0x176
-	OpQueueDLQDelete            OpCode = 0x177
-	OpQueueDLQRequeue           OpCode = 0x178
-	OpQueueDLQStats             OpCode = 0x179
-	OpQueuePromoteDue           OpCode = 0x17A
-	OpQueueStats                OpCode = 0x17B
-	OpQueuePeek                 OpCode = 0x17C
-	OpQueueTouch                OpCode = 0x17D
-	OpQueueBatchEnqueue         OpCode = 0x17E
-	OpQueuePurge                OpCode = 0x17F
-	OpQueueEnqueueResponse      OpCode = 0x190
-	OpQueueDequeueResponse      OpCode = 0x191
-	OpQueueDLQListResponse      OpCode = 0x192
-	OpQueueStatsResponse        OpCode = 0x193
-	OpQueuePeekResponse         OpCode = 0x194
-	OpQueueTouchResponse        OpCode = 0x195
-	OpQueueBatchEnqueueResponse OpCode = 0x196
-	OpQueuePurgeResponse        OpCode = 0x197
-	OpQueueList                 OpCode = 0x198
-	OpQueueListResponse         OpCode = 0x199
+	OpQueueEnqueue    OpCode = 0x170
+	OpQueueDequeue    OpCode = 0x171
+	OpQueueComplete   OpCode = 0x172
+	OpQueueFail       OpCode = 0x174
+	OpQueueDLQList    OpCode = 0x176
+	OpQueueDLQDelete  OpCode = 0x177
+	OpQueueDLQRequeue OpCode = 0x178
+	OpQueueStats      OpCode = 0x17B
+	OpQueuePeek       OpCode = 0x17C
+	OpQueuePurge      OpCode = 0x17F
+	OpQueueList       OpCode = 0x198
 
 	// ── Time-Series (0x1A0 – 0x1BF) ──
-	OpTSWrite             OpCode = 0x1A0
-	OpTSRead              OpCode = 0x1A1
-	OpTSQuery             OpCode = 0x1A2
-	OpTSFloQL             OpCode = 0x1A3
-	OpTSList              OpCode = 0x1A4
-	OpTSDelete            OpCode = 0x1A5
-	OpTSRetention         OpCode = 0x1A6
-	OpTSWriteResponse     OpCode = 0x1A7
-	OpTSReadResponse      OpCode = 0x1A8
-	OpTSQueryResponse     OpCode = 0x1A9
-	OpTSFloQLResponse     OpCode = 0x1AA
-	OpTSListResponse      OpCode = 0x1AB
-	OpTSDeleteResponse    OpCode = 0x1AC
-	OpTSRetentionResponse OpCode = 0x1AD
+	OpTSWrite     OpCode = 0x1A0
+	OpTSRead      OpCode = 0x1A1
+	OpTSQuery     OpCode = 0x1A2
+	OpTSFloQL     OpCode = 0x1A3
+	OpTSList      OpCode = 0x1A4
+	OpTSDelete    OpCode = 0x1A5
+	OpTSRetention OpCode = 0x1A6
 
 	// ── Actions (0x300 – 0x31F) ──
-	OpActionRegister         OpCode = 0x300
-	OpActionInvoke           OpCode = 0x301
-	OpActionStatus           OpCode = 0x302
-	OpActionList             OpCode = 0x303
-	OpActionListRuns         OpCode = 0x304
-	OpActionDelete           OpCode = 0x305
-	OpActionAwait            OpCode = 0x306
-	OpActionComplete         OpCode = 0x307
-	OpActionFail             OpCode = 0x308
-	OpActionTouch            OpCode = 0x309
-	OpActionRegisterResponse OpCode = 0x310
-	OpActionInvokeResponse   OpCode = 0x311
-	OpActionStatusResponse   OpCode = 0x312
-	OpActionListResponse     OpCode = 0x313
-	OpActionListRunsResponse OpCode = 0x314
-	OpActionTaskAssignment   OpCode = 0x315
+	OpActionRegister OpCode = 0x300
+	OpActionInvoke   OpCode = 0x301
+	OpActionStatus   OpCode = 0x302
+	OpActionList     OpCode = 0x303
+	OpActionListRuns OpCode = 0x304
+	OpActionDelete   OpCode = 0x305
+	OpActionAwait    OpCode = 0x306
+	OpActionComplete OpCode = 0x307
+	OpActionFail     OpCode = 0x308
+	OpActionTouch    OpCode = 0x309
 
 	// ── Workers (0x320 – 0x33F) ──
-	OpWorkerRegister         OpCode = 0x320
-	OpWorkerHeartbeat        OpCode = 0x321
-	OpWorkerDeregister       OpCode = 0x322
-	OpWorkerList             OpCode = 0x323
-	OpWorkerInfo             OpCode = 0x324
-	OpWorkerDrain            OpCode = 0x325
-	OpWorkerRegisterResponse OpCode = 0x330
-	OpWorkerListResponse     OpCode = 0x331
-	OpWorkerInfoResponse     OpCode = 0x332
-	OpWorkerDrainResponse    OpCode = 0x333
+	OpWorkerRegister   OpCode = 0x320
+	OpWorkerHeartbeat  OpCode = 0x321
+	OpWorkerDeregister OpCode = 0x322
+	OpWorkerList       OpCode = 0x323
+	OpWorkerInfo       OpCode = 0x324
+	OpWorkerDrain      OpCode = 0x325
 
 	// ── Workflows (0x340 – 0x35F) ──
-	OpWorkflowCreate                  OpCode = 0x340
-	OpWorkflowStart                   OpCode = 0x341
-	OpWorkflowSignal                  OpCode = 0x342
-	OpWorkflowCancel                  OpCode = 0x343
-	OpWorkflowStatus                  OpCode = 0x344
-	OpWorkflowHistory                 OpCode = 0x345
-	OpWorkflowListRuns                OpCode = 0x346
-	OpWorkflowGetDefinition           OpCode = 0x347
-	OpWorkflowDisable                 OpCode = 0x348
-	OpWorkflowEnable                  OpCode = 0x349
-	OpWorkflowListDefinitions         OpCode = 0x34A
-	OpWorkflowCreateResponse          OpCode = 0x350
-	OpWorkflowStartResponse           OpCode = 0x351
-	OpWorkflowStatusResponse          OpCode = 0x352
-	OpWorkflowHistoryResponse         OpCode = 0x353
-	OpWorkflowListRunsResponse        OpCode = 0x354
-	OpWorkflowGetDefinitionResponse   OpCode = 0x355
-	OpWorkflowDisableResponse         OpCode = 0x356
-	OpWorkflowEnableResponse          OpCode = 0x357
-	OpWorkflowListDefinitionsResponse OpCode = 0x358
+	OpWorkflowCreate          OpCode = 0x340
+	OpWorkflowStart           OpCode = 0x341
+	OpWorkflowSignal          OpCode = 0x342
+	OpWorkflowCancel          OpCode = 0x343
+	OpWorkflowStatus          OpCode = 0x344
+	OpWorkflowHistory         OpCode = 0x345
+	OpWorkflowListRuns        OpCode = 0x346
+	OpWorkflowGetDefinition   OpCode = 0x347
+	OpWorkflowDisable         OpCode = 0x348
+	OpWorkflowEnable          OpCode = 0x349
+	OpWorkflowListDefinitions OpCode = 0x34A
 
 	// ── Processing (0x360 – 0x37F) ──
-	OpProcessingSubmit            OpCode = 0x360
-	OpProcessingStop              OpCode = 0x361
-	OpProcessingCancel            OpCode = 0x362
-	OpProcessingStatus            OpCode = 0x363
-	OpProcessingList              OpCode = 0x364
-	OpProcessingSavepoint         OpCode = 0x365
-	OpProcessingRestore           OpCode = 0x366
-	OpProcessingRescale           OpCode = 0x367
-	OpProcessingSubmitResponse    OpCode = 0x370
-	OpProcessingStopResponse      OpCode = 0x371
-	OpProcessingCancelResponse    OpCode = 0x372
-	OpProcessingStatusResponse    OpCode = 0x373
-	OpProcessingListResponse      OpCode = 0x374
-	OpProcessingSavepointResponse OpCode = 0x375
-	OpProcessingRestoreResponse   OpCode = 0x376
-	OpProcessingRescaleResponse   OpCode = 0x377
+	OpProcessingSubmit    OpCode = 0x360
+	OpProcessingStop      OpCode = 0x361
+	OpProcessingCancel    OpCode = 0x362
+	OpProcessingStatus    OpCode = 0x363
+	OpProcessingList      OpCode = 0x364
+	OpProcessingSavepoint OpCode = 0x365
+	OpProcessingRestore   OpCode = 0x366
+	OpProcessingRescale   OpCode = 0x367
 )
 
 // StatusCode represents status codes for Flo protocol responses.
@@ -315,20 +233,14 @@ const (
 	OptIfExists    OptionTag = 0x04 // void: Only set if key exists (XX)
 	OptLimit       OptionTag = 0x05 // u32: Maximum number of results for scan/list operations
 	OptKeysOnly    OptionTag = 0x06 // u8: Skip values in scan response (0/1)
-	OptCursor      OptionTag = 0x07 // bytes: Pagination cursor (ShardWalker format)
 	OptRoutingKey  OptionTag = 0x08 // string: Explicit routing key for shard co-location
 	OptTxnID       OptionTag = 0x09 // u64: Transaction ID for per-shard transactions
 
 	// Queue Options (0x10 - 0x1F)
-	OptPriority            OptionTag = 0x10 // u8: Message priority (0-255, higher = more urgent)
-	OptDelayMS             OptionTag = 0x11 // u64: Delay before message becomes visible
-	OptVisibilityTimeoutMS OptionTag = 0x12 // u32: How long message is invisible after dequeue
-	OptDedupKey            OptionTag = 0x13 // string: Deduplication key
-	OptMaxRetries          OptionTag = 0x14 // u8: Maximum retry attempts before DLQ
-	OptCount               OptionTag = 0x15 // u32: Number of messages to dequeue
-	OptSendToDLQ           OptionTag = 0x16 // u8: Whether to send failed messages to DLQ (0/1)
-	OptBlockMS             OptionTag = 0x17 // u32: Blocking timeout (0 = don't wait, max 300000)
-	OptWaitMS              OptionTag = 0x18 // u32: Watch timeout - wait for NEXT version change (0 = don't wait, max 300000)
+	OptPriority OptionTag = 0x10 // u8: Message priority (0-255, higher = more urgent)
+	OptCount    OptionTag = 0x15 // u32: Number of messages to dequeue
+	OptBlockMS  OptionTag = 0x17 // u32: Blocking timeout (0 = don't wait, max 300000)
+	OptWaitMS   OptionTag = 0x18 // u32: Watch timeout - wait for NEXT version change (0 = don't wait, max 300000)
 
 	// Stream Options (0x20 - 0x2F) - StreamID-native ONLY
 	// All stream positioning uses StreamID (timestamp_ms + sequence) - no legacy offset/timestamp modes
@@ -342,29 +254,8 @@ const (
 	OptDryRun        OptionTag = 0x28 // void: Flag to preview what would be deleted
 
 	// Consumer Group Options (0x30 - 0x3F)
-	OptAckTimeoutMS      OptionTag = 0x30 // u32: Time before unacked message auto-redelivers
-	OptMaxDeliver        OptionTag = 0x31 // u8: Max delivery attempts before DLQ (default: 10)
-	OptSubscriptionMode  OptionTag = 0x32 // u8: 0=shared, 1=exclusive, 2=key_shared
-	OptRedeliveryDelayMS OptionTag = 0x33 // u32: Delay before NACK'd message becomes visible
-	OptConsumerTimeoutMS OptionTag = 0x34 // u32: Remove consumer from group if no activity
-	OptNoAck             OptionTag = 0x35 // void: Auto-ack on delivery (at-most-once)
-	OptIdleTimeoutMS     OptionTag = 0x36 // u64: Min idle time for claiming stuck messages
-	OptMaxAckPending     OptionTag = 0x37 // u32: Max unacked messages per consumer
-	OptExtendAckMS       OptionTag = 0x38 // u32: Amount of time to extend ack deadline
-	OptMaxStandbys       OptionTag = 0x39 // u16: Max standby consumers in exclusive mode
-	OptNumSlots          OptionTag = 0x3A // u16: Number of hash slots for key_shared mode
-
-	// Worker/Action Options (0x40 - 0x4F)
-	OptWorkerID OptionTag = 0x40 // string: Worker identifier
-	OptExtendMS OptionTag = 0x41 // u32: Lease extension time in milliseconds
-	OptMaxTasks OptionTag = 0x42 // u32: Maximum tasks to return in batch
-	OptRetry    OptionTag = 0x43 // u8: Whether to retry on failure (0/1)
-
-	// Workflow Options (0x50 - 0x5F)
-	OptTimeoutMS      OptionTag = 0x50 // u64: Workflow/activity timeout
-	OptRetryPolicy    OptionTag = 0x51 // bytes: Serialized retry policy
-	OptCorrelationID  OptionTag = 0x52 // string: Correlation ID for tracing
-	OptSubscriptionID OptionTag = 0x53 // u64: Subscription ID for stream subscriptions
+	OptAckTimeoutMS OptionTag = 0x30 // u32: Time before unacked message auto-redelivers
+	OptMaxDeliver   OptionTag = 0x31 // u8: Max delivery attempts before DLQ (default: 10)
 
 	// Time-Series Options (0x60 - 0x6F)
 	OptTSFromMS      OptionTag = 0x60 // i64: Start of time range (inclusive, unix ms)
@@ -373,11 +264,9 @@ const (
 	OptTSAggregation OptionTag = 0x63 // string: Aggregation function name (avg, sum, count, min, max)
 	OptTSField       OptionTag = 0x64 // string: Field name filter (empty = "value")
 	OptTSTags        OptionTag = 0x65 // string: Comma-separated tag filters "key=val,key2=val2"
-	OptTSPrecision   OptionTag = 0x66 // u8: Timestamp precision (0=ns, 1=us, 2=ms, 3=s)
 	OptTSTimestamp   OptionTag = 0x67 // i64: Explicit timestamp for write (0 = server-assigned)
 	OptTSRawTTL      OptionTag = 0x68 // string: Raw data TTL (e.g., "7d")
 	OptTSDownsample  OptionTag = 0x69 // string: Downsample rule (e.g., "1m:avg:30d")
-	OptTSBatch       OptionTag = 0x6A // void: Flag indicating batch/line-protocol mode
 )
 
 // KVEntry represents an entry from scan results.
@@ -498,15 +387,12 @@ type HistoryOptions struct {
 type EnqueueOptions struct {
 	Namespace string
 	Priority  uint8
-	DelayMS   *uint64
-	DedupKey  string
 }
 
 // DequeueOptions contains options for queue dequeue operations.
 type DequeueOptions struct {
-	Namespace           string
-	VisibilityTimeoutMS *uint32
-	BlockMS             *uint32 // Long-poll wait (nil or 0 = don't wait, max 300000)
+	Namespace string
+	BlockMS   *uint32 // Long-poll wait (nil or 0 = don't wait, max 300000)
 }
 
 // AckOptions contains options for queue ack operations.
@@ -517,7 +403,6 @@ type AckOptions struct {
 // NackOptions contains options for queue nack operations.
 type NackOptions struct {
 	Namespace string
-	ToDLQ     bool
 }
 
 // DLQListOptions contains options for DLQ list operations.
@@ -533,11 +418,6 @@ type DLQRequeueOptions struct {
 
 // PeekOptions contains options for queue peek operations.
 type PeekOptions struct {
-	Namespace string
-}
-
-// TouchOptions contains options for queue touch (lease renewal) operations.
-type TouchOptions struct {
 	Namespace string
 }
 
@@ -707,9 +587,8 @@ type StreamGroupAckOptions struct {
 
 // StreamGroupNackOptions contains options for consumer group nack.
 type StreamGroupNackOptions struct {
-	Namespace         string
-	Consumer          string  // Consumer ID (required for correct nack matching)
-	RedeliveryDelayMS *uint32 // Delay before message becomes visible again
+	Namespace string
+	Consumer  string // Consumer ID (required for correct nack matching)
 }
 
 // =============================================================================
@@ -827,7 +706,6 @@ type ProcessStats struct {
 // WorkerAwaitOptions contains options for action_await (blocking wait for task).
 type WorkerAwaitOptions struct {
 	Namespace string
-	TimeoutMS *uint64
 	BlockMS   *uint32 // Long-poll wait (nil = 30000, 0 = don't wait, max 300000)
 }
 

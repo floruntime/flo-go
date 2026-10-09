@@ -50,10 +50,10 @@ func TestOptionsBuilder(t *testing.T) {
 
 	t.Run("AddBytes", func(t *testing.T) {
 		b := NewOptionsBuilder()
-		b.AddBytes(OptDedupKey, []byte("test-key"))
+		b.AddBytes(OptRoutingKey, []byte("test-key"))
 		result := b.Build()
 
-		expected := append([]byte{byte(OptDedupKey), 8}, []byte("test-key")...)
+		expected := append([]byte{byte(OptRoutingKey), 8}, []byte("test-key")...)
 
 		if !bytes.Equal(result, expected) {
 			t.Errorf("expected %v, got %v", expected, result)
@@ -74,7 +74,7 @@ func TestOptionsBuilder(t *testing.T) {
 	t.Run("ChainedOptions", func(t *testing.T) {
 		b := NewOptionsBuilder()
 		b.AddU8(OptPriority, 5).
-			AddU64(OptDelayMS, 1000).
+			AddU64(OptTTLMs, 1000).
 			AddFlag(OptIfNotExists)
 
 		result := b.Build()
@@ -203,11 +203,8 @@ func TestParseResponseHeader(t *testing.T) {
 
 func TestParseScanResponse(t *testing.T) {
 	t.Run("EmptyResult", func(t *testing.T) {
-		// has_more(1) + cursor_len(4) + cursor(0) + count(4)
-		data := make([]byte, 9)
-		data[0] = 0 // has_more = false
-		// cursor_len = 0 (bytes 1-4)
-		// count = 0 (bytes 5-8)
+		// count(4) + has_more(1) + cursor_len(2)
+		data := make([]byte, 7)
 
 		result, err := parseScanResponse(data)
 		if err != nil {
@@ -229,13 +226,6 @@ func TestParseScanResponse(t *testing.T) {
 		// Build response manually
 		buf := make([]byte, 0, 100)
 
-		// has_more = true
-		buf = append(buf, 1)
-
-		// cursor_len = 4
-		buf = binary.LittleEndian.AppendUint32(buf, 4)
-		buf = append(buf, []byte("cur1")...)
-
 		// count = 2
 		buf = binary.LittleEndian.AppendUint32(buf, 2)
 
@@ -250,6 +240,11 @@ func TestParseScanResponse(t *testing.T) {
 		buf = append(buf, []byte("key2")...)
 		buf = binary.LittleEndian.AppendUint32(buf, 4)
 		buf = append(buf, []byte("val2")...)
+
+		// has_more = true, cursor = "cur1"
+		buf = append(buf, 1)
+		buf = binary.LittleEndian.AppendUint16(buf, 4)
+		buf = append(buf, []byte("cur1")...)
 
 		result, err := parseScanResponse(buf)
 		if err != nil {

@@ -183,17 +183,6 @@ seq, err := client.Queue.Enqueue("tasks", []byte(`{"task":"process"}`), nil)
 seq, err := client.Queue.Enqueue("tasks", payload, &flo.EnqueueOptions{
     Priority: 10,
 })
-
-// Enqueue with delay (available after 1 minute)
-delay := uint64(60000)
-seq, err := client.Queue.Enqueue("tasks", payload, &flo.EnqueueOptions{
-    DelayMS: &delay,
-})
-
-// Enqueue with deduplication key
-seq, err := client.Queue.Enqueue("tasks", payload, &flo.EnqueueOptions{
-    DedupKey: "task-123",
-})
 ```
 
 #### Dequeue
@@ -211,12 +200,6 @@ blockMS := uint32(30000)
 result, err := client.Queue.Dequeue("tasks", 10, &flo.DequeueOptions{
     BlockMS: &blockMS,
 })
-
-// Custom visibility timeout
-timeout := uint32(60000) // 1 minute
-result, err := client.Queue.Dequeue("tasks", 10, &flo.DequeueOptions{
-    VisibilityTimeoutMS: &timeout,
-})
 ```
 
 #### Ack/Nack
@@ -225,13 +208,8 @@ result, err := client.Queue.Dequeue("tasks", 10, &flo.DequeueOptions{
 // Acknowledge successful processing
 err := client.Queue.Ack("tasks", []uint64{msg.Seq}, nil)
 
-// Nack for retry
+// Nack for retry; the server moves a message to the DLQ once its retries run out
 err := client.Queue.Nack("tasks", []uint64{msg.Seq}, nil)
-
-// Nack and send to DLQ (don't retry)
-err := client.Queue.Nack("tasks", []uint64{msg.Seq}, &flo.NackOptions{
-    ToDLQ: true,
-})
 ```
 
 #### DLQ Operations
@@ -259,14 +237,6 @@ result, err := client.Queue.Peek("tasks", 10, nil)
 for _, msg := range result.Messages {
     fmt.Printf("Peeking: seq=%d payload=%s\n", msg.Seq, msg.Payload)
 }
-```
-
-#### Touch (Lease Renewal)
-
-```go
-// Extend lease timeout for messages being processed
-// Prevents messages from returning to queue during long processing
-err := client.Queue.Touch("tasks", []uint64{msg.Seq}, nil)
 ```
 
 ## Error Handling

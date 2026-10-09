@@ -124,16 +124,6 @@ func main() {
 	}
 	fmt.Printf("Enqueued priority message with seq=%d\n", seq)
 
-	// Enqueue with delay
-	delayMS := uint64(60000) // 1 minute
-	seq, err = client.Queue.Enqueue("tasks", []byte(`{"task": "delayed"}`), &flo.EnqueueOptions{
-		DelayMS: &delayMS,
-	})
-	if err != nil {
-		log.Fatalf("Enqueue with delay failed: %v", err)
-	}
-	fmt.Printf("Enqueued delayed message with seq=%d\n", seq)
-
 	// Dequeue messages
 	dequeueResult, err := client.Queue.Dequeue("tasks", 10, nil)
 	if err != nil {
@@ -167,17 +157,6 @@ func main() {
 			log.Fatalf("Nack failed: %v", err)
 		}
 		fmt.Printf("Nacked message seq=%d for retry\n", msg.Seq)
-	}
-
-	// Example: Send to DLQ (don't retry)
-	if len(dequeueResult.Messages) > 1 {
-		msg := dequeueResult.Messages[1]
-		if err := client.Queue.Nack("tasks", []uint64{msg.Seq}, &flo.NackOptions{
-			ToDLQ: true,
-		}); err != nil {
-			log.Fatalf("Nack to DLQ failed: %v", err)
-		}
-		fmt.Printf("Sent message seq=%d to DLQ\n", msg.Seq)
 	}
 
 	// List DLQ messages

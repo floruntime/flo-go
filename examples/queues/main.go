@@ -56,35 +56,6 @@ func main() {
 	}
 	fmt.Printf("Enqueued urgent task with priority 100: seq=%d\n", seq)
 
-	// Enqueue with delay
-	task3 := map[string]interface{}{
-		"task": "scheduled-report",
-		"type": "daily",
-	}
-	payload3, _ := json.Marshal(task3)
-	delayMS := uint64(60000) // 1 minute delay
-	seq, err = queue.Enqueue("tasks", payload3, &flo.EnqueueOptions{
-		DelayMS: &delayMS,
-	})
-	if err != nil {
-		log.Fatalf("Delayed enqueue failed: %v", err)
-	}
-	fmt.Printf("Enqueued delayed task (1 min): seq=%d\n", seq)
-
-	// Enqueue with deduplication key
-	task4 := map[string]interface{}{
-		"task":    "process-order",
-		"orderID": "ORD-12345",
-	}
-	payload4, _ := json.Marshal(task4)
-	seq, err = queue.Enqueue("tasks", payload4, &flo.EnqueueOptions{
-		DedupKey: "order-ORD-12345", // Prevents duplicate processing
-	})
-	if err != nil {
-		log.Fatalf("Dedup enqueue failed: %v", err)
-	}
-	fmt.Printf("Enqueued with dedup key: seq=%d\n", seq)
-
 	// Peek at messages without consuming
 	fmt.Println("\n--- Peeking at queue ---")
 	peekResult, err := queue.Peek("tasks", 5, nil)
@@ -147,17 +118,8 @@ func main() {
 	}
 	fmt.Printf("Blocking dequeue returned %d messages\n", len(dequeueResult.Messages))
 
-	// Touch to extend lease on long-running tasks
 	if len(dequeueResult.Messages) > 0 {
-		msg := dequeueResult.Messages[0]
-		fmt.Printf("\n--- Extending lease for seq=%d ---\n", msg.Seq)
-		if err := queue.Touch("tasks", []uint64{msg.Seq}, nil); err != nil {
-			log.Fatalf("Touch failed: %v", err)
-		}
-		fmt.Println("Lease extended by 30 seconds")
-
-		// Ack after processing
-		queue.Ack("tasks", []uint64{msg.Seq}, nil)
+		queue.Ack("tasks", []uint64{dequeueResult.Messages[0].Seq}, nil)
 	}
 
 	// Send to Dead Letter Queue (DLQ)
@@ -167,16 +129,13 @@ func main() {
 	badTask, _ := json.Marshal(map[string]string{"task": "will-fail"})
 	seq, _ = queue.Enqueue("tasks", badTask, nil)
 
-	// Dequeue and send to DLQ
+	// Nack it; the server moves a message to the DLQ once its retries run out
 	result, _ := queue.Dequeue("tasks", 1, nil)
 	if len(result.Messages) > 0 {
-		// Nack with ToDLQ flag
-		if err := queue.Nack("tasks", []uint64{result.Messages[0].Seq}, &flo.NackOptions{
-			ToDLQ: true,
-		}); err != nil {
-			log.Fatalf("Nack to DLQ failed: %v", err)
+		if err := queue.Nack("tasks", []uint64{result.Messages[0].Seq}, nil); err != nil {
+			log.Fatalf("Nack failed: %v", err)
 		}
-		fmt.Println("Sent message to DLQ")
+		fmt.Println("Nacked message")
 	}
 
 	// List DLQ messages
