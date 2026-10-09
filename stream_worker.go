@@ -177,10 +177,9 @@ func resolveStreams(opts StreamWorkerOptions) ([]string, error) {
 
 // NewStreamWorker creates a new stream worker from an existing client.
 //
-// The worker always opens its own TCP connection (endpoint/namespace come from
-// the parent) so blocking GroupRead does not block other RPCs on the parent.
-// Avoid keeping a second idle connection to the same namespace while the
-// worker runs — see Flo server issue with concurrent connections per namespace.
+// The worker opens two connections of its own (endpoint/namespace come from
+// the parent): one for the blocking GroupRead, and one for acks and nacks so
+// they don't wait behind it.
 func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordHandler) (*StreamWorker, error) {
 	streams, err := resolveStreams(opts)
 	if err != nil {
@@ -614,7 +613,7 @@ func (sw *StreamWorker) ackWithRetry(stream string, id StreamID, ack bool) {
 func (sw *StreamWorker) reconnectAck() error {
 	sw.ackReconnectMu.Lock()
 	defer sw.ackReconnectMu.Unlock()
-	if time.Since(sw.lastAckReconnect) < 2*time.Second {
+	if time.Since(sw.lastAckReconnect) < 2*time.Second && sw.ackClient.IsConnected() {
 		return nil
 	}
 	if err := sw.ackClient.ReconnectWithContext(sw.ctx); err != nil {
