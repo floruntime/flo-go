@@ -151,3 +151,40 @@ func TestStreamWorkerReconnectsDroppedConnWithinThrottle(t *testing.T) {
 		t.Error("handleReconnect skipped a dropped connection because a reconnect was recent")
 	}
 }
+
+// IsConnected is read by worker goroutines while another goroutine's request
+// drops the connection; under -race this must not report a data race.
+func TestIsConnectedWhileRequestDropsConnection(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() { conn.Close() })
+		readRequestID(conn) // never answered
+	}()
+
+	c := NewClient(ln.Addr().String(), WithTimeout(50*time.Millisecond))
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1000; i++ {
+			c.IsConnected()
+			time.Sleep(100 * time.Microsecond)
+		}
+	}()
+	c.KV.Get("k", nil)
+	<-done
+	if c.IsConnected() {
+		t.Error("client still connected after a timed-out request")
+	}
+}
