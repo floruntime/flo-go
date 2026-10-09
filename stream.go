@@ -101,6 +101,9 @@ func (s *StreamClient) Read(stream string, opts *StreamReadOptions) (*StreamRead
 		builder.AddU32(OptCount, *opts.Count)
 	}
 
+	if err := checkBlockMS(opts.BlockMS); err != nil {
+		return nil, err
+	}
 	if opts.BlockMS != nil {
 		builder.AddU32(OptBlockMS, *opts.BlockMS)
 	}
@@ -261,6 +264,9 @@ func (s *StreamClient) GroupRead(stream, group, consumer string, opts *StreamGro
 		builder.AddU32(OptCount, *opts.Count)
 	}
 
+	if err := checkBlockMS(opts.BlockMS); err != nil {
+		return nil, err
+	}
 	if opts.BlockMS != nil {
 		builder.AddU32(OptBlockMS, *opts.BlockMS)
 	}

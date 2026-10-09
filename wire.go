@@ -2,6 +2,7 @@ package flo
 
 import (
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 )
 
@@ -54,6 +55,25 @@ func (b *OptionsBuilder) AddFlag(tag OptionTag) *OptionsBuilder {
 // Build returns the built options as bytes.
 func (b *OptionsBuilder) Build() []byte {
 	return b.buf
+}
+
+// checkBlockMS refuses a blocking wait the server would refuse, before the
+// round trip.
+func checkBlockMS(blockMS *uint32) error {
+	if blockMS != nil && *blockMS > MaxBlockMS {
+		return fmt.Errorf("%w, got %d", ErrBlockTooLong, *blockMS)
+	}
+	return nil
+}
+
+// workerBlockMS resolves a worker's BlockMS. A worker always long-polls:
+// 0 (don't wait) would spin its poll loop against the server, so 0 means
+// defaultWorkerBlockMS.
+func workerBlockMS(blockMS uint32) (uint32, error) {
+	if blockMS == 0 {
+		return defaultWorkerBlockMS, nil
+	}
+	return blockMS, checkBlockMS(&blockMS)
 }
 
 // extractBlockMS scans TLV-encoded options for OptBlockMS (0x17) and returns

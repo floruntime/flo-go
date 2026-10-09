@@ -19,6 +19,10 @@ func (kv *KVClient) Get(key string, opts *GetOptions) (*GetResult, error) {
 	}
 	namespace := kv.client.getNamespace(opts.Namespace)
 
+	if err := checkBlockMS(opts.BlockMS); err != nil {
+		return nil, err
+	}
+
 	var options []byte
 	if opts.BlockMS != nil {
 		builder := NewOptionsBuilder()
