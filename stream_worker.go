@@ -582,6 +582,10 @@ func (sw *StreamWorker) processRecord(stream string, record StreamRecord) {
 // ackWithRetry sends an ack (or nack) to the server, reconnecting if the
 // connection was lost while the record was being processed.
 func (sw *StreamWorker) ackWithRetry(stream string, id StreamID, ack bool) {
+	op := "ack"
+	if !ack {
+		op = "nack"
+	}
 	const maxAttempts = 3
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		var err error
@@ -594,14 +598,16 @@ func (sw *StreamWorker) ackWithRetry(stream string, id StreamID, ack bool) {
 			return
 		}
 		if !IsConnectionError(err) || sw.ctx.Err() != nil {
+			sw.logger.Printf("Warning: [%s] %s for %s failed, the record will be redelivered: %v", stream, op, id, err)
 			return
 		}
-		op := "ack"
-		if !ack {
-			op = "nack"
+		if attempt == maxAttempts {
+			sw.logger.Printf("Warning: [%s] %s for %s failed after %d attempts, the record will be redelivered: %v", stream, op, id, maxAttempts, err)
+			return
 		}
 		sw.logger.Printf("[%s] Connection lost sending %s for %s (attempt %d/%d), reconnecting...", stream, op, id, attempt, maxAttempts)
 		if reconErr := sw.reconnectAck(); reconErr != nil {
+			sw.logger.Printf("Warning: [%s] %s for %s not sent, reconnect failed, the record will be redelivered: %v", stream, op, id, reconErr)
 			return
 		}
 	}
@@ -640,6 +646,9 @@ func (sw *StreamWorker) Stop() {
 func (sw *StreamWorker) Close() error {
 	sw.Stop()
 	if sw.ackClient != nil {
+		// Stop leaves the ack connection up so in-flight acks land during a
+		// drain; Close doesn't wait out a stalled one.
+		sw.ackClient.Interrupt()
 		sw.ackClient.Close()
 	}
 	if sw.client != nil {
