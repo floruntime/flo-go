@@ -628,7 +628,7 @@ type PendingEntry struct {
 	DeliveryCount uint32
 }
 
-// StreamClaimResult is the result of a GroupClaim cursor page (FLO-102).
+// StreamClaimResult is one page of a GroupClaim cursor scan.
 //
 // Records carry payload + headers (same shape as GroupRead). NextCursor is the
 // start_id to pass on the next GroupClaim call; when Done is true the PEL has
