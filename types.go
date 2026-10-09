@@ -237,7 +237,7 @@ const (
 	OptTxnID       OptionTag = 0x09 // u64: Transaction ID for per-shard transactions
 
 	// Queue Options (0x10 - 0x1F)
-	OptPriority OptionTag = 0x10 // u8: Message priority (0-255, higher = more urgent)
+	OptPriority OptionTag = 0x10 // u8: Message priority (0-255, lower is taken first)
 	OptCount    OptionTag = 0x15 // u32: Number of messages to dequeue
 	OptBlockMS  OptionTag = 0x17 // u32: Blocking timeout (0 = don't wait, max 300000)
 	OptWaitMS   OptionTag = 0x18 // u32: Watch timeout - wait for NEXT version change (0 = don't wait, max 300000)
@@ -386,7 +386,7 @@ type HistoryOptions struct {
 // EnqueueOptions contains options for queue enqueue operations.
 type EnqueueOptions struct {
 	Namespace string
-	Priority  uint8
+	Priority  uint8 // Lower is taken first
 }
 
 // DequeueOptions contains options for queue dequeue operations.

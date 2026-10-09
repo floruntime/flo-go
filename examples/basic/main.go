@@ -115,7 +115,7 @@ func main() {
 	}
 	fmt.Printf("Enqueued message with seq=%d\n", seq)
 
-	// Enqueue with priority
+	// Enqueue with priority (lower is taken first)
 	seq, err = client.Queue.Enqueue("tasks", []byte(`{"task": "urgent"}`), &flo.EnqueueOptions{
 		Priority: 10,
 	})
@@ -134,7 +134,7 @@ func main() {
 	for _, msg := range dequeueResult.Messages {
 		fmt.Printf("  Processing message seq=%d: %s\n", msg.Seq, msg.Payload)
 
-		// Acknowledge successful processing
+		// A dequeue consumes its messages; queues are currently at-most-once, so Ack and Nack have no effect on a dequeued message.
 		if err := client.Queue.Ack("tasks", []uint64{msg.Seq}, nil); err != nil {
 			log.Fatalf("Ack failed: %v", err)
 		}
@@ -150,16 +150,16 @@ func main() {
 	}
 	fmt.Printf("Dequeued %d messages (with blocking)\n", len(dequeueResult.Messages))
 
-	// Example: Nack a message (retry later)
+	// Nack has no effect on a dequeued message: it is not retried
 	if len(dequeueResult.Messages) > 0 {
 		msg := dequeueResult.Messages[0]
 		if err := client.Queue.Nack("tasks", []uint64{msg.Seq}, nil); err != nil {
 			log.Fatalf("Nack failed: %v", err)
 		}
-		fmt.Printf("Nacked message seq=%d for retry\n", msg.Seq)
+		fmt.Printf("Nacked message seq=%d\n", msg.Seq)
 	}
 
-	// List DLQ messages
+	// List DLQ messages (usually empty: a dequeued message does not reach the DLQ)
 	dlqResult, err := client.Queue.DLQList("tasks", nil)
 	if err != nil {
 		log.Fatalf("DLQ list failed: %v", err)

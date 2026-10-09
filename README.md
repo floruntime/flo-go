@@ -179,7 +179,7 @@ entries, err := client.KV.History("key", &flo.HistoryOptions{Limit: &limit})
 // Simple enqueue
 seq, err := client.Queue.Enqueue("tasks", []byte(`{"task":"process"}`), nil)
 
-// Enqueue with priority (higher = more urgent)
+// Enqueue with priority (lower is taken first)
 seq, err := client.Queue.Enqueue("tasks", payload, &flo.EnqueueOptions{
     Priority: 10,
 })
@@ -204,11 +204,10 @@ result, err := client.Queue.Dequeue("tasks", 10, &flo.DequeueOptions{
 
 #### Ack/Nack
 
-```go
-// Acknowledge successful processing
-err := client.Queue.Ack("tasks", []uint64{msg.Seq}, nil)
+A dequeue consumes its messages; queues are currently at-most-once, so Ack and Nack have no effect on a dequeued message and a dequeued message does not reach the DLQ.
 
-// Nack for retry; the server moves a message to the DLQ once its retries run out
+```go
+err := client.Queue.Ack("tasks", []uint64{msg.Seq}, nil)
 err := client.Queue.Nack("tasks", []uint64{msg.Seq}, nil)
 ```
 

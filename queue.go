@@ -55,6 +55,7 @@ func (q *QueueClient) Dequeue(queue string, count int, opts *DequeueOptions) (*D
 }
 
 // Ack acknowledges messages as successfully processed.
+// A dequeue consumes its messages; queues are currently at-most-once, so Ack and Nack have no effect on a dequeued message.
 func (q *QueueClient) Ack(queue string, seqs []uint64, opts *AckOptions) error {
 	if len(seqs) == 0 {
 		return nil
@@ -71,7 +72,8 @@ func (q *QueueClient) Ack(queue string, seqs []uint64, opts *AckOptions) error {
 	return err
 }
 
-// Nack negative acknowledges messages (retry or send to DLQ).
+// Nack negative acknowledges messages.
+// A dequeue consumes its messages; queues are currently at-most-once, so Ack and Nack have no effect on a dequeued message.
 func (q *QueueClient) Nack(queue string, seqs []uint64, opts *NackOptions) error {
 	if len(seqs) == 0 {
 		return nil

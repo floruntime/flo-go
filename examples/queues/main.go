@@ -42,19 +42,19 @@ func main() {
 	}
 	fmt.Printf("Enqueued task: seq=%d\n", seq)
 
-	// Enqueue with priority (higher priority = processed first)
+	// Enqueue with priority (lower is taken first)
 	task2 := map[string]interface{}{
 		"task": "urgent-alert",
 		"msg":  "Server is down!",
 	}
 	payload2, _ := json.Marshal(task2)
 	seq, err = queue.Enqueue("tasks", payload2, &flo.EnqueueOptions{
-		Priority: 100, // High priority
+		Priority: 1, // Taken before higher numbers
 	})
 	if err != nil {
 		log.Fatalf("Priority enqueue failed: %v", err)
 	}
-	fmt.Printf("Enqueued urgent task with priority 100: seq=%d\n", seq)
+	fmt.Printf("Enqueued urgent task with priority 1: seq=%d\n", seq)
 
 	// Peek at messages without consuming
 	fmt.Println("\n--- Peeking at queue ---")
@@ -91,7 +91,7 @@ func main() {
 		}
 	}
 
-	// Acknowledge successful messages
+	// A dequeue consumes its messages; queues are currently at-most-once, so Ack and Nack have no effect on a dequeued message.
 	if len(processedSeqs) > 0 {
 		if err := queue.Ack("tasks", processedSeqs, nil); err != nil {
 			log.Fatalf("Ack failed: %v", err)
@@ -99,12 +99,12 @@ func main() {
 		fmt.Printf("Acknowledged %d messages\n", len(processedSeqs))
 	}
 
-	// Nack failed messages (will be retried)
+	// Nack has no effect either: these messages are not retried
 	if len(failedSeqs) > 0 {
 		if err := queue.Nack("tasks", failedSeqs, nil); err != nil {
 			log.Fatalf("Nack failed: %v", err)
 		}
-		fmt.Printf("Nacked %d messages for retry\n", len(failedSeqs))
+		fmt.Printf("Nacked %d messages\n", len(failedSeqs))
 	}
 
 	// Dequeue with blocking (long polling)
@@ -122,21 +122,9 @@ func main() {
 		queue.Ack("tasks", []uint64{dequeueResult.Messages[0].Seq}, nil)
 	}
 
-	// Send to Dead Letter Queue (DLQ)
+	// Dead Letter Queue (DLQ). Queues are currently at-most-once, so a
+	// dequeued message does not reach the DLQ in normal use; it is usually empty.
 	fmt.Println("\n--- DLQ operations ---")
-
-	// Enqueue a message that will "fail"
-	badTask, _ := json.Marshal(map[string]string{"task": "will-fail"})
-	seq, _ = queue.Enqueue("tasks", badTask, nil)
-
-	// Nack it; the server moves a message to the DLQ once its retries run out
-	result, _ := queue.Dequeue("tasks", 1, nil)
-	if len(result.Messages) > 0 {
-		if err := queue.Nack("tasks", []uint64{result.Messages[0].Seq}, nil); err != nil {
-			log.Fatalf("Nack failed: %v", err)
-		}
-		fmt.Println("Nacked message")
-	}
 
 	// List DLQ messages
 	dlqResult, err := queue.DLQList("tasks", nil)
