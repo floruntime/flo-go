@@ -78,24 +78,48 @@ func workerBlockMS(blockMS uint32) (uint32, error) {
 	return blockMS, checkBlockMS(&blockMS)
 }
 
-// emptyPollPause is how long a worker waits before polling again after a
-// blocking poll came back empty well before its BlockMS. The server answers
-// a blocking read empty at once when it has no room to park it, so
-// re-polling straight away would spin against a server that is already full.
-const emptyPollPause = 100 * time.Millisecond
+// emptyPollBackoff paces a worker's re-polls after empty answers to blocking
+// polls. The server answers empty in two cases that look the same on the
+// wire: a blocking read or await it has no room to park is refused at once,
+// and a parked group read is woken empty by every append as a cue to read
+// again (every consumer in the group wakes; one gets the record). A refusal
+// comes back within a round trip, while a wake comes whenever data arrives,
+// so an empty answer counts as early only under min(250 ms, BlockMS/2). A
+// single early empty may still be a fast wake and is re-polled at once; back-
+// to-back early empties mean a full server and back off from 50 ms, doubling
+// up to 1 s.
+type emptyPollBackoff struct {
+	delay time.Duration
+}
 
-// pauseAfterEmptyPoll applies emptyPollPause when a poll that started at
-// started with the given BlockMS returned nothing in under half that time.
-func pauseAfterEmptyPoll(ctx context.Context, started time.Time, blockMS uint32) {
-	if time.Since(started) >= time.Duration(blockMS)*time.Millisecond/2 {
+const (
+	earlyEmptyPollBound = 250 * time.Millisecond
+	minEmptyPollDelay   = 50 * time.Millisecond
+	maxEmptyPollDelay   = time.Second
+)
+
+// reset is called when a poll returns work.
+func (b *emptyPollBackoff) reset() { b.delay = 0 }
+
+// afterEmpty is called when a poll sent at started, waiting up to blockMS,
+// returns nothing. It returns as soon as ctx is done.
+func (b *emptyPollBackoff) afterEmpty(ctx context.Context, started time.Time, blockMS uint32) {
+	early := min(earlyEmptyPollBound, time.Duration(blockMS)*time.Millisecond/2)
+	if time.Since(started) >= early {
+		b.reset()
 		return
 	}
-	t := time.NewTimer(emptyPollPause)
+	if b.delay == 0 {
+		b.delay = minEmptyPollDelay
+		return
+	}
+	t := time.NewTimer(b.delay)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
 	case <-t.C:
 	}
+	b.delay = min(2*b.delay, maxEmptyPollDelay)
 }
 
 // extractBlockMS scans TLV-encoded options for OptBlockMS (0x17) and returns

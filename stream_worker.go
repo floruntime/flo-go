@@ -381,6 +381,7 @@ func (sw *StreamWorker) joinGroups() error {
 
 // pollStream runs a single stream's poll loop.
 func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
+	var backoff emptyPollBackoff
 	for {
 		select {
 		case <-sw.ctx.Done():
@@ -410,9 +411,10 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 			}
 
 			if result == nil || len(result.Records) == 0 {
-				pauseAfterEmptyPoll(sw.ctx, polled, sw.config.BlockMS)
+				backoff.afterEmpty(sw.ctx, polled, sw.config.BlockMS)
 				continue
 			}
+			backoff.reset()
 
 			for _, record := range result.Records {
 				sem <- struct{}{} // concurrency gate
