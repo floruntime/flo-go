@@ -406,7 +406,6 @@ type NackOptions struct {
 // DLQListOptions contains options for DLQ list operations.
 type DLQListOptions struct {
 	Namespace string
-	Limit     uint32
 }
 
 // DLQRequeueOptions contains options for DLQ requeue operations.

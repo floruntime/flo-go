@@ -214,11 +214,6 @@ err := client.Queue.Nack("tasks", []uint64{msg.Seq}, nil)
 // List DLQ messages
 result, err := client.Queue.DLQList("tasks", nil)
 
-// List with custom limit
-result, err := client.Queue.DLQList("tasks", &flo.DLQListOptions{
-    Limit: 100,
-})
-
 // Requeue messages from DLQ back to main queue
 seqs := []uint64{msg1.Seq, msg2.Seq}
 err := client.Queue.DLQRequeue("tasks", seqs, nil)

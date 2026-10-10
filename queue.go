@@ -93,15 +93,11 @@ func (q *QueueClient) Nack(queue string, seqs []uint64, opts *NackOptions) error
 // DLQList lists messages in the Dead Letter Queue.
 func (q *QueueClient) DLQList(queue string, opts *DLQListOptions) (*DequeueResult, error) {
 	if opts == nil {
-		opts = &DLQListOptions{Limit: 100}
+		opts = &DLQListOptions{}
 	}
 	namespace := q.client.getNamespace(opts.Namespace)
 
-	// Build TLV options
-	builder := NewOptionsBuilder()
-	builder.AddU32(OptLimit, opts.Limit)
-
-	resp, err := q.client.sendAndCheck(OpQueueDLQList, namespace, []byte(queue), nil, builder.Build(), false)
+	resp, err := q.client.sendAndCheck(OpQueueDLQList, namespace, []byte(queue), nil, nil, false)
 	if err != nil {
 		return nil, err
 	}
