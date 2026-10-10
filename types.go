@@ -647,10 +647,8 @@ type ActionRegisterOptions struct {
 
 // ActionInvokeOptions contains options for action invocation.
 type ActionInvokeOptions struct {
-	Namespace      string
-	Priority       *uint8
-	DelayMS        *uint64
-	IdempotencyKey string
+	Namespace string
+	Labels    string // Required worker labels as a JSON object, e.g. {"gpu":true}; empty means none
 }
 
 // ActionInvokeResult represents the result of an action invocation.

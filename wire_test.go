@@ -419,3 +419,47 @@ func TestExtractBlockMS(t *testing.T) {
 		}
 	})
 }
+
+func TestEncodeInvokeValue(t *testing.T) {
+	t.Run("no labels", func(t *testing.T) {
+		got, err := encodeInvokeValue("", []byte("x"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []byte{0, 'x'}; !bytes.Equal(got, want) {
+			t.Errorf("expected %v, got %v", want, got)
+		}
+	})
+
+	t.Run("labels", func(t *testing.T) {
+		got, err := encodeInvokeValue(`{"gpu":true}`, []byte("x"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := append([]byte{1, 12, 0}, `{"gpu":true}x`...)
+		if !bytes.Equal(got, want) {
+			t.Errorf("expected %v, got %v", want, got)
+		}
+	})
+
+	t.Run("labels too long", func(t *testing.T) {
+		if _, err := encodeInvokeValue(string(make([]byte, 65536)), nil); err == nil {
+			t.Error("expected an error for labels over 65535 bytes")
+		}
+	})
+}
+
+func TestParseActionInvokeResult(t *testing.T) {
+	got, err := parseActionInvokeResult(append([]byte{3, 0}, "act\x00"...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RunID != "act" {
+		t.Errorf("expected run id %q, got %q", "act", got.RunID)
+	}
+	for _, bad := range [][]byte{nil, {5}, {0, 0}, {9, 0, 'a'}} {
+		if _, err := parseActionInvokeResult(bad); err == nil {
+			t.Errorf("expected an error for %v", bad)
+		}
+	}
+}
