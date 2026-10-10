@@ -16,6 +16,7 @@ func statusReply(requestID uint64, status StatusCode, msg string) []byte {
 	binary.LittleEndian.PutUint32(frame[4:8], uint32(len(msg)))
 	binary.LittleEndian.PutUint64(frame[8:16], requestID)
 	frame[20] = Version
+	binary.LittleEndian.PutUint64(frame[24:32], TableHash)
 	frame[21] = byte(status)
 	copy(frame[HeaderSize:], msg)
 	binary.LittleEndian.PutUint32(frame[16:20], computeCRC32(frame[:HeaderSize], []byte(msg)))
@@ -90,5 +91,44 @@ func TestErrorStatusDoesNotDesyncNextCall(t *testing.T) {
 				t.Fatalf("second Get: got %v, %v; want fresh", res, err)
 			}
 		})
+	}
+}
+
+// An answer from a server built from another table is refused before its
+// body is read, naming both tables, and the connection is dropped so the
+// unread body can't be taken for the next call's answer.
+func TestAnswerFromAnotherTableIsRefusedUnread(t *testing.T) {
+	ln := serveAll(t, func(id uint64) []byte {
+		frame := fakeReply(id, "from elsewhere")
+		binary.LittleEndian.PutUint64(frame[24:32], TableHash+1)
+		binary.LittleEndian.PutUint32(frame[16:20], computeCRC32(frame[:HeaderSize], frame[HeaderSize:]))
+		return frame
+	})
+	c := NewClient(ln.Addr().String(), WithTimeout(time.Second))
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, err := c.KV.Get("k", nil)
+	var tm *TableMismatchError
+	if !errors.As(err, &tm) || !errors.Is(err, ErrTableMismatch) || tm.ServerTable != TableHash+1 {
+		t.Fatalf("got %v, want a TableMismatchError naming the server's table", err)
+	}
+	if !strings.Contains(err.Error(), "upgrade the client") {
+		t.Errorf("error %q does not say what to do", err)
+	}
+	if c.IsConnected() {
+		t.Error("the connection was kept with an unread body on it")
+	}
+}
+
+func TestRequestsCarryTheTableHash(t *testing.T) {
+	data, err := serializeRequest(1, OpKVGet, []byte("default"), []byte("k"), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data[22] != 2 || binary.LittleEndian.Uint64(data[24:32]) != 0x4e9243eeab771a02 {
+		t.Fatalf("header version %d table 0x%016x, want 2 and the pinned table", data[22], binary.LittleEndian.Uint64(data[24:32]))
 	}
 }

@@ -22,8 +22,8 @@ var (
 	// ErrInvalidMagic indicates an invalid protocol magic number.
 	ErrInvalidMagic = errors.New("flo: invalid protocol magic")
 
-	// ErrUnsupportedVersion indicates an unsupported protocol version.
-	ErrUnsupportedVersion = errors.New("flo: unsupported protocol version")
+	// ErrTableMismatch matches a *TableMismatchError.
+	ErrTableMismatch = errors.New("flo: server built from another protocol version or op table")
 
 	// ErrInvalidChecksum indicates a CRC32 checksum validation failure.
 	ErrInvalidChecksum = errors.New("flo: invalid checksum")
@@ -204,3 +204,20 @@ func IsUnavailable(err error) bool {
 func IsInternal(err error) bool {
 	return errors.Is(err, ErrInternal)
 }
+
+// TableMismatchError is returned when the server was built from another
+// protocol version or op table than this SDK, so neither can read the
+// other. Upgrade the SDK and the server together.
+type TableMismatchError struct {
+	ServerVersion uint8
+	ServerTable   uint64
+}
+
+func (e *TableMismatchError) Error() string {
+	if e.ServerVersion != Version {
+		return fmt.Sprintf("flo: server protocol %d, client protocol %d: upgrade the client", e.ServerVersion, Version)
+	}
+	return fmt.Sprintf("flo: server table 0x%016x, client table 0x%016x: upgrade the client", e.ServerTable, TableHash)
+}
+
+func (e *TableMismatchError) Is(target error) bool { return target == ErrTableMismatch }

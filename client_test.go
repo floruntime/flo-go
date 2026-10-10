@@ -22,6 +22,7 @@ func fakeReply(requestID uint64, value string) []byte {
 	binary.LittleEndian.PutUint32(frame[4:8], uint32(len(data)))
 	binary.LittleEndian.PutUint64(frame[8:16], requestID)
 	frame[20] = Version
+	binary.LittleEndian.PutUint64(frame[24:32], TableHash)
 	frame[21] = byte(StatusOK)
 	copy(frame[HeaderSize:], data)
 	binary.LittleEndian.PutUint32(frame[16:20], computeCRC32(frame[:HeaderSize], data))

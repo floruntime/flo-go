@@ -23,8 +23,14 @@ import (
 // Protocol constants
 const (
 	Magic      uint32 = 0x004F4C46 // "FLO\0" in little-endian
-	Version    uint8  = 0x01
+	Version    uint8  = 0x02
 	HeaderSize        = 32
+
+	// TableHash is the hash of the op table this SDK was built for, written
+	// into every request header. A server built from another table refuses
+	// the request, and its answers carry its own hash, which this client
+	// refuses. It changes with every server release that changes a layout.
+	TableHash uint64 = 0x4e9243eeab771a02
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255

@@ -3,6 +3,8 @@ package flo
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -149,6 +151,7 @@ func TestParseResponseHeader(t *testing.T) {
 		binary.LittleEndian.PutUint64(header[8:16], 42) // requestID
 		binary.LittleEndian.PutUint32(header[16:20], 0) // CRC (will be computed)
 		header[20] = Version
+		binary.LittleEndian.PutUint64(header[24:32], TableHash)
 		header[21] = byte(StatusOK)
 		header[22] = 0 // flags
 		header[23] = 0 // pad
@@ -173,6 +176,7 @@ func TestParseResponseHeader(t *testing.T) {
 		header := make([]byte, HeaderSize)
 		binary.LittleEndian.PutUint32(header[0:4], 0xDEADBEEF)
 		header[20] = Version
+		binary.LittleEndian.PutUint64(header[24:32], TableHash)
 
 		_, _, _, _, err := parseResponseHeader(header)
 		if err != ErrInvalidMagic {
@@ -180,14 +184,23 @@ func TestParseResponseHeader(t *testing.T) {
 		}
 	})
 
-	t.Run("UnsupportedVersion", func(t *testing.T) {
-		header := make([]byte, HeaderSize)
-		binary.LittleEndian.PutUint32(header[0:4], Magic)
-		header[20] = 0xFF // bad version
-
-		_, _, _, _, err := parseResponseHeader(header)
-		if err != ErrUnsupportedVersion {
-			t.Errorf("expected ErrUnsupportedVersion, got %v", err)
+	t.Run("AnotherProtocolOrTable", func(t *testing.T) {
+		for _, c := range []struct {
+			version uint8
+			table   uint64
+			want    string
+		}{
+			{1, 0, "flo: server protocol 1, client protocol 2: upgrade the client"},
+			{Version, TableHash + 1, fmt.Sprintf("flo: server table 0x%016x, client table 0x%016x: upgrade the client", TableHash+1, TableHash)},
+		} {
+			header := make([]byte, HeaderSize)
+			binary.LittleEndian.PutUint32(header[0:4], Magic)
+			header[20] = c.version
+			binary.LittleEndian.PutUint64(header[24:32], c.table)
+			_, _, _, _, err := parseResponseHeader(header)
+			if !errors.Is(err, ErrTableMismatch) || err.Error() != c.want {
+				t.Errorf("got %v, want %q", err, c.want)
+			}
 		}
 	})
 
