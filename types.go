@@ -30,7 +30,7 @@ const (
 	// into every request header. A server built from another table refuses
 	// the request, and its answers carry its own hash, which this client
 	// refuses. It changes with every server release that changes a layout.
-	TableHash uint64 = 0x4e9243eeab771a02
+	TableHash uint64 = 0x2827f6f0631754fe
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -953,3 +953,51 @@ type ProcessingListEntry struct {
 	Parallelism uint32
 	CreatedAt   int64
 }
+
+// Reason says why the server refused a request. It mirrors the server's
+// list; the table hash covers it, so a server can't send one this SDK
+// doesn't know.
+type Reason uint16
+
+const (
+	ReasonUnknownOp           Reason = 1
+	ReasonMalformed           Reason = 2
+	ReasonFieldTooLong        Reason = 3
+	ReasonOutOfRange          Reason = 4
+	ReasonLeaderUnknown       Reason = 5
+	ReasonShardBusy           Reason = 6
+	ReasonTableMismatch       Reason = 7
+	ReasonUnknownFlag         Reason = 8
+	ReasonInternal            Reason = 9
+	ReasonCommittedNotApplied Reason = 10
+	ReasonAnswerLost          Reason = 11
+	// ReasonUnclassified is a refusal from an op family the server hasn't
+	// classified yet; its status and message say what happened.
+	ReasonUnclassified Reason = 12
+)
+
+var reasonNames = map[Reason]string{
+	ReasonUnknownOp: "unknown_op", ReasonMalformed: "malformed", ReasonFieldTooLong: "field_too_long",
+	ReasonOutOfRange: "out_of_range", ReasonLeaderUnknown: "leader_unknown", ReasonShardBusy: "shard_busy",
+	ReasonTableMismatch: "table_mismatch", ReasonUnknownFlag: "unknown_flag", ReasonInternal: "internal",
+	ReasonCommittedNotApplied: "committed_not_applied", ReasonAnswerLost: "answer_lost", ReasonUnclassified: "unclassified",
+}
+
+func (r Reason) String() string {
+	if n, ok := reasonNames[r]; ok {
+		return n
+	}
+	return fmt.Sprintf("reason(%d)", uint16(r))
+}
+
+// Ran says whether a refused request took effect: retry logic reads this,
+// not the message.
+type Ran uint8
+
+const (
+	RanNo Ran = 0
+	// RanYes: it took effect; don't resend it.
+	RanYes Ran = 1
+	// RanUnknown: it may still take effect; check before resending.
+	RanUnknown Ran = 2
+)

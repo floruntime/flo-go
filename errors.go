@@ -1,6 +1,7 @@
 package flo
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 )
@@ -47,16 +48,24 @@ var (
 
 // ServerError represents an error returned by the Flo server.
 type ServerError struct {
-	Status  StatusCode
+	Status StatusCode
+	// Reason says why; ReasonUnclassified when the server didn't say.
+	Reason Reason
+	// Ran says whether the request took effect.
+	Ran     Ran
 	Message string
 }
 
 // Error implements the error interface.
 func (e *ServerError) Error() string {
-	if e.Message != "" {
-		return fmt.Sprintf("flo: server error (%s): %s", e.Status, e.Message)
+	codes := e.Status.String()
+	if e.Reason != ReasonUnclassified && e.Reason != 0 {
+		codes += "/" + e.Reason.String()
 	}
-	return fmt.Sprintf("flo: server error: %s", e.Status)
+	if e.Message != "" {
+		return fmt.Sprintf("flo: server error (%s): %s", codes, e.Message)
+	}
+	return fmt.Sprintf("flo: server error: %s", codes)
 }
 
 // Is implements error matching for errors.Is().
@@ -95,14 +104,21 @@ var (
 )
 
 // newServerError creates a ServerError from a status code and optional data.
+// newServerError reads a refusal's body: [reason:u16][ran:u8][message].
 func newServerError(status StatusCode, data []byte) error {
-	msg := ""
-	if len(data) > 0 {
-		msg = string(data)
+	if len(data) < 3 {
+		return fmt.Errorf("%w: a refusal body of %d bytes", ErrIncompleteResponse, len(data))
+	}
+	reason := Reason(binary.LittleEndian.Uint16(data[0:2]))
+	ran := Ran(data[2])
+	if _, ok := reasonNames[reason]; !ok || ran > RanUnknown {
+		return fmt.Errorf("%w: a refusal with reason %d and ran %d", ErrIncompleteResponse, reason, ran)
 	}
 	return &ServerError{
 		Status:  status,
-		Message: msg,
+		Reason:  reason,
+		Ran:     ran,
+		Message: string(data[3:]),
 	}
 }
 
