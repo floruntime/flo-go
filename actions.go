@@ -3,6 +3,7 @@ package flo
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 )
 
 // ActionClient provides action operations.
@@ -80,46 +81,10 @@ func (a *ActionClient) Invoke(name string, input []byte, opts *ActionInvokeOptio
 
 	namespace := a.client.getNamespace(opts.Namespace)
 
-	// Build value: [priority:u8][delay_ms:i64][has_caller:u8]
-	//              [has_idempotency_key:u8][key_len:u16]?[key]?
-	//              [has_labels:u8][labels_len:u16]?[labels]?[input...]
-	value := make([]byte, 0, len(input)+32)
-
-	// Priority (default 10)
-	priority := uint8(10)
-	if opts.Priority != nil {
-		priority = *opts.Priority
+	value, err := encodeInvokeValue(opts.Labels, input)
+	if err != nil {
+		return nil, err
 	}
-	value = append(value, priority)
-
-	// Delay (default 0)
-	delayMS := int64(0)
-	if opts.DelayMS != nil {
-		delayMS = int64(*opts.DelayMS)
-	}
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, uint64(delayMS))
-	value = append(value, buf...)
-
-	// Caller ID (none)
-	value = append(value, 0)
-
-	// Idempotency key (optional)
-	if opts.IdempotencyKey != "" {
-		value = append(value, 1)
-		buf = make([]byte, 2)
-		binary.LittleEndian.PutUint16(buf, uint16(len(opts.IdempotencyKey)))
-		value = append(value, buf...)
-		value = append(value, []byte(opts.IdempotencyKey)...)
-	} else {
-		value = append(value, 0)
-	}
-
-	// Labels (none)
-	value = append(value, 0)
-
-	// Input
-	value = append(value, input...)
 
 	resp, err := a.client.sendAndCheck(OpActionInvoke, namespace, []byte(name), value, nil, false)
 	if err != nil {
@@ -127,6 +92,21 @@ func (a *ActionClient) Invoke(name string, input []byte, opts *ActionInvokeOptio
 	}
 
 	return parseActionInvokeResult(resp.Data)
+}
+
+// encodeInvokeValue builds [has_labels:u8]([labels_len:u16 LE][labels])?[input...].
+func encodeInvokeValue(labels string, input []byte) ([]byte, error) {
+	if labels == "" {
+		return append([]byte{0}, input...), nil
+	}
+	if len(labels) > math.MaxUint16 {
+		return nil, fmt.Errorf("invoke labels are %d bytes; the limit is %d", len(labels), math.MaxUint16)
+	}
+	value := make([]byte, 3, 3+len(labels)+len(input))
+	value[0] = 1
+	binary.LittleEndian.PutUint16(value[1:], uint16(len(labels)))
+	value = append(value, labels...)
+	return append(value, input...), nil
 }
 
 // Status gets the status of an action run.
@@ -162,44 +142,16 @@ func (a *ActionClient) Delete(name string, opts *ActionStatusOptions) error {
 // =============================================================================
 
 // parseActionInvokeResult parses the invoke response.
-// Wire format: [run_id_len:u16][run_id][has_output:u8][output_len:u32]?[output]?
+// Wire format: [run_id_len:u16][run_id][has_output:u8]; the server never sets output, so it is not read.
 func parseActionInvokeResult(data []byte) (*ActionInvokeResult, error) {
-	if len(data) < 3 { // min: u16 len + at least 1 byte run_id
-		// Fallback: treat entire data as run_id (backwards compat with older servers)
-		return &ActionInvokeResult{RunID: string(data)}, nil
+	if len(data) < 2 {
+		return nil, fmt.Errorf("incomplete action invoke response")
 	}
-
-	pos := 0
-
-	// Read run_id (length-prefixed u16)
-	if pos+2 > len(data) {
-		return &ActionInvokeResult{RunID: string(data)}, nil
+	runIDLen := int(binary.LittleEndian.Uint16(data))
+	if runIDLen == 0 || 2+runIDLen > len(data) {
+		return nil, fmt.Errorf("malformed action invoke response: run_id length %d in %d bytes", runIDLen, len(data))
 	}
-	runIDLen := int(binary.LittleEndian.Uint16(data[pos:]))
-	pos += 2
-
-	// Sanity check: if runIDLen is impossibly large or doesn't look right,
-	// this is likely an old-format response (raw run_id string)
-	if runIDLen > len(data)-pos || runIDLen > 256 || runIDLen == 0 {
-		return &ActionInvokeResult{RunID: string(data)}, nil
-	}
-
-	runID := string(data[pos : pos+runIDLen])
-	pos += runIDLen
-
-	result := &ActionInvokeResult{RunID: runID}
-
-	// Skip optional output field (wire compat — always empty now)
-	if pos < len(data) && data[pos] == 1 {
-		pos++
-		if pos+4 <= len(data) {
-			outputLen := int(binary.LittleEndian.Uint32(data[pos:]))
-			pos += 4 + outputLen // skip output bytes
-			_ = pos              // suppress unused warning
-		}
-	}
-
-	return result, nil
+	return &ActionInvokeResult{RunID: string(data[2 : 2+runIDLen])}, nil
 }
 
 func parseActionRunStatus(data []byte) (*ActionRunStatus, error) {

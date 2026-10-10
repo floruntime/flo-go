@@ -306,7 +306,7 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 	}
 	metadata := fmt.Sprintf(`{"streams":%q,"group":"%s","consumer":"%s"}`,
 		sw.streams, sw.config.Group, sw.config.Consumer)
-	if err := wc.Register(nil, &WorkerRegisterOptions{
+	if err := wc.Register(&WorkerRegisterOptions{
 		WorkerType:     WorkerTypeStream,
 		MaxConcurrency: uint32(sw.config.Concurrency),
 		Processes:      processes,
@@ -481,7 +481,7 @@ func (sw *StreamWorker) handleReconnect() error {
 	}
 	metadata := fmt.Sprintf(`{"streams":%q,"group":"%s","consumer":"%s"}`,
 		sw.streams, sw.config.Group, sw.config.Consumer)
-	if err := wc.Register(nil, &WorkerRegisterOptions{
+	if err := wc.Register(&WorkerRegisterOptions{
 		WorkerType:     WorkerTypeStream,
 		MaxConcurrency: uint32(sw.config.Concurrency),
 		Processes:      processes,

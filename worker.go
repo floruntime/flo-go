@@ -29,20 +29,14 @@ func (c *Client) workerClient(workerID string) *WorkerClient {
 //	([name_len:u16][name][kind:u8])*
 //	[has_metadata:u8][metadata_len:u16][metadata]?
 //	[has_machine_id:u8][machine_id_len:u16][machine_id]?
-func (w *WorkerClient) Register(taskTypes []string, opts *WorkerRegisterOptions) error {
+func (w *WorkerClient) Register(opts *WorkerRegisterOptions) error {
 	if opts == nil {
 		opts = &WorkerRegisterOptions{}
 	}
 
 	namespace := w.client.getNamespace(opts.Namespace)
 
-	// Build process list: merge explicit Processes + legacy taskTypes
 	processes := opts.Processes
-	if len(processes) == 0 && len(taskTypes) > 0 {
-		for _, name := range taskTypes {
-			processes = append(processes, ProcessEntry{Name: name, Kind: ProcessKindAction})
-		}
-	}
 
 	metadata := opts.Metadata
 	machineID := opts.MachineID

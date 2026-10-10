@@ -197,7 +197,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 
 	// Register worker in the worker registry
 	workerClient := w.client.workerClient(w.config.WorkerID)
-	if err := workerClient.Register(actionNames, regOpts); err != nil {
+	if err := workerClient.Register(regOpts); err != nil {
 		return fmt.Errorf("failed to register worker: %w", err)
 	}
 	defer workerClient.Deregister(nil)
@@ -265,7 +265,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 						w.logger.Printf("Warning: failed to reconnect result client: %v", reconErr)
 					}
 					// Re-register worker after reconnect
-					if regErr := workerClient.Register(actionNames, regOpts); regErr != nil {
+					if regErr := workerClient.Register(regOpts); regErr != nil {
 						w.logger.Printf("Warning: failed to re-register worker: %v", regErr)
 					}
 					w.logger.Printf("Reconnected, resuming work")
