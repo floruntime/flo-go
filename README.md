@@ -246,6 +246,9 @@ if err != nil {
         // Authentication failed
     } else if flo.IsOverloaded(err) {
         // Server is overloaded, retry later
+    } else if flo.IsUnavailable(err) {
+        // No leader or the shard isn't taking writes; retry later
+        // (the message says whether an operator must act first)
     } else if flo.IsInternal(err) {
         // Internal server error
     }
