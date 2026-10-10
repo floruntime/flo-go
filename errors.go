@@ -84,6 +84,12 @@ var (
 	// ErrOverloaded indicates the server is overloaded.
 	ErrOverloaded = &ServerError{Status: StatusOverloaded}
 
+	// ErrUnavailable indicates the write reached no leader, or the shard
+	// stopped taking writes or is offline. Retryable, but an offline shard
+	// stays unavailable until an operator acts; the server's message says
+	// which case it is.
+	ErrUnavailable = &ServerError{Status: StatusUnavailable}
+
 	// ErrInternal indicates an internal server error.
 	ErrInternal = &ServerError{Status: StatusInternalError}
 )
@@ -186,7 +192,15 @@ func IsOverloaded(err error) bool {
 	return errors.Is(err, ErrOverloaded)
 }
 
-// IsInternal returns true if the error is an internal server error.
+// IsUnavailable returns true if the error is an unavailable error: no leader,
+// or the shard isn't taking writes. Retryable, like overloaded.
+func IsUnavailable(err error) bool {
+	return errors.Is(err, ErrUnavailable)
+}
+
+// IsInternal returns true if the error is an internal server error. Not
+// retryable: the server also uses it for a write that committed but wasn't
+// applied, so resending it could apply it twice.
 func IsInternal(err error) bool {
 	return errors.Is(err, ErrInternal)
 }

@@ -188,6 +188,7 @@ const (
 	StatusInternalError        StatusCode = 9
 	StatusOverloaded           StatusCode = 10
 	StatusRateLimited          StatusCode = 11 // Request rate limit exceeded (WebSocket)
+	StatusUnavailable          StatusCode = 12 // No leader, or the shard isn't taking writes; retryable
 )
 
 // String returns a human-readable message for the status code.
@@ -217,8 +218,10 @@ func (s StatusCode) String() string {
 		return "Server overloaded"
 	case StatusRateLimited:
 		return "Request rate limit exceeded"
+	case StatusUnavailable:
+		return "Unavailable: no leader or the shard isn't taking writes; retry"
 	default:
-		return "Unknown error"
+		return fmt.Sprintf("Unknown status %d", uint8(s))
 	}
 }
 
