@@ -140,7 +140,7 @@ func extractBlockMS(options []byte) uint32 {
 func computeCRC32(header, payload []byte) uint32 {
 	h := crc32.NewIEEE()
 	h.Write(header[0:16])  // magic, payload_length, request_id
-	h.Write(header[20:32]) // op_code/version/status, flags, reserved
+	h.Write(header[20:32]) // op_code/version/status, flags, table hash
 	h.Write(payload)
 	return h.Sum32()
 }
@@ -175,7 +175,7 @@ func serializeRequest(requestID uint64, opCode OpCode, namespace, key, value, op
 	binary.LittleEndian.PutUint16(buf[20:22], uint16(opCode))
 	buf[22] = Version
 	buf[23] = 0 // flags
-	// bytes 24-31 are reserved (already zero)
+	binary.LittleEndian.PutUint64(buf[24:32], TableHash)
 
 	// Build payload
 	offset := HeaderSize
@@ -234,9 +234,12 @@ func parseResponseHeader(header []byte) (StatusCode, uint32, uint64, uint32, err
 	crc := binary.LittleEndian.Uint32(header[16:20])
 	version := header[20]
 	status := StatusCode(header[21])
+	tableHash := binary.LittleEndian.Uint64(header[24:32])
 
-	if version != Version {
-		return 0, 0, 0, 0, ErrUnsupportedVersion
+	// Another build's body can't be read; the caller drops the connection
+	// with it unread.
+	if version != Version || tableHash != TableHash {
+		return 0, 0, 0, 0, &TableMismatchError{ServerVersion: version, ServerTable: tableHash}
 	}
 
 	return status, dataLen, requestID, crc, nil

@@ -43,6 +43,7 @@ func fakeServer(t *testing.T, answer func(op OpCode) []byte) string {
 					binary.LittleEndian.PutUint32(resp[4:8], uint32(len(data)))
 					copy(resp[8:16], header[8:16])
 					resp[20] = Version
+					binary.LittleEndian.PutUint64(resp[24:32], TableHash)
 					copy(resp[HeaderSize:], data)
 					binary.LittleEndian.PutUint32(resp[16:20], computeCRC32(resp[:HeaderSize], data))
 					if _, err := conn.Write(resp); err != nil {
