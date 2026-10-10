@@ -290,34 +290,54 @@ func TestParseDequeueResponse(t *testing.T) {
 	})
 
 	t.Run("WithMessages", func(t *testing.T) {
-		buf := make([]byte, 0, 100)
-
-		// count = 2
-		buf = binary.LittleEndian.AppendUint32(buf, 2)
-
-		// Message 1: seq=100, payload="msg1"
-		buf = binary.LittleEndian.AppendUint64(buf, 100)
-		buf = binary.LittleEndian.AppendUint32(buf, 4)
-		buf = append(buf, []byte("msg1")...)
-
-		// Message 2: seq=101, payload="msg2"
-		buf = binary.LittleEndian.AppendUint64(buf, 101)
-		buf = binary.LittleEndian.AppendUint32(buf, 4)
-		buf = append(buf, []byte("msg2")...)
+		// Each message as the server writes it:
+		// [seq:u64][payload_len:u32][payload][enqueued_at_ms:i64][delivery_count:u32][priority:u8]
+		want := []Message{
+			{Seq: 100, Payload: []byte("msg1"), EnqueuedAtMS: 1700000000000, DeliveryCount: 1, Priority: 0},
+			{Seq: 101, Payload: []byte("m2"), EnqueuedAtMS: 1700000000005, DeliveryCount: 2, Priority: 7},
+			{Seq: 102, Payload: []byte("third"), EnqueuedAtMS: 1700000000009, DeliveryCount: 3, Priority: 255},
+		}
+		buf := binary.LittleEndian.AppendUint32(nil, uint32(len(want)))
+		for _, m := range want {
+			buf = binary.LittleEndian.AppendUint64(buf, m.Seq)
+			buf = binary.LittleEndian.AppendUint32(buf, uint32(len(m.Payload)))
+			buf = append(buf, m.Payload...)
+			buf = binary.LittleEndian.AppendUint64(buf, uint64(m.EnqueuedAtMS))
+			buf = binary.LittleEndian.AppendUint32(buf, m.DeliveryCount)
+			buf = append(buf, m.Priority)
+		}
 
 		result, err := parseDequeueResponse(buf)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+		if len(result.Messages) != len(want) {
+			t.Fatalf("expected %d messages, got %d", len(want), len(result.Messages))
+		}
+		for i, m := range want {
+			got := result.Messages[i]
+			if got.Seq != m.Seq || !bytes.Equal(got.Payload, m.Payload) || got.EnqueuedAtMS != m.EnqueuedAtMS || got.DeliveryCount != m.DeliveryCount || got.Priority != m.Priority {
+				t.Errorf("message %d: got %+v, want %+v", i, got, m)
+			}
+		}
+	})
 
-		if len(result.Messages) != 2 {
-			t.Fatalf("expected 2 messages, got %d", len(result.Messages))
+	t.Run("RefusesACountTheDataCantHold", func(t *testing.T) {
+		buf := binary.LittleEndian.AppendUint32(nil, 0xFFFFFFFF)
+		if _, err := parseDequeueResponse(buf); err != ErrIncompleteResponse {
+			t.Fatalf("expected ErrIncompleteResponse, got %v", err)
 		}
-		if result.Messages[0].Seq != 100 {
-			t.Errorf("expected seq 100, got %d", result.Messages[0].Seq)
-		}
-		if !bytes.Equal(result.Messages[0].Payload, []byte("msg1")) {
-			t.Errorf("expected payload 'msg1', got %s", result.Messages[0].Payload)
+	})
+
+	t.Run("RefusesACutTrailer", func(t *testing.T) {
+		buf := binary.LittleEndian.AppendUint32(nil, 1)
+		buf = binary.LittleEndian.AppendUint64(buf, 1)
+		buf = binary.LittleEndian.AppendUint32(buf, 1)
+		buf = append(buf, 'x')
+		buf = binary.LittleEndian.AppendUint64(buf, 0)
+		buf = append(buf, 0, 0, 0, 0)
+		if _, err := parseDequeueResponse(buf); err != ErrIncompleteResponse {
+			t.Fatalf("expected ErrIncompleteResponse, got %v", err)
 		}
 	})
 }
