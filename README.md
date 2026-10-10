@@ -152,9 +152,6 @@ for result.HasMore {
     result, err = client.KV.Scan("user:", &flo.ScanOptions{Cursor: result.Cursor})
     // Process result.Entries...
 }
-
-// Keys only (more efficient when you don't need values)
-result, err := client.KV.Scan("user:", &flo.ScanOptions{KeysOnly: true})
 ```
 
 #### History
@@ -179,20 +176,9 @@ entries, err := client.KV.History("key", &flo.HistoryOptions{Limit: &limit})
 // Simple enqueue
 seq, err := client.Queue.Enqueue("tasks", []byte(`{"task":"process"}`), nil)
 
-// Enqueue with priority (higher = more urgent)
+// Enqueue with priority (lower is taken first)
 seq, err := client.Queue.Enqueue("tasks", payload, &flo.EnqueueOptions{
     Priority: 10,
-})
-
-// Enqueue with delay (available after 1 minute)
-delay := uint64(60000)
-seq, err := client.Queue.Enqueue("tasks", payload, &flo.EnqueueOptions{
-    DelayMS: &delay,
-})
-
-// Enqueue with deduplication key
-seq, err := client.Queue.Enqueue("tasks", payload, &flo.EnqueueOptions{
-    DedupKey: "task-123",
 })
 ```
 
@@ -211,27 +197,15 @@ blockMS := uint32(30000)
 result, err := client.Queue.Dequeue("tasks", 10, &flo.DequeueOptions{
     BlockMS: &blockMS,
 })
-
-// Custom visibility timeout
-timeout := uint32(60000) // 1 minute
-result, err := client.Queue.Dequeue("tasks", 10, &flo.DequeueOptions{
-    VisibilityTimeoutMS: &timeout,
-})
 ```
 
 #### Ack/Nack
 
+A dequeue consumes its messages; queues are currently at-most-once, so Ack and Nack have no effect on a dequeued message and a dequeued message does not reach the DLQ.
+
 ```go
-// Acknowledge successful processing
 err := client.Queue.Ack("tasks", []uint64{msg.Seq}, nil)
-
-// Nack for retry
 err := client.Queue.Nack("tasks", []uint64{msg.Seq}, nil)
-
-// Nack and send to DLQ (don't retry)
-err := client.Queue.Nack("tasks", []uint64{msg.Seq}, &flo.NackOptions{
-    ToDLQ: true,
-})
 ```
 
 #### DLQ Operations
@@ -239,11 +213,6 @@ err := client.Queue.Nack("tasks", []uint64{msg.Seq}, &flo.NackOptions{
 ```go
 // List DLQ messages
 result, err := client.Queue.DLQList("tasks", nil)
-
-// List with custom limit
-result, err := client.Queue.DLQList("tasks", &flo.DLQListOptions{
-    Limit: 100,
-})
 
 // Requeue messages from DLQ back to main queue
 seqs := []uint64{msg1.Seq, msg2.Seq}
@@ -259,14 +228,6 @@ result, err := client.Queue.Peek("tasks", 10, nil)
 for _, msg := range result.Messages {
     fmt.Printf("Peeking: seq=%d payload=%s\n", msg.Seq, msg.Payload)
 }
-```
-
-#### Touch (Lease Renewal)
-
-```go
-// Extend lease timeout for messages being processed
-// Prevents messages from returning to queue during long processing
-err := client.Queue.Touch("tasks", []uint64{msg.Seq}, nil)
 ```
 
 ## Error Handling

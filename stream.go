@@ -476,7 +476,6 @@ func (s *StreamClient) GroupAck(stream, group string, ids []StreamID, opts *Stre
 }
 
 // GroupNack negatively acknowledges records in a consumer group.
-// Records will be redelivered after the redelivery delay.
 func (s *StreamClient) GroupNack(stream, group string, ids []StreamID, opts *StreamGroupNackOptions) error {
 	if opts == nil {
 		opts = &StreamGroupNackOptions{}
@@ -510,15 +509,7 @@ func (s *StreamClient) GroupNack(stream, group string, ids []StreamID, opts *Str
 		offset += 8
 	}
 
-	// Build options for redelivery delay
-	var options []byte
-	if opts.RedeliveryDelayMS != nil {
-		builder := NewOptionsBuilder()
-		builder.AddU32(OptRedeliveryDelayMS, *opts.RedeliveryDelayMS)
-		options = builder.Build()
-	}
-
-	_, err := s.client.sendAndCheck(OpStreamGroupNack, namespace, []byte(stream), value, options, true)
+	_, err := s.client.sendAndCheck(OpStreamGroupNack, namespace, []byte(stream), value, nil, true)
 	return err
 }
 

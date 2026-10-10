@@ -115,7 +115,7 @@ func main() {
 	}
 	fmt.Printf("Enqueued message with seq=%d\n", seq)
 
-	// Enqueue with priority
+	// Enqueue with priority (lower is taken first)
 	seq, err = client.Queue.Enqueue("tasks", []byte(`{"task": "urgent"}`), &flo.EnqueueOptions{
 		Priority: 10,
 	})
@@ -123,16 +123,6 @@ func main() {
 		log.Fatalf("Enqueue with priority failed: %v", err)
 	}
 	fmt.Printf("Enqueued priority message with seq=%d\n", seq)
-
-	// Enqueue with delay
-	delayMS := uint64(60000) // 1 minute
-	seq, err = client.Queue.Enqueue("tasks", []byte(`{"task": "delayed"}`), &flo.EnqueueOptions{
-		DelayMS: &delayMS,
-	})
-	if err != nil {
-		log.Fatalf("Enqueue with delay failed: %v", err)
-	}
-	fmt.Printf("Enqueued delayed message with seq=%d\n", seq)
 
 	// Dequeue messages
 	dequeueResult, err := client.Queue.Dequeue("tasks", 10, nil)
@@ -144,7 +134,7 @@ func main() {
 	for _, msg := range dequeueResult.Messages {
 		fmt.Printf("  Processing message seq=%d: %s\n", msg.Seq, msg.Payload)
 
-		// Acknowledge successful processing
+		// A dequeue consumes its messages; queues are currently at-most-once, so Ack and Nack have no effect on a dequeued message.
 		if err := client.Queue.Ack("tasks", []uint64{msg.Seq}, nil); err != nil {
 			log.Fatalf("Ack failed: %v", err)
 		}
@@ -160,27 +150,16 @@ func main() {
 	}
 	fmt.Printf("Dequeued %d messages (with blocking)\n", len(dequeueResult.Messages))
 
-	// Example: Nack a message (retry later)
+	// Nack has no effect on a dequeued message: it is not retried
 	if len(dequeueResult.Messages) > 0 {
 		msg := dequeueResult.Messages[0]
 		if err := client.Queue.Nack("tasks", []uint64{msg.Seq}, nil); err != nil {
 			log.Fatalf("Nack failed: %v", err)
 		}
-		fmt.Printf("Nacked message seq=%d for retry\n", msg.Seq)
+		fmt.Printf("Nacked message seq=%d\n", msg.Seq)
 	}
 
-	// Example: Send to DLQ (don't retry)
-	if len(dequeueResult.Messages) > 1 {
-		msg := dequeueResult.Messages[1]
-		if err := client.Queue.Nack("tasks", []uint64{msg.Seq}, &flo.NackOptions{
-			ToDLQ: true,
-		}); err != nil {
-			log.Fatalf("Nack to DLQ failed: %v", err)
-		}
-		fmt.Printf("Sent message seq=%d to DLQ\n", msg.Seq)
-	}
-
-	// List DLQ messages
+	// List DLQ messages (usually empty: a dequeued message does not reach the DLQ)
 	dlqResult, err := client.Queue.DLQList("tasks", nil)
 	if err != nil {
 		log.Fatalf("DLQ list failed: %v", err)

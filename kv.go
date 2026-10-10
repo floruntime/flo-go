@@ -200,13 +200,6 @@ func (kv *KVClient) Scan(prefix string, opts *ScanOptions) (*ScanResult, error) 
 	}
 	namespace := kv.client.getNamespace(opts.Namespace)
 
-	// Build TLV options (keys_only only — limit is in value now)
-	builder := NewOptionsBuilder()
-
-	if opts.KeysOnly {
-		builder.AddU8(OptKeysOnly, 1)
-	}
-
 	// Value: [limit:u32][cursor...]
 	limit := uint32(0) // 0 = server default
 	if opts.Limit != nil {
@@ -219,7 +212,7 @@ func (kv *KVClient) Scan(prefix string, opts *ScanOptions) (*ScanResult, error) 
 		copy(value[4:], cursor)
 	}
 
-	resp, err := kv.client.sendAndCheck(OpKVScan, namespace, []byte(prefix), value, builder.Build(), false)
+	resp, err := kv.client.sendAndCheck(OpKVScan, namespace, []byte(prefix), value, nil, false)
 	if err != nil {
 		return nil, err
 	}

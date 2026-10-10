@@ -20,14 +20,6 @@ func (q *QueueClient) Enqueue(queue string, payload []byte, opts *EnqueueOptions
 		builder.AddU8(OptPriority, opts.Priority)
 	}
 
-	if opts.DelayMS != nil {
-		builder.AddU64(OptDelayMS, *opts.DelayMS)
-	}
-
-	if opts.DedupKey != "" {
-		builder.AddBytes(OptDedupKey, []byte(opts.DedupKey))
-	}
-
 	resp, err := q.client.sendAndCheck(OpQueueEnqueue, namespace, []byte(queue), payload, builder.Build(), false)
 	if err != nil {
 		return 0, err
@@ -47,10 +39,6 @@ func (q *QueueClient) Dequeue(queue string, count int, opts *DequeueOptions) (*D
 	builder := NewOptionsBuilder()
 	builder.AddU32(OptCount, uint32(count))
 
-	if opts.VisibilityTimeoutMS != nil {
-		builder.AddU32(OptVisibilityTimeoutMS, *opts.VisibilityTimeoutMS)
-	}
-
 	if err := checkBlockMS(opts.BlockMS); err != nil {
 		return nil, err
 	}
@@ -67,6 +55,7 @@ func (q *QueueClient) Dequeue(queue string, count int, opts *DequeueOptions) (*D
 }
 
 // Ack acknowledges messages as successfully processed.
+// A dequeue consumes its messages; queues are currently at-most-once, so Ack and Nack have no effect on a dequeued message.
 func (q *QueueClient) Ack(queue string, seqs []uint64, opts *AckOptions) error {
 	if len(seqs) == 0 {
 		return nil
@@ -83,7 +72,8 @@ func (q *QueueClient) Ack(queue string, seqs []uint64, opts *AckOptions) error {
 	return err
 }
 
-// Nack negative acknowledges messages (retry or send to DLQ).
+// Nack negative acknowledges messages.
+// A dequeue consumes its messages; queues are currently at-most-once, so Ack and Nack have no effect on a dequeued message.
 func (q *QueueClient) Nack(queue string, seqs []uint64, opts *NackOptions) error {
 	if len(seqs) == 0 {
 		return nil
@@ -94,31 +84,20 @@ func (q *QueueClient) Nack(queue string, seqs []uint64, opts *NackOptions) error
 	}
 	namespace := q.client.getNamespace(opts.Namespace)
 
-	// Build TLV options
-	builder := NewOptionsBuilder()
-
-	if opts.ToDLQ {
-		builder.AddU8(OptSendToDLQ, 1)
-	}
-
 	value := serializeSeqs(seqs)
 
-	_, err := q.client.sendAndCheck(OpQueueFail, namespace, []byte(queue), value, builder.Build(), false)
+	_, err := q.client.sendAndCheck(OpQueueFail, namespace, []byte(queue), value, nil, false)
 	return err
 }
 
 // DLQList lists messages in the Dead Letter Queue.
 func (q *QueueClient) DLQList(queue string, opts *DLQListOptions) (*DequeueResult, error) {
 	if opts == nil {
-		opts = &DLQListOptions{Limit: 100}
+		opts = &DLQListOptions{}
 	}
 	namespace := q.client.getNamespace(opts.Namespace)
 
-	// Build TLV options
-	builder := NewOptionsBuilder()
-	builder.AddU32(OptLimit, opts.Limit)
-
-	resp, err := q.client.sendAndCheck(OpQueueDLQList, namespace, []byte(queue), nil, builder.Build(), false)
+	resp, err := q.client.sendAndCheck(OpQueueDLQList, namespace, []byte(queue), nil, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -161,22 +140,4 @@ func (q *QueueClient) Peek(queue string, count int, opts *PeekOptions) (*Dequeue
 	}
 
 	return parseDequeueResponse(resp.Data)
-}
-
-// Touch extends the lease timeout for messages (renews visibility timeout).
-// Use this to prevent messages from being returned to the queue while still processing.
-func (q *QueueClient) Touch(queue string, seqs []uint64, opts *TouchOptions) error {
-	if len(seqs) == 0 {
-		return nil
-	}
-
-	if opts == nil {
-		opts = &TouchOptions{}
-	}
-	namespace := q.client.getNamespace(opts.Namespace)
-
-	value := serializeSeqs(seqs)
-
-	_, err := q.client.sendAndCheck(OpQueueTouch, namespace, []byte(queue), value, nil, false)
-	return err
 }

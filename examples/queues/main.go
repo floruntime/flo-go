@@ -42,48 +42,19 @@ func main() {
 	}
 	fmt.Printf("Enqueued task: seq=%d\n", seq)
 
-	// Enqueue with priority (higher priority = processed first)
+	// Enqueue with priority (lower is taken first)
 	task2 := map[string]interface{}{
 		"task": "urgent-alert",
 		"msg":  "Server is down!",
 	}
 	payload2, _ := json.Marshal(task2)
 	seq, err = queue.Enqueue("tasks", payload2, &flo.EnqueueOptions{
-		Priority: 100, // High priority
+		Priority: 1, // Taken before higher numbers
 	})
 	if err != nil {
 		log.Fatalf("Priority enqueue failed: %v", err)
 	}
-	fmt.Printf("Enqueued urgent task with priority 100: seq=%d\n", seq)
-
-	// Enqueue with delay
-	task3 := map[string]interface{}{
-		"task": "scheduled-report",
-		"type": "daily",
-	}
-	payload3, _ := json.Marshal(task3)
-	delayMS := uint64(60000) // 1 minute delay
-	seq, err = queue.Enqueue("tasks", payload3, &flo.EnqueueOptions{
-		DelayMS: &delayMS,
-	})
-	if err != nil {
-		log.Fatalf("Delayed enqueue failed: %v", err)
-	}
-	fmt.Printf("Enqueued delayed task (1 min): seq=%d\n", seq)
-
-	// Enqueue with deduplication key
-	task4 := map[string]interface{}{
-		"task":    "process-order",
-		"orderID": "ORD-12345",
-	}
-	payload4, _ := json.Marshal(task4)
-	seq, err = queue.Enqueue("tasks", payload4, &flo.EnqueueOptions{
-		DedupKey: "order-ORD-12345", // Prevents duplicate processing
-	})
-	if err != nil {
-		log.Fatalf("Dedup enqueue failed: %v", err)
-	}
-	fmt.Printf("Enqueued with dedup key: seq=%d\n", seq)
+	fmt.Printf("Enqueued urgent task with priority 1: seq=%d\n", seq)
 
 	// Peek at messages without consuming
 	fmt.Println("\n--- Peeking at queue ---")
@@ -120,7 +91,7 @@ func main() {
 		}
 	}
 
-	// Acknowledge successful messages
+	// A dequeue consumes its messages; queues are currently at-most-once, so Ack and Nack have no effect on a dequeued message.
 	if len(processedSeqs) > 0 {
 		if err := queue.Ack("tasks", processedSeqs, nil); err != nil {
 			log.Fatalf("Ack failed: %v", err)
@@ -128,12 +99,12 @@ func main() {
 		fmt.Printf("Acknowledged %d messages\n", len(processedSeqs))
 	}
 
-	// Nack failed messages (will be retried)
+	// Nack has no effect either: these messages are not retried
 	if len(failedSeqs) > 0 {
 		if err := queue.Nack("tasks", failedSeqs, nil); err != nil {
 			log.Fatalf("Nack failed: %v", err)
 		}
-		fmt.Printf("Nacked %d messages for retry\n", len(failedSeqs))
+		fmt.Printf("Nacked %d messages\n", len(failedSeqs))
 	}
 
 	// Dequeue with blocking (long polling)
@@ -147,37 +118,13 @@ func main() {
 	}
 	fmt.Printf("Blocking dequeue returned %d messages\n", len(dequeueResult.Messages))
 
-	// Touch to extend lease on long-running tasks
 	if len(dequeueResult.Messages) > 0 {
-		msg := dequeueResult.Messages[0]
-		fmt.Printf("\n--- Extending lease for seq=%d ---\n", msg.Seq)
-		if err := queue.Touch("tasks", []uint64{msg.Seq}, nil); err != nil {
-			log.Fatalf("Touch failed: %v", err)
-		}
-		fmt.Println("Lease extended by 30 seconds")
-
-		// Ack after processing
-		queue.Ack("tasks", []uint64{msg.Seq}, nil)
+		queue.Ack("tasks", []uint64{dequeueResult.Messages[0].Seq}, nil)
 	}
 
-	// Send to Dead Letter Queue (DLQ)
+	// Dead Letter Queue (DLQ). Queues are currently at-most-once, so a
+	// dequeued message does not reach the DLQ in normal use; it is usually empty.
 	fmt.Println("\n--- DLQ operations ---")
-
-	// Enqueue a message that will "fail"
-	badTask, _ := json.Marshal(map[string]string{"task": "will-fail"})
-	seq, _ = queue.Enqueue("tasks", badTask, nil)
-
-	// Dequeue and send to DLQ
-	result, _ := queue.Dequeue("tasks", 1, nil)
-	if len(result.Messages) > 0 {
-		// Nack with ToDLQ flag
-		if err := queue.Nack("tasks", []uint64{result.Messages[0].Seq}, &flo.NackOptions{
-			ToDLQ: true,
-		}); err != nil {
-			log.Fatalf("Nack to DLQ failed: %v", err)
-		}
-		fmt.Println("Sent message to DLQ")
-	}
 
 	// List DLQ messages
 	dlqResult, err := queue.DLQList("tasks", nil)

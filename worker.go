@@ -208,10 +208,6 @@ func (w *WorkerClient) Await(taskTypes []string, opts *WorkerAwaitOptions) (*Tas
 	}
 	builder.AddU32(OptBlockMS, blockMS)
 
-	if opts.TimeoutMS != nil {
-		builder.AddU64(OptTimeoutMS, *opts.TimeoutMS)
-	}
-
 	resp, err := w.client.sendAndCheck(OpActionAwait, namespace, []byte(w.workerID), value, builder.Build(), true)
 	if err != nil {
 		return nil, err
