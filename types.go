@@ -447,8 +447,11 @@ type KVMGetOptions struct {
 
 // Message represents a queue message.
 type Message struct {
-	Seq     uint64
-	Payload []byte
+	Seq           uint64
+	Payload       []byte
+	EnqueuedAtMS  int64
+	DeliveryCount uint32
+	Priority      uint8
 }
 
 // DequeueResult represents the result of a queue dequeue operation.

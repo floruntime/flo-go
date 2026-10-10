@@ -378,6 +378,12 @@ func parseDequeueResponse(data []byte) (*DequeueResult, error) {
 
 	count := binary.LittleEndian.Uint32(data[offset:])
 	offset += 4
+	// Each message is at least its fixed fields; a count the data can't hold
+	// is refused before it sizes an allocation.
+	const minMessage = 8 + 4 + 8 + 4 + 1
+	if uint64(count) > uint64(len(data)-offset)/minMessage {
+		return nil, ErrIncompleteResponse
+	}
 
 	messages := make([]Message, 0, count)
 	for i := uint32(0); i < count; i++ {
@@ -399,9 +405,21 @@ func parseDequeueResponse(data []byte) (*DequeueResult, error) {
 		copy(payload, data[offset:offset+int(payloadLen)])
 		offset += int(payloadLen)
 
+		// [enqueued_at_ms:i64][delivery_count:u32][priority:u8]
+		if len(data) < offset+13 {
+			return nil, ErrIncompleteResponse
+		}
+		enqueuedAt := int64(binary.LittleEndian.Uint64(data[offset:]))
+		deliveries := binary.LittleEndian.Uint32(data[offset+8:])
+		priority := data[offset+12]
+		offset += 13
+
 		messages = append(messages, Message{
-			Seq:     seq,
-			Payload: payload,
+			Seq:           seq,
+			Payload:       payload,
+			EnqueuedAtMS:  enqueuedAt,
+			DeliveryCount: deliveries,
+			Priority:      priority,
 		})
 	}
 
