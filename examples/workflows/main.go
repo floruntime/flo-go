@@ -189,10 +189,10 @@ start:
 
 steps:
   wait_for_approval:
-    waitForSignal:
+    wait_for_signal:
       type: "approval_decision"
-      timeoutMs: 86400000
-      onTimeout: flo.Failed
+      timeout_ms: 86400000
+      on_timeout: flo.Failed
     transitions:
       success: process_expense
       failure: flo.Failed
