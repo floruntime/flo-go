@@ -132,12 +132,13 @@ func main() {
 
 	// Trim stream (keep only last 10 records)
 	fmt.Println("\n--- Trimming stream ---")
-	if err := stream.Trim("events", &flo.StreamTrimOptions{
+	trimmed, err := stream.Trim("events", &flo.StreamTrimOptions{
 		MaxLen: flo.Uint64Ptr(10),
-	}); err != nil {
+	})
+	if err != nil {
 		log.Fatalf("Trim failed: %v", err)
 	}
-	fmt.Println("Trimmed stream to max 10 records")
+	fmt.Printf("Trimmed %d records\n", trimmed.Removed)
 
 	fmt.Println("\n=== Done ===")
 }
