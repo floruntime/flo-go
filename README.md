@@ -152,9 +152,6 @@ for result.HasMore {
     result, err = client.KV.Scan("user:", &flo.ScanOptions{Cursor: result.Cursor})
     // Process result.Entries...
 }
-
-// Keys only (more efficient when you don't need values)
-result, err := client.KV.Scan("user:", &flo.ScanOptions{KeysOnly: true})
 ```
 
 #### History

@@ -232,7 +232,6 @@ const (
 	OptIfNotExists OptionTag = 0x03 // void: Only set if key doesn't exist (NX)
 	OptIfExists    OptionTag = 0x04 // void: Only set if key exists (XX)
 	OptLimit       OptionTag = 0x05 // u32: Maximum number of results for scan/list operations
-	OptKeysOnly    OptionTag = 0x06 // u8: Skip values in scan response (0/1)
 	OptRoutingKey  OptionTag = 0x08 // string: Explicit routing key for shard co-location
 	OptTxnID       OptionTag = 0x09 // u64: Transaction ID for per-shard transactions
 
@@ -272,7 +271,7 @@ const (
 // KVEntry represents an entry from scan results.
 type KVEntry struct {
 	Key   []byte
-	Value []byte // nil if keys_only=true
+	Value []byte
 }
 
 // ScanResult represents the result of a KV scan operation.
@@ -374,7 +373,6 @@ type ScanOptions struct {
 	Namespace string
 	Cursor    []byte
 	Limit     *uint32
-	KeysOnly  bool
 }
 
 // HistoryOptions contains options for KV history operations.
