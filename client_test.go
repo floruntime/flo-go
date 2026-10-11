@@ -310,7 +310,7 @@ func TestBadReplyDropsConnection(t *testing.T) {
 func TestRefusalWithIDZeroKeepsServerError(t *testing.T) {
 	refusal := func(uint64) []byte {
 		f := fakeReply(0, "")
-		msg := []byte("Invalid request")
+		msg := refusalBody(ReasonMalformed, RanNo, "Invalid request")
 		f = append(f[:HeaderSize], msg...)
 		binary.LittleEndian.PutUint32(f[4:8], uint32(len(msg)))
 		f[21] = byte(StatusBadRequest)

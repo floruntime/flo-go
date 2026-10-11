@@ -9,22 +9,33 @@ import (
 	"time"
 )
 
-// statusReply builds a response frame for requestID with status and body msg.
+// refusalBody encodes a refusal's body as the server does.
+func refusalBody(reason Reason, ran Ran, msg string) []byte {
+	b := make([]byte, 3+len(msg))
+	binary.LittleEndian.PutUint16(b[0:2], uint16(reason))
+	b[2] = byte(ran)
+	copy(b[3:], msg)
+	return b
+}
+
+// statusReply builds a response frame for requestID with status and a
+// refusal body carrying msg.
 func statusReply(requestID uint64, status StatusCode, msg string) []byte {
-	frame := make([]byte, HeaderSize+len(msg))
+	body := refusalBody(ReasonUnclassified, RanNo, msg)
+	frame := make([]byte, HeaderSize+len(body))
 	binary.LittleEndian.PutUint32(frame[0:4], Magic)
-	binary.LittleEndian.PutUint32(frame[4:8], uint32(len(msg)))
+	binary.LittleEndian.PutUint32(frame[4:8], uint32(len(body)))
 	binary.LittleEndian.PutUint64(frame[8:16], requestID)
 	frame[20] = Version
 	binary.LittleEndian.PutUint64(frame[24:32], TableHash)
 	frame[21] = byte(status)
-	copy(frame[HeaderSize:], msg)
-	binary.LittleEndian.PutUint32(frame[16:20], computeCRC32(frame[:HeaderSize], []byte(msg)))
+	copy(frame[HeaderSize:], body)
+	binary.LittleEndian.PutUint32(frame[16:20], computeCRC32(frame[:HeaderSize], body))
 	return frame
 }
 
 func TestStatusUnavailableMapsToRetryableError(t *testing.T) {
-	err := checkStatus(StatusUnavailable, []byte("shard 3 is offline"), false)
+	err := checkStatus(StatusUnavailable, refusalBody(ReasonUnclassified, RanNo, "shard 3 is offline"), false)
 	if !IsUnavailable(err) || !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("got %v, want ErrUnavailable", err)
 	}
@@ -40,7 +51,7 @@ func TestStatusUnavailableMapsToRetryableError(t *testing.T) {
 // internal_error can mean "committed but not applied": it must never be
 // classed with the retryable statuses.
 func TestStatusInternalErrorIsNotRetryable(t *testing.T) {
-	err := checkStatus(StatusInternalError, []byte("committed, not applied"), false)
+	err := checkStatus(StatusInternalError, refusalBody(ReasonCommittedNotApplied, RanYes, "committed, not applied"), false)
 	if !IsInternal(err) {
 		t.Fatalf("got %v, want ErrInternal", err)
 	}
@@ -50,7 +61,7 @@ func TestStatusInternalErrorIsNotRetryable(t *testing.T) {
 }
 
 func TestUnknownStatusMapsToServerErrorNamingIt(t *testing.T) {
-	err := checkStatus(StatusCode(200), []byte("future thing"), false)
+	err := checkStatus(StatusCode(200), refusalBody(ReasonUnclassified, RanUnknown, "future thing"), false)
 	var se *ServerError
 	if !errors.As(err, &se) || se.Status != 200 || se.Message != "future thing" {
 		t.Fatalf("got %#v, want ServerError{200, future thing}", err)
@@ -128,7 +139,29 @@ func TestRequestsCarryTheTableHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data[22] != 2 || binary.LittleEndian.Uint64(data[24:32]) != 0x4e9243eeab771a02 {
+	if data[22] != 2 || binary.LittleEndian.Uint64(data[24:32]) != 0x2827f6f0631754fe {
 		t.Fatalf("header version %d table 0x%016x, want 2 and the pinned table", data[22], binary.LittleEndian.Uint64(data[24:32]))
+	}
+}
+
+// A refusal's reason and ran reach the caller, and the reason shows in the
+// text when the server gave one.
+func TestRefusalCarriesReasonAndRan(t *testing.T) {
+	err := checkStatus(StatusInternalError, refusalBody(ReasonCommittedNotApplied, RanYes, "write committed but not applied on this node — do not resend"), false)
+	var se *ServerError
+	if !errors.As(err, &se) || se.Reason != ReasonCommittedNotApplied || se.Ran != RanYes {
+		t.Fatalf("got %#v, want committed_not_applied with ran yes", err)
+	}
+	if !strings.Contains(err.Error(), "/committed_not_applied)") {
+		t.Errorf("error %q does not name its reason", err)
+	}
+	unclassified := checkStatus(StatusBadRequest, refusalBody(ReasonUnclassified, RanNo, "x"), false)
+	if strings.Contains(unclassified.Error(), "unclassified") {
+		t.Errorf("error %q names an unclassified reason", unclassified)
+	}
+	for _, body := range [][]byte{{1, 0}, {0xff, 0xff, 0}, {1, 0, 9}} {
+		if err := checkStatus(StatusBadRequest, body, false); !errors.Is(err, ErrIncompleteResponse) {
+			t.Errorf("body %v: got %v, want a malformed refusal", body, err)
+		}
 	}
 }
