@@ -318,7 +318,7 @@ func (c *Client) sendRequest(opCode OpCode, namespace string, key, value, option
 		log.Printf("[flo] -> %d ns=%s key=%q", opCode, namespace, key)
 	}
 
-	resp, err := c.exchange(request, options)
+	resp, err := c.exchange(request, waitMS(opCode, value, options))
 	if err == nil && resp.RequestID != requestID {
 		if resp.RequestID == 0 && resp.Status != StatusOK {
 			// The server answers a request it can't parse with id 0, then
@@ -342,15 +342,12 @@ func (c *Client) sendRequest(opCode OpCode, namespace string, key, value, option
 
 // exchange writes a serialized request and reads its response. The caller
 // holds c.mu.
-func (c *Client) exchange(request, options []byte) (*rawResponse, error) {
+func (c *Client) exchange(request []byte, waitMs uint64) (*rawResponse, error) {
 	// Set timeout — extend deadline for blocking operations (Stream Read,
-	// Queue Dequeue, Action Await) so the TCP deadline doesn't fire before
-	// the server's blocking period expires.
+	// Queue Dequeue, Action Await, a waiting KV Get) so the TCP deadline
+	// doesn't fire before the server's blocking period expires.
 	if c.timeout > 0 {
-		deadline := c.timeout
-		if blockMS := extractBlockMS(options); blockMS > 0 {
-			deadline += time.Duration(blockMS) * time.Millisecond
-		}
+		deadline := c.timeout + time.Duration(waitMs)*time.Millisecond
 		c.conn.SetDeadline(time.Now().Add(deadline))
 	}
 

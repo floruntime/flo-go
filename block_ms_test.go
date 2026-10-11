@@ -41,7 +41,7 @@ func TestBlockMSRefusedBeforeRoundTrip(t *testing.T) {
 	over := MaxBlockMS + 1
 	calls := map[string]func() error{
 		"KV.Get": func() error {
-			_, err := c.KV.Get("k", &GetOptions{BlockMS: &over})
+			_, err := c.KV.Get("k", &GetOptions{WaitMs: MaxWaitMS + 1})
 			return err
 		},
 		"Queue.Dequeue": func() error {

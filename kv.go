@@ -10,82 +10,55 @@ type KVClient struct {
 	client *Client
 }
 
-// Get retrieves the value and version for a key.
-// Returns nil if the key is not found.
-// Use BlockMS option for long polling (wait for key to appear).
+// Get retrieves the value and version for a key. It returns nil if the
+// key is not found, also when a wait (WaitMs) ends without it.
 func (kv *KVClient) Get(key string, opts *GetOptions) (*GetResult, error) {
 	if opts == nil {
 		opts = &GetOptions{}
 	}
-	namespace := kv.client.getNamespace(opts.Namespace)
+	return kv.client.kvGet(kv.client.getNamespace(opts.Namespace), key, opts, nil)
+}
 
-	if err := checkBlockMS(opts.BlockMS); err != nil {
-		return nil, err
-	}
-
-	var options []byte
-	if opts.BlockMS != nil {
-		builder := NewOptionsBuilder()
-		builder.AddU32(OptBlockMS, *opts.BlockMS)
-		options = builder.Build()
-	}
-
-	resp, err := kv.client.sendAndCheck(OpKVGet, namespace, []byte(key), nil, options, true)
+func (c *Client) kvGet(namespace, key string, opts *GetOptions, txn *uint64) (*GetResult, error) {
+	body, err := encodeGetBody(opts, txn)
 	if err != nil {
 		return nil, err
 	}
-
+	resp, err := c.sendAndCheck(OpKVGet, namespace, []byte(key), body, nil, true)
+	if err != nil {
+		return nil, err
+	}
 	if resp.Status == StatusNotFound {
+		// Absent; any other not-found (no such transaction) is an error.
+		err := newServerError(resp.Status, resp.Data)
+		if se, ok := err.(*ServerError); !ok || se.Reason != ReasonNotFound {
+			return nil, err
+		}
 		return nil, nil
 	}
-
-	// Wire body: [version:u64 LE][value bytes]. An empty body means a key with
-	// an empty value at version 0 (e.g. a freshly written empty PUT) — this is
-	// distinct from not-found, which surfaces as StatusNotFound above.
-	if len(resp.Data) < 8 {
-		return &GetResult{Value: nil, Version: 0}, nil
-	}
-	version := binary.LittleEndian.Uint64(resp.Data[0:8])
-	value := resp.Data[8:]
-	return &GetResult{Value: value, Version: version}, nil
+	return decodeGetAnswer(resp.Data)
 }
 
-// Put sets a key-value pair and returns the new version assigned by the server.
-// On a CAS mismatch the call returns ErrConflict; on a precondition failure
-// (IfNotExists / IfExists) it also returns ErrConflict.
+// Put sets a key-value pair and returns the new version assigned by the
+// server. A CASVersion that isn't the key's, or a Condition that doesn't
+// hold, returns ErrConflict with ReasonCASMismatch or ReasonConditionFailed.
 func (kv *KVClient) Put(key string, value []byte, opts *PutOptions) (PutResult, error) {
 	if opts == nil {
 		opts = &PutOptions{}
 	}
-	namespace := kv.client.getNamespace(opts.Namespace)
+	return kv.client.kvSet(kv.client.getNamespace(opts.Namespace), key, value, opts, nil)
+}
 
-	builder := NewOptionsBuilder()
-
-	if opts.TTLMs != nil {
-		builder.AddU64(OptTTLMs, *opts.TTLMs)
-	}
-	if opts.CASVersion != nil {
-		builder.AddU64(OptCASVersion, *opts.CASVersion)
-	}
-	if opts.IfNotExists {
-		builder.AddFlag(OptIfNotExists)
-	}
-	if opts.IfExists {
-		builder.AddFlag(OptIfExists)
-	}
-
-	resp, err := kv.client.sendAndCheck(OpKVPut, namespace, []byte(key), value, builder.Build(), true)
+func (c *Client) kvSet(namespace, key string, value []byte, opts *PutOptions, txn *uint64) (PutResult, error) {
+	body, err := encodeSetBody(value, opts, txn)
 	if err != nil {
 		return PutResult{}, err
 	}
-
-	// Wire body: [version:u64 LE]. Older servers may return an empty body —
-	// in that case Version is left at 0 and callers that need CAS must read it
-	// back via History.
-	if len(resp.Data) < 8 {
-		return PutResult{Version: 0}, nil
+	resp, err := c.sendAndCheck(OpKVPut, namespace, []byte(key), body, nil, false)
+	if err != nil {
+		return PutResult{}, err
 	}
-	return PutResult{Version: binary.LittleEndian.Uint64(resp.Data[0:8])}, nil
+	return decodeSetAnswer(resp.Data)
 }
 
 // MaxMGetKeys is the server-enforced limit on keys per MGet request.

@@ -90,10 +90,15 @@ value, err := client.KV.Get("key", &flo.GetOptions{
     Namespace: "other-namespace",
 })
 
-// Get with blocking (long polling - wait for key to appear)
-blockMS := uint32(5000) // 5 seconds
+// Wait up to 5 seconds for the key to exist (answers at once if it does)
 value, err := client.KV.Get("key", &flo.GetOptions{
-    BlockMS: &blockMS,
+    WaitMs: 5000,
+})
+
+// Wait up to 5 seconds for the key's next version
+value, err := client.KV.Get("key", &flo.GetOptions{
+    WaitMs:  5000,
+    WaitFor: flo.WaitForChange,
 })
 ```
 
@@ -120,12 +125,12 @@ if flo.IsConflict(err) {
 
 // Put only if key doesn't exist
 err := client.KV.Put("key", []byte("value"), &flo.PutOptions{
-    IfNotExists: true,
+    Condition: flo.ConditionIfAbsent,
 })
 
 // Put only if key exists
 err := client.KV.Put("key", []byte("value"), &flo.PutOptions{
-    IfExists: true,
+    Condition: flo.ConditionIfPresent,
 })
 ```
 
