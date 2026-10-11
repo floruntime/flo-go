@@ -30,7 +30,7 @@ const (
 	// into every request header. A server built from another table refuses
 	// the request, and its answers carry its own hash, which this client
 	// refuses. It changes with every server release that changes a layout.
-	TableHash uint64 = 0x28d9c77cf6f88fd5
+	TableHash uint64 = 0x02e15ee74c0ad72c
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -1015,9 +1015,9 @@ const (
 	ReasonConditionFailed Reason = 16
 	// ReasonNoSuchTransaction: no open transaction has this id here.
 	ReasonNoSuchTransaction Reason = 17
-	// ReasonTxnRoutingKey: the request's routing key (its key, when it gives
+	// ReasonWrongRoutingKey: the request's routing key (its key, when it gives
 	// none) isn't the one its transaction was begun with.
-	ReasonTxnRoutingKey Reason = 18
+	ReasonWrongRoutingKey Reason = 18
 	// ReasonTxnTooLarge: the transaction holds as many ops or bytes as it may.
 	ReasonTxnTooLarge Reason = 19
 	// ReasonTooManyWaiters: the shard holds as many waiting reads as it may.
@@ -1037,7 +1037,7 @@ var reasonNames = map[Reason]string{
 	ReasonCommittedNotApplied: "committed_not_applied", ReasonAnswerLost: "answer_lost", ReasonUnclassified: "unclassified",
 	ReasonNotFound: "not_found", ReasonReservedKey: "reserved_key", ReasonCASMismatch: "cas_mismatch",
 	ReasonConditionFailed: "condition_failed", ReasonNoSuchTransaction: "no_such_transaction",
-	ReasonTxnRoutingKey: "txn_routing_key", ReasonTxnTooLarge: "txn_too_large", ReasonTooManyWaiters: "too_many_waiters",
+	ReasonWrongRoutingKey: "wrong_routing_key", ReasonTxnTooLarge: "txn_too_large", ReasonTooManyWaiters: "too_many_waiters",
 	ReasonConflictingFields: "conflicting_fields", ReasonWritesStopped: "writes_stopped", ReasonTooManyProposals: "too_many_proposals",
 }
 
