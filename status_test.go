@@ -159,7 +159,9 @@ func TestRefusalCarriesReasonAndRan(t *testing.T) {
 	if strings.Contains(unclassified.Error(), "unclassified") {
 		t.Errorf("error %q names an unclassified reason", unclassified)
 	}
-	for _, body := range [][]byte{{1, 0}, {0xff, 0xff, 0}, {1, 0, 9}} {
+	// A reason past one byte (0x0101) must be read as a u16, not as its low
+	// byte (1, which would pass as unknown_op).
+	for _, body := range [][]byte{{1, 0}, {0xff, 0xff, 0}, {1, 0, 9}, {0x01, 0x01, 0}} {
 		if err := checkStatus(StatusBadRequest, body, false); !errors.Is(err, ErrIncompleteResponse) {
 			t.Errorf("body %v: got %v, want a malformed refusal", body, err)
 		}

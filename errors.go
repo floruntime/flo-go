@@ -103,7 +103,6 @@ var (
 	ErrInternal = &ServerError{Status: StatusInternalError}
 )
 
-// newServerError creates a ServerError from a status code and optional data.
 // newServerError reads a refusal's body: [reason:u16][ran:u8][message].
 func newServerError(status StatusCode, data []byte) error {
 	if len(data) < 3 {
