@@ -68,9 +68,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Scan failed: %v", err)
 	}
-	fmt.Printf("Scan found %d entries\n", len(result.Entries))
-	for _, entry := range result.Entries {
-		fmt.Printf("  %s = %s\n", entry.Key, entry.Value)
+	fmt.Printf("Scan found %d keys\n", len(result.Keys))
+	for _, key := range result.Keys {
+		fmt.Printf("  %s\n", key)
 	}
 
 	// Paginated scan
@@ -79,19 +79,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("Paginated scan failed: %v", err)
 	}
-	if result.HasMore {
+	for result.Cursor != nil {
 		// Continue scanning with cursor
-		result, err = client.KV.Scan("user:", &flo.ScanOptions{Cursor: result.Cursor})
+		result, err = client.KV.Scan("user:", &flo.ScanOptions{Limit: &limit, Cursor: result.Cursor})
 		if err != nil {
 			log.Fatalf("Cursor scan failed: %v", err)
 		}
 	}
 
 	// Delete a key
-	if err := client.KV.Delete("user:123", nil); err != nil {
+	existed, err := client.KV.Delete("user:123", nil)
+	if err != nil {
 		log.Fatalf("Delete failed: %v", err)
 	}
-	fmt.Println("Deleted user:123")
+	fmt.Printf("Deleted user:123 (existed=%v)\n", existed)
 
 	// Get returns nil for non-existent key
 	missing, err := client.KV.Get("nonexistent", nil)

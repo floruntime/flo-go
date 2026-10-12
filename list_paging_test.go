@@ -17,9 +17,6 @@ func TestListRequestsEncodeLimitAndCursorInValue(t *testing.T) {
 		name string
 		call func(c *Client)
 	}{
-		{"kv scan", func(c *Client) {
-			c.KV.Scan("p", &ScanOptions{Limit: &limit, Cursor: cursor})
-		}},
 		{"processing list", func(c *Client) {
 			c.Processing.List(&ProcessingListOptions{Limit: limit, Cursor: cursor})
 		}},
@@ -39,36 +36,5 @@ func TestListRequestsEncodeLimitAndCursorInValue(t *testing.T) {
 				t.Errorf("options = % x, want none", opts)
 			}
 		})
-	}
-}
-
-// A scan answer ends [has_more:u8][cursor_len:u16][cursor]; the cursor must
-// come back to the caller intact so the next page can be requested.
-func TestScanReturnsTrailingCursor(t *testing.T) {
-	answer := binary.LittleEndian.AppendUint32(nil, 1)
-	answer = binary.LittleEndian.AppendUint16(answer, 1)
-	answer = append(answer, 'a')
-	answer = binary.LittleEndian.AppendUint32(answer, 1)
-	answer = append(answer, 'v')
-	answer = append(answer, 1)
-	answer = binary.LittleEndian.AppendUint16(answer, 3)
-	answer = append(answer, 'n', 'x', 't')
-
-	addr := fakeServer(t, func(OpCode) []byte { return answer })
-	c := NewClient(addr)
-	if err := c.Connect(); err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
-	res, err := c.KV.Scan("", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Entries) != 1 || string(res.Entries[0].Key) != "a" || string(res.Entries[0].Value) != "v" {
-		t.Errorf("entries = %+v", res.Entries)
-	}
-	if !res.HasMore || string(res.Cursor) != "nxt" {
-		t.Errorf("HasMore = %v, Cursor = %q; want true, \"nxt\"", res.HasMore, res.Cursor)
 	}
 }

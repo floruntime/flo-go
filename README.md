@@ -137,41 +137,106 @@ err := client.KV.Put("key", []byte("value"), &flo.PutOptions{
 #### Delete
 
 ```go
-// Delete succeeds even if key doesn't exist
-err := client.KV.Delete("key", nil)
+// Deleting a missing key is not an error; existed says whether it was there
+existed, err := client.KV.Delete("key", nil)
+
+// Delete only if the key is still at the version you hold
+existed, err := client.KV.Delete("lock", &flo.DeleteOptions{CASVersion: &version})
+```
+
+#### MGet
+
+```go
+// One entry per key, in order; Found is false for a missing key.
+// Up to flo.MaxMGetKeys keys; the SDK follows up until every key is answered.
+entries, err := client.KV.MGet([]string{"a", "b", "c"}, nil)
+for _, e := range entries {
+    fmt.Printf("%s found=%v v%d %s\n", e.Key, e.Found, e.Version, e.Value)
+}
 ```
 
 #### Scan
 
 ```go
-// Scan all keys with prefix
-result, err := client.KV.Scan("user:", nil)
-for _, entry := range result.Entries {
-    fmt.Printf("%s = %s\n", entry.Key, entry.Value)
-}
-
-// Paginated scan
+// Scan returns key names, one page at a time (default 100, at most 1024)
 limit := uint32(100)
 result, err := client.KV.Scan("user:", &flo.ScanOptions{Limit: &limit})
-for result.HasMore {
-    result, err = client.KV.Scan("user:", &flo.ScanOptions{Cursor: result.Cursor})
-    // Process result.Entries...
+for {
+    for _, key := range result.Keys {
+        fmt.Println(key)
+    }
+    if result.Cursor == nil { // last page
+        break
+    }
+    result, err = client.KV.Scan("user:", &flo.ScanOptions{Limit: &limit, Cursor: result.Cursor})
 }
 ```
 
 #### History
 
 ```go
-// Get version history
+// Versions newest first (default 10, at most 65)
 entries, err := client.KV.History("key", nil)
 for _, entry := range entries {
-    fmt.Printf("v%d at %d: %s\n", entry.Version, entry.Timestamp, entry.Value)
+    fmt.Printf("v%d at %d ms: %s\n", entry.Version, entry.AtMs, entry.Value)
 }
 
-// Limit history entries
-limit := uint32(10)
+limit := uint32(5)
 entries, err := client.KV.History("key", &flo.HistoryOptions{Limit: &limit})
 ```
+
+#### Incr
+
+```go
+// Add 1 (or Delta) to a counter; a missing key starts at the delta
+res, err := client.KV.Incr("hits", nil)
+res, err := client.KV.Incr("hits", &flo.KVIncrOptions{Delta: flo.Int64Ptr(-5)})
+fmt.Println(res.Value, res.Version)
+```
+
+#### Expire and Exists
+
+```go
+// Set an existing key's TTL in milliseconds; 0 clears it
+err := client.KV.Expire("session:abc", 60_000, nil)
+err := client.KV.Expire("session:abc", 0, nil)
+
+// Renew a lease only if you still own it
+err := client.KV.Expire("lease", 30_000, &flo.KVExpireOptions{CASVersion: &version})
+
+ok, err := client.KV.Exists("session:abc", nil)
+```
+
+#### JSON documents
+
+```go
+// Path "" or "$" is the whole document
+put, err := client.KV.JsonSet("user:1", "$", []byte(`{"name":"Ada","age":36}`), nil)
+doc, err := client.KV.JsonGet("user:1", "$.name", nil) // nil if key or path is missing
+put, err = client.KV.JsonSet("user:1", "$.age", []byte(`37`), nil)
+put, err = client.KV.JsonDel("user:1", "$.age", nil) // the new version
+put, err = client.KV.JsonDel("user:1", "$", nil)     // deletes the key; put is nil
+```
+
+#### Transactions
+
+```go
+// A transaction is pinned to the shard that owns its routing key; every key
+// in it must route there.
+txn, err := client.KV.Begin("user:1", nil)
+if err != nil {
+    return err
+}
+defer txn.Rollback() // no-op after Commit
+
+txn.Put("user:1:name", []byte("Ada"), nil)
+txn.Incr("user:1:logins", 1)
+txn.Expire("user:1:session", 60_000)
+txn.Delete("user:1:old")
+res, err := txn.Commit()
+```
+
+Scan, MGet, History and the JSON ops are not available inside a transaction.
 
 ### Queue Operations
 
