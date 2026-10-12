@@ -37,11 +37,11 @@ func TestOptionsBuilder(t *testing.T) {
 
 	t.Run("AddU64", func(t *testing.T) {
 		b := NewOptionsBuilder()
-		b.AddU64(OptTTLMs, 3_600_000)
+		b.AddU64(OptMaxAgeSeconds, 3_600_000)
 		result := b.Build()
 
 		expected := make([]byte, 10)
-		expected[0] = byte(OptTTLMs)
+		expected[0] = byte(OptMaxAgeSeconds)
 		expected[1] = 8
 		binary.LittleEndian.PutUint64(expected[2:], 3_600_000)
 
@@ -52,10 +52,10 @@ func TestOptionsBuilder(t *testing.T) {
 
 	t.Run("AddBytes", func(t *testing.T) {
 		b := NewOptionsBuilder()
-		b.AddBytes(OptRoutingKey, []byte("test-key"))
+		b.AddBytes(OptPartitionKey, []byte("test-key"))
 		result := b.Build()
 
-		expected := append([]byte{byte(OptRoutingKey), 8}, []byte("test-key")...)
+		expected := append([]byte{byte(OptPartitionKey), 8}, []byte("test-key")...)
 
 		if !bytes.Equal(result, expected) {
 			t.Errorf("expected %v, got %v", expected, result)
@@ -64,10 +64,10 @@ func TestOptionsBuilder(t *testing.T) {
 
 	t.Run("AddFlag", func(t *testing.T) {
 		b := NewOptionsBuilder()
-		b.AddFlag(OptIfNotExists)
+		b.AddFlag(OptDryRun)
 		result := b.Build()
 
-		expected := []byte{byte(OptIfNotExists), 0}
+		expected := []byte{byte(OptDryRun), 0}
 		if !bytes.Equal(result, expected) {
 			t.Errorf("expected %v, got %v", expected, result)
 		}
@@ -76,8 +76,8 @@ func TestOptionsBuilder(t *testing.T) {
 	t.Run("ChainedOptions", func(t *testing.T) {
 		b := NewOptionsBuilder()
 		b.AddU8(OptPriority, 5).
-			AddU64(OptTTLMs, 1000).
-			AddFlag(OptIfNotExists)
+			AddU64(OptMaxAgeSeconds, 1000).
+			AddFlag(OptDryRun)
 
 		result := b.Build()
 		if len(result) != 3+10+2 { // u8(3) + u64(10) + flag(2)
@@ -214,74 +214,6 @@ func TestParseResponseHeader(t *testing.T) {
 	})
 }
 
-func TestParseScanResponse(t *testing.T) {
-	t.Run("EmptyResult", func(t *testing.T) {
-		// count(4) + has_more(1) + cursor_len(2)
-		data := make([]byte, 7)
-
-		result, err := parseScanResponse(data)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if result.HasMore {
-			t.Error("expected HasMore to be false")
-		}
-		if result.Cursor != nil {
-			t.Error("expected Cursor to be nil")
-		}
-		if len(result.Entries) != 0 {
-			t.Errorf("expected 0 entries, got %d", len(result.Entries))
-		}
-	})
-
-	t.Run("WithEntries", func(t *testing.T) {
-		// Build response manually
-		buf := make([]byte, 0, 100)
-
-		// count = 2
-		buf = binary.LittleEndian.AppendUint32(buf, 2)
-
-		// Entry 1: key="key1", value="val1"
-		buf = binary.LittleEndian.AppendUint16(buf, 4)
-		buf = append(buf, []byte("key1")...)
-		buf = binary.LittleEndian.AppendUint32(buf, 4)
-		buf = append(buf, []byte("val1")...)
-
-		// Entry 2: key="key2", value="val2"
-		buf = binary.LittleEndian.AppendUint16(buf, 4)
-		buf = append(buf, []byte("key2")...)
-		buf = binary.LittleEndian.AppendUint32(buf, 4)
-		buf = append(buf, []byte("val2")...)
-
-		// has_more = true, cursor = "cur1"
-		buf = append(buf, 1)
-		buf = binary.LittleEndian.AppendUint16(buf, 4)
-		buf = append(buf, []byte("cur1")...)
-
-		result, err := parseScanResponse(buf)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if !result.HasMore {
-			t.Error("expected HasMore to be true")
-		}
-		if !bytes.Equal(result.Cursor, []byte("cur1")) {
-			t.Errorf("expected cursor 'cur1', got %s", result.Cursor)
-		}
-		if len(result.Entries) != 2 {
-			t.Fatalf("expected 2 entries, got %d", len(result.Entries))
-		}
-		if !bytes.Equal(result.Entries[0].Key, []byte("key1")) {
-			t.Errorf("expected key 'key1', got %s", result.Entries[0].Key)
-		}
-		if !bytes.Equal(result.Entries[0].Value, []byte("val1")) {
-			t.Errorf("expected value 'val1', got %s", result.Entries[0].Value)
-		}
-	})
-}
-
 func TestParseDequeueResponse(t *testing.T) {
 	t.Run("EmptyResult", func(t *testing.T) {
 		data := make([]byte, 4)
@@ -402,7 +334,7 @@ func TestExtractBlockMS(t *testing.T) {
 		opts := NewOptionsBuilder().
 			AddU8(OptPriority, 5).
 			AddU32(OptBlockMS, 30000).
-			AddFlag(OptIfNotExists).
+			AddFlag(OptDryRun).
 			Build()
 
 		if got := extractBlockMS(opts); got != 30000 {

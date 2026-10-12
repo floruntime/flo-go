@@ -30,7 +30,7 @@ const (
 	// into every request header. A server built from another table refuses
 	// the request, and its answers carry its own hash, which this client
 	// refuses. It changes with every server release that changes a layout.
-	TableHash uint64 = 0x02e15ee74c0ad72c
+	TableHash uint64 = 0xc93e40aa0f2795fe
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -84,10 +84,9 @@ const (
 	OpKVBeginTxn    OpCode = 0x110
 	OpKVCommitTxn   OpCode = 0x111
 	OpKVRollbackTxn OpCode = 0x112
-	// KV Extended (TTL lifecycle, exists)
-	OpKVTouch   OpCode = 0x113
-	OpKVPersist OpCode = 0x114
-	OpKVExists  OpCode = 0x115
+	// KV Extended (TTL, exists)
+	OpKVExpire OpCode = 0x113
+	OpKVExists OpCode = 0x115
 
 	// ── Streams (0x130 – 0x14F) ──
 	OpStreamAppend OpCode = 0x130
@@ -235,14 +234,8 @@ func (s StatusCode) String() string {
 type OptionTag uint8
 
 const (
-	// KV Options (0x01 - 0x0F)
-	OptTTLMs       OptionTag = 0x01 // u64: Time-to-live in milliseconds (0 = no expiration)
-	OptCASVersion  OptionTag = 0x02 // u64: Expected version for compare-and-swap
-	OptIfNotExists OptionTag = 0x03 // void: Only set if key doesn't exist (NX)
-	OptIfExists    OptionTag = 0x04 // void: Only set if key exists (XX)
-	OptLimit       OptionTag = 0x05 // u32: Maximum number of results for scan/list operations
-	OptRoutingKey  OptionTag = 0x08 // string: Explicit routing key for shard co-location
-	OptTxnID       OptionTag = 0x09 // u64: Transaction ID for per-shard transactions
+	// General Options (0x01 - 0x0F)
+	OptLimit OptionTag = 0x05 // u32: Maximum number of results
 
 	// Queue Options (0x10 - 0x1F)
 	OptPriority OptionTag = 0x10 // u8: Message priority (0-255, lower is taken first)
@@ -276,24 +269,25 @@ const (
 	OptTSDownsample  OptionTag = 0x69 // string: Downsample rule (e.g., "1m:avg:30d")
 )
 
-// KVEntry represents an entry from scan results.
-type KVEntry struct {
-	Key   []byte
+// ScanResult is one page of a KV scan: key names, and the cursor that
+// reads the next page, nil on the last page.
+type ScanResult struct {
+	Keys   []string
+	Cursor []byte
+}
+
+// VersionEntry is one version of a key from History.
+type VersionEntry struct {
+	Version uint64
+	// AtMs is when the version was written, in Unix milliseconds.
+	AtMs  int64
 	Value []byte
 }
 
-// ScanResult represents the result of a KV scan operation.
-type ScanResult struct {
-	Entries []KVEntry
-	Cursor  []byte // nil if no more pages
-	HasMore bool
-}
-
-// VersionEntry represents a KV version entry from history.
-type VersionEntry struct {
-	Version   uint64
-	Timestamp int64
-	Value     []byte
+// IncrResult is a counter's value and version after an Incr.
+type IncrResult struct {
+	Value   int64
+	Version uint64
 }
 
 // PutResult is returned by KV writes that succeed. The Version field is the
@@ -301,15 +295,6 @@ type VersionEntry struct {
 // write via PutOptions.CASVersion.
 type PutResult struct {
 	Version uint64
-}
-
-// KVBeginResult is returned by a successful KV transaction begin. TxnID is the
-// server-assigned transaction handle (use it on subsequent ops via
-// KVTransaction). PinnedHash is the partition hash that the transaction is
-// bound to — every op inside the transaction must hash to the same partition.
-type KVBeginResult struct {
-	TxnID      uint64
-	PinnedHash uint64
 }
 
 // KVCommitResult is returned by a successful KV transaction commit. CommitIndex
@@ -405,23 +390,30 @@ const (
 // DeleteOptions contains options for KV delete operations.
 type DeleteOptions struct {
 	Namespace string
-	// IfMatch — if non-nil, the delete only succeeds when the current key
-	// version equals *IfMatch. Returns ErrCASFailed otherwise. Use this for
-	// race-free "only the owner deletes" patterns (locks, leases, claims).
-	IfMatch *uint64
+	// CASVersion, when set, must be the key's version: only the owner
+	// deletes a lock or lease.
+	CASVersion *uint64
+	// RoutingKey routes the request in place of the key.
+	RoutingKey string
 }
 
 // ScanOptions contains options for KV scan operations.
 type ScanOptions struct {
 	Namespace string
-	Cursor    []byte
-	Limit     *uint32
+	// Cursor is the previous page's Cursor; nil reads the first page.
+	Cursor []byte
+	// Limit is the most names in the page: 1..MaxScanLimit, default
+	// MaxScanLimit.
+	Limit *uint32
 }
 
 // HistoryOptions contains options for KV history operations.
 type HistoryOptions struct {
 	Namespace string
-	Limit     *uint32
+	// Limit is the most versions returned: 1..MaxHistoryLimit, default 10.
+	Limit *uint32
+	// RoutingKey routes the request in place of the key.
+	RoutingKey string
 }
 
 // EnqueueOptions contains options for queue enqueue operations.
@@ -1028,6 +1020,12 @@ const (
 	ReasonWritesStopped Reason = 22
 	// ReasonTooManyProposals: too many writes wait for commit.
 	ReasonTooManyProposals Reason = 23
+	// ReasonWrongType: the key's value isn't what the op works on (a counter,
+	// a JSON document).
+	ReasonWrongType Reason = 24
+	// ReasonTooManyTransactions: the shard holds as many open transactions
+	// as it may.
+	ReasonTooManyTransactions Reason = 25
 )
 
 var reasonNames = map[Reason]string{
@@ -1039,6 +1037,7 @@ var reasonNames = map[Reason]string{
 	ReasonConditionFailed: "condition_failed", ReasonNoSuchTransaction: "no_such_transaction",
 	ReasonWrongRoutingKey: "wrong_routing_key", ReasonTxnTooLarge: "txn_too_large", ReasonTooManyWaiters: "too_many_waiters",
 	ReasonConflictingFields: "conflicting_fields", ReasonWritesStopped: "writes_stopped", ReasonTooManyProposals: "too_many_proposals",
+	ReasonWrongType: "wrong_type", ReasonTooManyTransactions: "too_many_transactions",
 }
 
 func (r Reason) String() string {

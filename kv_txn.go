@@ -1,7 +1,6 @@
 package flo
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 )
@@ -10,16 +9,26 @@ import (
 // per-shard KV transaction (e.g. Scan, MGet, Json*, History).
 var ErrTxnUnsupportedOp = errors.New("operation not supported inside a KV transaction")
 
+// errTxnFinished is returned by an op on a committed or rolled-back
+// transaction.
+var errTxnFinished = errors.New("flo: transaction already finished")
+
 // KVBeginOptions contains options for KV.Begin.
 type KVBeginOptions struct {
 	Namespace string
+}
+
+// KVTxnCASOptions contains options for a transaction's Delete and Expire.
+type KVTxnCASOptions struct {
+	// CASVersion, when set, must be the key's version when the op applies.
+	CASVersion *uint64
 }
 
 // KVTransaction is a per-shard KV transaction handle. All operations on the
 // transaction are buffered on the server's pinned shard until Commit or
 // Rollback is called. Every key written or read inside the transaction must
 // hash to the same partition as the routing key passed to Begin; otherwise
-// the server returns a "kv_txn_cross_shard" error.
+// the server refuses it with ReasonWrongRoutingKey.
 //
 // Caps (server-enforced):
 //   - 256 ops per transaction
@@ -46,51 +55,43 @@ func (t *KVTransaction) ID() uint64 { return t.id }
 func (t *KVTransaction) PinnedHash() uint64 { return t.pinnedHash }
 
 // Begin opens a new per-shard transaction pinned to the partition that
-// owns routingKey. Subsequent operations through the returned KVTransaction
-// must use keys that hash to the same partition.
+// owns routingKey, which must not be empty. Subsequent operations through
+// the returned KVTransaction must use keys that hash to the same partition.
+// A shard holding as many open transactions as it may returns a
+// ServerError with ReasonTooManyTransactions.
 func (kv *KVClient) Begin(routingKey string, opts *KVBeginOptions) (*KVTransaction, error) {
 	if opts == nil {
 		opts = &KVBeginOptions{}
 	}
-	namespace := kv.client.getNamespace(opts.Namespace)
-
-	builder := NewOptionsBuilder()
-	if routingKey != "" {
-		builder.AddBytes(OptRoutingKey, []byte(routingKey))
+	if routingKey == "" {
+		return nil, errors.New("flo: a transaction needs a routing key")
 	}
-	resp, err := kv.client.sendAndCheck(OpKVBeginTxn, namespace, []byte(routingKey), nil, builder.Build(), false)
+	if err := checkRoutingKey(routingKey); err != nil {
+		return nil, err
+	}
+	namespace := kv.client.getNamespace(opts.Namespace)
+	resp, err := kv.client.sendAndCheck(OpKVBeginTxn, namespace, []byte(routingKey), nil, nil, false)
 	if err != nil {
 		return nil, err
 	}
-	// Wire body: [variant:u8=0][txn_id:u64 LE][pinned_hash:u64 LE]
-	if len(resp.Data) < 17 {
-		return nil, fmt.Errorf("flo: short KV begin reply (%d bytes)", len(resp.Data))
+	id, pinned, err := decodeBeginAnswer(resp.Data)
+	if err != nil {
+		return nil, err
 	}
 	return &KVTransaction{
 		client:     kv.client,
 		namespace:  namespace,
 		routingKey: routingKey,
-		id:         binary.LittleEndian.Uint64(resp.Data[1:9]),
-		pinnedHash: binary.LittleEndian.Uint64(resp.Data[9:17]),
+		id:         id,
+		pinnedHash: pinned,
 	}, nil
 }
 
-// txnOptionsBuilder returns a builder pre-populated with the routing-key and
-// txn-id TLVs required for every op inside the transaction.
-func (t *KVTransaction) txnOptionsBuilder() *OptionsBuilder {
-	b := NewOptionsBuilder()
-	if t.routingKey != "" {
-		b.AddBytes(OptRoutingKey, []byte(t.routingKey))
-	}
-	b.AddU64(OptTxnID, t.id)
-	return b
-}
-
-// Put buffers a put inside the transaction. CAS / NX / XX / TTL options are
-// supported the same way as KVClient.Put.
+// Put buffers a put inside the transaction. Its options work as they do
+// for KVClient.Put; the routing key is the transaction's.
 func (t *KVTransaction) Put(key string, value []byte, opts *PutOptions) (PutResult, error) {
 	if t.done {
-		return PutResult{}, fmt.Errorf("flo: transaction already finished")
+		return PutResult{}, errTxnFinished
 	}
 	o := PutOptions{}
 	if opts != nil {
@@ -104,77 +105,77 @@ func (t *KVTransaction) Put(key string, value []byte, opts *PutOptions) (PutResu
 // writes). Returns nil if the key is not found.
 func (t *KVTransaction) Get(key string) (*GetResult, error) {
 	if t.done {
-		return nil, fmt.Errorf("flo: transaction already finished")
+		return nil, errTxnFinished
 	}
 	return t.client.kvGet(t.namespace, key, &GetOptions{RoutingKey: t.routingKey}, &t.id)
 }
 
-// Delete buffers a delete inside the transaction.
-func (t *KVTransaction) Delete(key string) error {
+// Delete buffers a delete inside the transaction. Whether the key existed
+// isn't known until the transaction commits.
+func (t *KVTransaction) Delete(key string, opts *KVTxnCASOptions) error {
 	if t.done {
-		return fmt.Errorf("flo: transaction already finished")
+		return errTxnFinished
 	}
-	builder := t.txnOptionsBuilder()
-	_, err := t.client.sendAndCheck(OpKVDelete, t.namespace, []byte(key), nil, builder.Build(), true)
-	return err
-}
-
-// Incr buffers an atomic counter increment inside the transaction.
-func (t *KVTransaction) Incr(key string, delta int64) (int64, error) {
-	if t.done {
-		return 0, fmt.Errorf("flo: transaction already finished")
+	if opts == nil {
+		opts = &KVTxnCASOptions{}
 	}
-	builder := t.txnOptionsBuilder()
-	value := make([]byte, 8)
-	binary.LittleEndian.PutUint64(value, uint64(delta))
-	resp, err := t.client.sendAndCheck(OpKVIncr, t.namespace, []byte(key), value, builder.Build(), true)
+	body, err := encodeDeleteBody(opts.CASVersion, t.routingKey, &t.id)
 	if err != nil {
-		return 0, err
+		return err
 	}
-	if len(resp.Data) < 8 {
-		return 0, fmt.Errorf("flo: short Incr reply")
+	resp, err := t.client.sendAndCheck(OpKVDelete, t.namespace, []byte(key), body, nil, false)
+	if err != nil {
+		return err
 	}
-	return int64(binary.LittleEndian.Uint64(resp.Data[0:8])), nil
-}
-
-// Touch sets the TTL of an existing key inside the transaction to ttlMs
-// milliseconds; 0 clears the TTL.
-func (t *KVTransaction) Touch(key string, ttlMs uint64) error {
-	if t.done {
-		return fmt.Errorf("flo: transaction already finished")
-	}
-	builder := t.txnOptionsBuilder()
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], ttlMs)
-	_, err := t.client.sendAndCheck(OpKVTouch, t.namespace, []byte(key), buf[:], builder.Build(), true)
+	_, err = decodeDeleteAnswer(resp.Data)
 	return err
 }
 
-// Persist removes the TTL on a key inside the transaction.
-func (t *KVTransaction) Persist(key string) error {
+// Incr buffers an atomic counter increment inside the transaction. The new
+// value isn't known until the transaction commits.
+func (t *KVTransaction) Incr(key string, delta int64) error {
 	if t.done {
-		return fmt.Errorf("flo: transaction already finished")
+		return errTxnFinished
 	}
-	builder := t.txnOptionsBuilder()
-	_, err := t.client.sendAndCheck(OpKVPersist, t.namespace, []byte(key), nil, builder.Build(), true)
+	body, err := encodeIncrBody(delta, t.routingKey, &t.id)
+	if err != nil {
+		return err
+	}
+	resp, err := t.client.sendAndCheck(OpKVIncr, t.namespace, []byte(key), body, nil, false)
+	if err != nil {
+		return err
+	}
+	_, err = decodeIncrAnswer(resp.Data)
 	return err
 }
 
-// Exists checks key existence inside the transaction.
+// Expire buffers setting an existing key's TTL to ttlMs milliseconds inside
+// the transaction; 0 clears the TTL.
+func (t *KVTransaction) Expire(key string, ttlMs uint64, opts *KVTxnCASOptions) error {
+	if t.done {
+		return errTxnFinished
+	}
+	if opts == nil {
+		opts = &KVTxnCASOptions{}
+	}
+	body, err := encodeExpireBody(ttlMs, opts.CASVersion, t.routingKey, &t.id)
+	if err != nil {
+		return err
+	}
+	resp, err := t.client.sendAndCheck(OpKVExpire, t.namespace, []byte(key), body, nil, false)
+	if err != nil {
+		return err
+	}
+	return decodeEmptyAnswer(resp.Data)
+}
+
+// Exists checks key existence inside the transaction, seeing its own
+// buffered writes.
 func (t *KVTransaction) Exists(key string) (bool, error) {
 	if t.done {
-		return false, fmt.Errorf("flo: transaction already finished")
+		return false, errTxnFinished
 	}
-	builder := t.txnOptionsBuilder()
-	resp, err := t.client.sendAndCheck(OpKVExists, t.namespace, []byte(key), nil, builder.Build(), true)
-	if err != nil {
-		return false, err
-	}
-	// Wire body: [version:u64 LE][1 byte 0/1]
-	if len(resp.Data) < 9 {
-		return false, nil
-	}
-	return resp.Data[8] == 1, nil
+	return t.client.kvExists(t.namespace, key, t.routingKey, &t.id)
 }
 
 // Scan is not supported inside a transaction.
@@ -212,23 +213,18 @@ func (t *KVTransaction) History(key string, opts *HistoryOptions) ([]VersionEntr
 // operations return an error.
 func (t *KVTransaction) Commit() (*KVCommitResult, error) {
 	if t.done {
-		return nil, fmt.Errorf("flo: transaction already finished")
+		return nil, errTxnFinished
 	}
 	t.done = true
-	builder := NewOptionsBuilder()
-	builder.AddU64(OptTxnID, t.id)
-	resp, err := t.client.sendAndCheck(OpKVCommitTxn, t.namespace, nil, nil, builder.Build(), false)
+	resp, err := t.client.sendAndCheck(OpKVCommitTxn, t.namespace, nil, encodeTxnBody(t.id), nil, false)
 	if err != nil {
 		return nil, err
 	}
-	// Wire body: [variant:u8=1][commit_index:u64 LE][op_count:u16 LE]
-	if len(resp.Data) < 11 {
-		return nil, fmt.Errorf("flo: short KV commit reply (%d bytes)", len(resp.Data))
+	got, err := decodeCommitAnswer(resp.Data)
+	if err != nil {
+		return nil, fmt.Errorf("flo: KV commit answer: %w", err)
 	}
-	return &KVCommitResult{
-		CommitIndex: binary.LittleEndian.Uint64(resp.Data[1:9]),
-		OpCount:     binary.LittleEndian.Uint16(resp.Data[9:11]),
-	}, nil
+	return got, nil
 }
 
 // Rollback discards the buffered operations without committing. Idempotent:
@@ -238,8 +234,9 @@ func (t *KVTransaction) Rollback() error {
 		return nil
 	}
 	t.done = true
-	builder := NewOptionsBuilder()
-	builder.AddU64(OptTxnID, t.id)
-	_, err := t.client.sendAndCheck(OpKVRollbackTxn, t.namespace, nil, nil, builder.Build(), false)
-	return err
+	resp, err := t.client.sendAndCheck(OpKVRollbackTxn, t.namespace, nil, encodeTxnBody(t.id), nil, false)
+	if err != nil {
+		return err
+	}
+	return decodeEmptyAnswer(resp.Data)
 }

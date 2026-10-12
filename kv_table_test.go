@@ -74,9 +74,37 @@ func TestTransactionOpsCarryTheirTxnAndCommitNoRoutingKey(t *testing.T) {
 	if !bytes.HasSuffix(body, cat([]byte{1, 2, 0, 'r', 'k'}, []byte{1}, u64le(txn.id))) {
 		t.Errorf("txn put body = % x: want the routing key and the txn last", body)
 	}
-	value, options := captureRequest(t, func(c *Client) { txn.client = c; txn.Commit() })
-	if len(value) != 0 || !bytes.Equal(options, cat([]byte{byte(OptTxnID), 8}, u64le(txn.id))) {
-		t.Errorf("commit value % x, options % x: want only the txn id", value, options)
+	rkTxn := cat([]byte{1, 2, 0, 'r', 'k'}, []byte{1}, u64le(txn.id))
+	for name, call := range map[string]func(){
+		"delete": func() { txn.Delete("k", nil) },
+		"incr":   func() { txn.Incr("k", 3) },
+		"expire": func() { txn.Expire("k", 10, nil) },
+		"exists": func() { txn.Exists("k") },
+	} {
+		p = capturePayload(t, func(c *Client) { txn.client = c; call() })
+		if _, key, body := tableBody(t, p); key != "k" || !bytes.HasSuffix(body, rkTxn) {
+			t.Errorf("txn %s key %q body % x: want the routing key and the txn last", name, key, body)
+		}
+	}
+	casRkTxn := cat([]byte{1}, u64le(5), rkTxn)
+	for name, call := range map[string]func(){
+		"delete": func() { txn.Delete("k", &KVTxnCASOptions{CASVersion: Uint64Ptr(5)}) },
+		"expire": func() { txn.Expire("k", 10, &KVTxnCASOptions{CASVersion: Uint64Ptr(5)}) },
+	} {
+		p = capturePayload(t, func(c *Client) { txn.client = c; call() })
+		if _, _, body := tableBody(t, p); !bytes.HasSuffix(body, casRkTxn) {
+			t.Errorf("txn %s with cas body % x: want cas 5, the routing key and the txn last", name, body)
+		}
+	}
+	for name, call := range map[string]func(){
+		"commit":   func() { txn.Commit() },
+		"rollback": func() { txn.Rollback() },
+	} {
+		txn.done = false
+		p = capturePayload(t, func(c *Client) { txn.client = c; call() })
+		if _, key, body := tableBody(t, p); key != "" || !bytes.Equal(body, u64le(txn.id)) {
+			t.Errorf("%s key %q body % x: want no key and only the txn", name, key, body)
+		}
 	}
 }
 
@@ -115,12 +143,14 @@ func TestAnswersDecodeWhole(t *testing.T) {
 }
 
 func TestNewReasonsHaveNames(t *testing.T) {
-	for r := ReasonNotFound; r <= ReasonTooManyProposals; r++ {
+	for r := ReasonNotFound; r <= ReasonTooManyTransactions; r++ {
 		if _, ok := reasonNames[r]; !ok {
 			t.Errorf("reason %d has no name", r)
 		}
 	}
-	if ReasonNoSuchTransaction.String() != "no_such_transaction" {
-		t.Errorf("got %q", ReasonNoSuchTransaction.String())
+	for r, want := range map[Reason]string{ReasonNoSuchTransaction: "no_such_transaction", ReasonWrongType: "wrong_type", ReasonTooManyTransactions: "too_many_transactions"} {
+		if r.String() != want {
+			t.Errorf("reason %d = %q, want %q", r, r.String(), want)
+		}
 	}
 }

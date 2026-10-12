@@ -63,14 +63,3 @@ func captureRequest(t *testing.T, call func(c *Client)) (value, options []byte) 
 	olen := int(binary.LittleEndian.Uint16(p[off:]))
 	return value, p[off+2 : off+2+olen]
 }
-
-func TestTouchEncodesMs(t *testing.T) {
-	for _, ttl := range []uint64{0, 1_500} {
-		value, _ := captureRequest(t, func(c *Client) {
-			c.KV.Touch("k", ttl, nil)
-		})
-		if len(value) != 8 || binary.LittleEndian.Uint64(value) != ttl {
-			t.Errorf("Touch(%d) value = % x, want 8-byte %d", ttl, value, ttl)
-		}
-	}
-}
