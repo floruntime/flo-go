@@ -158,7 +158,7 @@ for _, e := range entries {
 #### Scan
 
 ```go
-// Scan returns key names, one page at a time (default 100, at most 1024)
+// Scan returns key names, one page at a time (at most and by default 1024)
 limit := uint32(100)
 result, err := client.KV.Scan("user:", &flo.ScanOptions{Limit: &limit})
 for {
@@ -175,7 +175,7 @@ for {
 #### History
 
 ```go
-// Versions newest first (default 10, at most 65)
+// Versions newest first (default 10, at most 65); a missing key has none
 entries, err := client.KV.History("key", nil)
 for _, entry := range entries {
     fmt.Printf("v%d at %d ms: %s\n", entry.Version, entry.AtMs, entry.Value)
@@ -231,8 +231,8 @@ defer txn.Rollback() // no-op after Commit
 
 txn.Put("user:1:name", []byte("Ada"), nil)
 txn.Incr("user:1:logins", 1)
-txn.Expire("user:1:session", 60_000)
-txn.Delete("user:1:old")
+txn.Expire("user:1:session", 60_000, nil)
+txn.Delete("user:1:old", &flo.KVTxnCASOptions{CASVersion: &version})
 res, err := txn.Commit()
 ```
 

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"reflect"
@@ -41,7 +42,8 @@ func TestKVRequestBodiesMatchTheServer(t *testing.T) {
 	}{
 		{"delete", enc(encodeDeleteBody(&cas, "rk", nil)), "010700000000000000010200726b00"},
 		{"scan", enc(encodeScanBody(2, []byte("c1"))), "0102000000026331"},
-		{"history", enc(encodeHistoryBody(2)), "0102000000"},
+		{"history", enc(encodeHistoryBody(2, "")), "010200000000"},
+		{"history with routing key", enc(encodeHistoryBody(2, "rk")), "0102000000010200726b"},
 		{"mget", enc(encodeMGetBody([]string{"a", "b"})), "0200010061010062"},
 		{"incr", enc(encodeIncrBody(-5, "", &txn9)), "01fbffffffffffffff00010900000000000000"},
 		{"expire", enc(encodeExpireBody(60000, nil, "", nil)), "60ea000000000000000000"},
@@ -269,6 +271,62 @@ func TestMGetFollowsNextUntilEveryKeyIsAnswered(t *testing.T) {
 	}
 }
 
+// Keys that don't fit one request body go in more than one request, each
+// within the frame, and the entries still come back one per key in order.
+func TestMGetSplitsKeysAcrossRequestsThatFitTheFrame(t *testing.T) {
+	var mu sync.Mutex
+	var sizes []int
+	var counts []int
+	c := tableServer(t, func(_ OpCode, p []byte) (StatusCode, []byte) {
+		_, _, body := tableBody(t, p)
+		n := int(binary.LittleEndian.Uint16(body))
+		mu.Lock()
+		sizes = append(sizes, len(body))
+		counts = append(counts, n)
+		mu.Unlock()
+		data := binary.LittleEndian.AppendUint16(nil, uint16(n))
+		for i := 0; i < n; i++ {
+			data = append(data, mgetEntry(true, uint64(i), "")...)
+		}
+		return StatusOK, append(data, 0)
+	})
+	keys := make([]string, 200)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("%04d", i) + string(bytes.Repeat([]byte{'k'}, 1996))
+	}
+	got, err := c.KV.MGet(keys, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(keys) {
+		t.Fatalf("%d entries for %d keys", len(got), len(keys))
+	}
+	for i, e := range got {
+		if e.Key != keys[i] || !e.Found {
+			t.Fatalf("entry %d = %q found=%v, want key %d", i, e.Key[:4], e.Found, i)
+		}
+	}
+	// 2 + 2002 per key: 128 keys fit 257949 bytes, 129 don't.
+	if want := []int{128, 72}; !reflect.DeepEqual(counts, want) {
+		t.Errorf("requests carried %v keys, want %v", counts, want)
+	}
+	for _, s := range sizes {
+		if s > maxMGetBody {
+			t.Errorf("a request body of %d bytes, at most %d", s, maxMGetBody)
+		}
+	}
+}
+
+func TestHistoryOfAMissingKeyIsEmpty(t *testing.T) {
+	c := tableServer(t, func(OpCode, []byte) (StatusCode, []byte) {
+		return StatusNotFound, refusalBody(ReasonNotFound, RanNo, "no such key")
+	})
+	got, err := c.KV.History("gone", nil)
+	if err != nil || got == nil || len(got) != 0 {
+		t.Errorf("History = %v, %v; want an empty list", got, err)
+	}
+}
+
 func TestMGetRefusesAnAnswerThatMakesNoProgress(t *testing.T) {
 	c := tableServer(t, func(OpCode, []byte) (StatusCode, []byte) {
 		return StatusOK, []byte{0, 0, 1, 0, 0} // no entries, next 0
@@ -309,8 +367,8 @@ func TestKVOpsSendTheirEnvelopeKey(t *testing.T) {
 		{"scan names the prefix", "user:", hx(t, "0102000000026331"), func(c *Client) {
 			c.KV.Scan("user:", &ScanOptions{Limit: &limit, Cursor: []byte("c1")})
 		}},
-		{"scan defaults its limit", "", hx(t, "016400000000"), func(c *Client) { c.KV.Scan("", nil) }},
-		{"history defaults its limit", "k", hx(t, "010a000000"), func(c *Client) { c.KV.History("k", nil) }},
+		{"scan defaults its limit", "", hx(t, "010004000000"), func(c *Client) { c.KV.Scan("", nil) }},
+		{"history defaults its limit", "k", hx(t, "010a00000000"), func(c *Client) { c.KV.History("k", nil) }},
 		{"incr defaults its delta", "k", cat([]byte{1}, u64le(1), []byte{0, 0}), func(c *Client) { c.KV.Incr("k", nil) }},
 		{"expire carries its cas", "k", cat(u64le(0), []byte{1}, u64le(4), []byte{0, 0}), func(c *Client) {
 			c.KV.Expire("k", 0, &KVExpireOptions{CASVersion: Uint64Ptr(4)})
@@ -340,6 +398,8 @@ func TestOutOfBoundKVRequestsAreRefusedBeforeARoundTrip(t *testing.T) {
 	_, refused["history limit 0"] = c.KV.History("k", &HistoryOptions{Limit: &zero})
 	_, refused["history limit over"] = c.KV.History("k", &HistoryOptions{Limit: &overHistory})
 	_, refused["mget over"] = c.KV.MGet(many, nil)
+	_, refused["mget key over"] = c.KV.MGet([]string{"a", string(make([]byte, maxMGetKey+1))}, nil)
+	_, refused["history routing key over"] = c.KV.History("k", &HistoryOptions{RoutingKey: longRK})
 	refused["expire ttl over"] = c.KV.Expire("k", MaxTTLMs+1, nil)
 	_, refused["put ttl over"] = c.KV.Put("k", nil, &PutOptions{TTLMs: Uint64Ptr(MaxTTLMs + 1)})
 	_, refused["delete routing key over"] = c.KV.Delete("k", &DeleteOptions{RoutingKey: longRK})

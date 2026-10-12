@@ -18,6 +18,12 @@ type KVBeginOptions struct {
 	Namespace string
 }
 
+// KVTxnCASOptions contains options for a transaction's Delete and Expire.
+type KVTxnCASOptions struct {
+	// CASVersion, when set, must be the key's version when the op applies.
+	CASVersion *uint64
+}
+
 // KVTransaction is a per-shard KV transaction handle. All operations on the
 // transaction are buffered on the server's pinned shard until Commit or
 // Rollback is called. Every key written or read inside the transaction must
@@ -106,11 +112,14 @@ func (t *KVTransaction) Get(key string) (*GetResult, error) {
 
 // Delete buffers a delete inside the transaction. Whether the key existed
 // isn't known until the transaction commits.
-func (t *KVTransaction) Delete(key string) error {
+func (t *KVTransaction) Delete(key string, opts *KVTxnCASOptions) error {
 	if t.done {
 		return errTxnFinished
 	}
-	body, err := encodeDeleteBody(nil, t.routingKey, &t.id)
+	if opts == nil {
+		opts = &KVTxnCASOptions{}
+	}
+	body, err := encodeDeleteBody(opts.CASVersion, t.routingKey, &t.id)
 	if err != nil {
 		return err
 	}
@@ -142,11 +151,14 @@ func (t *KVTransaction) Incr(key string, delta int64) error {
 
 // Expire buffers setting an existing key's TTL to ttlMs milliseconds inside
 // the transaction; 0 clears the TTL.
-func (t *KVTransaction) Expire(key string, ttlMs uint64) error {
+func (t *KVTransaction) Expire(key string, ttlMs uint64, opts *KVTxnCASOptions) error {
 	if t.done {
 		return errTxnFinished
 	}
-	body, err := encodeExpireBody(ttlMs, nil, t.routingKey, &t.id)
+	if opts == nil {
+		opts = &KVTxnCASOptions{}
+	}
+	body, err := encodeExpireBody(ttlMs, opts.CASVersion, t.routingKey, &t.id)
 	if err != nil {
 		return err
 	}

@@ -30,7 +30,7 @@ const (
 	// into every request header. A server built from another table refuses
 	// the request, and its answers carry its own hash, which this client
 	// refuses. It changes with every server release that changes a layout.
-	TableHash uint64 = 0x8aa29e7a0c35fd78
+	TableHash uint64 = 0xc93e40aa0f2795fe
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -402,7 +402,8 @@ type ScanOptions struct {
 	Namespace string
 	// Cursor is the previous page's Cursor; nil reads the first page.
 	Cursor []byte
-	// Limit is the most names in the page: 1..MaxScanLimit, default 100.
+	// Limit is the most names in the page: 1..MaxScanLimit, default
+	// MaxScanLimit.
 	Limit *uint32
 }
 
@@ -411,6 +412,8 @@ type HistoryOptions struct {
 	Namespace string
 	// Limit is the most versions returned: 1..MaxHistoryLimit, default 10.
 	Limit *uint32
+	// RoutingKey routes the request in place of the key.
+	RoutingKey string
 }
 
 // EnqueueOptions contains options for queue enqueue operations.

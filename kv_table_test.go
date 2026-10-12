@@ -76,14 +76,24 @@ func TestTransactionOpsCarryTheirTxnAndCommitNoRoutingKey(t *testing.T) {
 	}
 	rkTxn := cat([]byte{1, 2, 0, 'r', 'k'}, []byte{1}, u64le(txn.id))
 	for name, call := range map[string]func(){
-		"delete": func() { txn.Delete("k") },
+		"delete": func() { txn.Delete("k", nil) },
 		"incr":   func() { txn.Incr("k", 3) },
-		"expire": func() { txn.Expire("k", 10) },
+		"expire": func() { txn.Expire("k", 10, nil) },
 		"exists": func() { txn.Exists("k") },
 	} {
 		p = capturePayload(t, func(c *Client) { txn.client = c; call() })
 		if _, key, body := tableBody(t, p); key != "k" || !bytes.HasSuffix(body, rkTxn) {
 			t.Errorf("txn %s key %q body % x: want the routing key and the txn last", name, key, body)
+		}
+	}
+	casRkTxn := cat([]byte{1}, u64le(5), rkTxn)
+	for name, call := range map[string]func(){
+		"delete": func() { txn.Delete("k", &KVTxnCASOptions{CASVersion: Uint64Ptr(5)}) },
+		"expire": func() { txn.Expire("k", 10, &KVTxnCASOptions{CASVersion: Uint64Ptr(5)}) },
+	} {
+		p = capturePayload(t, func(c *Client) { txn.client = c; call() })
+		if _, _, body := tableBody(t, p); !bytes.HasSuffix(body, casRkTxn) {
+			t.Errorf("txn %s with cas body % x: want cas 5, the routing key and the txn last", name, body)
 		}
 	}
 	for name, call := range map[string]func(){

@@ -41,10 +41,12 @@ const (
 
 	// maxRoutingKey is the longest routing key; its length prefix is a u16.
 	maxRoutingKey = 4096
+	// maxMGetKey is the longest key one MGet looks up.
+	maxMGetKey = 4096
+	// maxMGetBody is the largest kv.mget body that fits one request frame.
+	maxMGetBody = 257949
 	// maxScanCursor is the longest scan cursor; its length prefix is a u8.
 	maxScanCursor = 64
-	// defaultScanLimit is the page size when the caller gives none.
-	defaultScanLimit = 100
 	// defaultHistoryLimit is the version count when the caller gives none.
 	defaultHistoryLimit = 10
 )
@@ -328,14 +330,18 @@ func decodeScanAnswer(data []byte) (*ScanResult, error) {
 	return got, nil
 }
 
-// encodeHistoryBody codes kv.history's request: limit.
-func encodeHistoryBody(limit uint32) ([]byte, error) {
+// encodeHistoryBody codes kv.history's request: limit, routing_key.
+func encodeHistoryBody(limit uint32, routingKey string) ([]byte, error) {
 	if limit < 1 || limit > MaxHistoryLimit {
 		return nil, fmt.Errorf("flo: history limit %d, want 1..%d", limit, MaxHistoryLimit)
 	}
-	w := bodyWriter{buf: make([]byte, 0, 5)}
+	if err := checkRoutingKey(routingKey); err != nil {
+		return nil, err
+	}
+	w := bodyWriter{buf: make([]byte, 0, 8+len(routingKey))}
 	w.u8(1)
 	w.u32(limit)
+	w.routingKey(routingKey)
 	return w.buf, nil
 }
 
@@ -356,17 +362,43 @@ func decodeHistoryAnswer(data []byte) ([]VersionEntry, error) {
 	return out, nil
 }
 
+// checkMGetKeys refuses a key list one MGet can't take.
+func checkMGetKeys(keys []string) error {
+	if len(keys) > MaxMGetKeys {
+		return fmt.Errorf("flo: mget of %d keys, at most %d", len(keys), MaxMGetKeys)
+	}
+	for _, k := range keys {
+		if len(k) > maxMGetKey {
+			return fmt.Errorf("%w: mget key of %d bytes, at most %d", ErrKeyTooLarge, len(k), maxMGetKey)
+		}
+	}
+	return nil
+}
+
+// mgetBatch is how many of keys, from the first, fit one kv.mget body.
+// Keys must have passed checkMGetKeys, so at least one always fits.
+func mgetBatch(keys []string) int {
+	size := 2
+	for i, k := range keys {
+		size += 2 + len(k)
+		if size > maxMGetBody {
+			return i
+		}
+	}
+	return len(keys)
+}
+
 // encodeMGetBody codes kv.mget's request: keys.
 func encodeMGetBody(keys []string) ([]byte, error) {
-	if len(keys) > MaxMGetKeys {
-		return nil, fmt.Errorf("flo: mget of %d keys, at most %d", len(keys), MaxMGetKeys)
+	if err := checkMGetKeys(keys); err != nil {
+		return nil, err
 	}
 	size := 2
 	for _, k := range keys {
-		if len(k) > 0xFFFF {
-			return nil, fmt.Errorf("%w: mget key of %d bytes", ErrKeyTooLarge, len(k))
-		}
 		size += 2 + len(k)
+	}
+	if size > maxMGetBody {
+		return nil, fmt.Errorf("flo: mget body of %d bytes, at most %d", size, maxMGetBody)
 	}
 	w := bodyWriter{buf: make([]byte, 0, size)}
 	w.u16(uint16(len(keys)))
