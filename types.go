@@ -30,7 +30,7 @@ const (
 	// into every request header. A server built from another table refuses
 	// the request, and its answers carry its own hash, which this client
 	// refuses. It changes with every server release that changes a layout.
-	TableHash uint64 = 0x2827f6f0631754fe
+	TableHash uint64 = 0x02e15ee74c0ad72c
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -248,7 +248,6 @@ const (
 	OptPriority OptionTag = 0x10 // u8: Message priority (0-255, lower is taken first)
 	OptCount    OptionTag = 0x15 // u32: Number of messages to dequeue
 	OptBlockMS  OptionTag = 0x17 // u32: Blocking timeout (0 = don't wait, max 300000)
-	OptWaitMS   OptionTag = 0x18 // u32: Watch timeout - wait for NEXT version change (0 = don't wait, max 300000)
 
 	// Stream Options (0x20 - 0x2F) - StreamID-native ONLY
 	// All stream positioning uses StreamID (timestamp_ms + sequence) - no legacy offset/timestamp modes
@@ -359,17 +358,49 @@ type DequeueResult struct {
 // GetOptions contains options for KV get operations.
 type GetOptions struct {
 	Namespace string
-	BlockMS   *uint32 // Long-poll wait (nil or 0 = don't wait, max 300000)
+	// WaitMs waits up to this long for what WaitFor names (0 = don't wait,
+	// at most MaxWaitMS).
+	WaitMs uint64
+	// WaitFor is what a wait waits for: the key to exist (the default), or
+	// its next version.
+	WaitFor WaitFor
+	// RoutingKey routes the request in place of the key.
+	RoutingKey string
 }
+
+// WaitFor is what a Get with WaitMs waits for.
+type WaitFor uint8
+
+const (
+	// WaitForExists answers at once if the key exists, else once it's written.
+	WaitForExists WaitFor = 0
+	// WaitForChange answers the key's next version.
+	WaitForChange WaitFor = 1
+)
+
+// MaxWaitMS is the longest a Get may wait.
+const MaxWaitMS = 300000
 
 // PutOptions contains options for KV put operations.
 type PutOptions struct {
-	Namespace   string
-	TTLMs       *uint64 // Time-to-live in milliseconds (nil or 0 = no expiration)
-	CASVersion  *uint64
-	IfNotExists bool
-	IfExists    bool
+	Namespace string
+	TTLMs     *uint64 // Time-to-live in milliseconds (nil or 0 = no expiration)
+	// Condition says when the write may happen.
+	Condition Condition
+	// CASVersion, when set, must be the key's version; 0 means it doesn't exist.
+	CASVersion *uint64
+	// RoutingKey routes the request in place of the key.
+	RoutingKey string
 }
+
+// Condition says when a Put may write.
+type Condition uint8
+
+const (
+	ConditionAlways    Condition = 0
+	ConditionIfAbsent  Condition = 1
+	ConditionIfPresent Condition = 2
+)
 
 // DeleteOptions contains options for KV delete operations.
 type DeleteOptions struct {
@@ -974,6 +1005,29 @@ const (
 	// ReasonUnclassified is a refusal from an op family the server hasn't
 	// classified yet; its status and message say what happened.
 	ReasonUnclassified Reason = 12
+	// ReasonNotFound: what the request names doesn't exist.
+	ReasonNotFound Reason = 13
+	// ReasonReservedKey: the key is in a prefix the server keeps for itself.
+	ReasonReservedKey Reason = 14
+	// ReasonCASMismatch: the write's CASVersion isn't the key's version.
+	ReasonCASMismatch Reason = 15
+	// ReasonConditionFailed: the write's Condition didn't hold.
+	ReasonConditionFailed Reason = 16
+	// ReasonNoSuchTransaction: no open transaction has this id here.
+	ReasonNoSuchTransaction Reason = 17
+	// ReasonWrongRoutingKey: the request's routing key (its key, when it gives
+	// none) isn't the one its transaction was begun with.
+	ReasonWrongRoutingKey Reason = 18
+	// ReasonTxnTooLarge: the transaction holds as many ops or bytes as it may.
+	ReasonTxnTooLarge Reason = 19
+	// ReasonTooManyWaiters: the shard holds as many waiting reads as it may.
+	ReasonTooManyWaiters Reason = 20
+	// ReasonConflictingFields: two fields given together that don't go together.
+	ReasonConflictingFields Reason = 21
+	// ReasonWritesStopped: the shard stopped taking writes until the node restarts.
+	ReasonWritesStopped Reason = 22
+	// ReasonTooManyProposals: too many writes wait for commit.
+	ReasonTooManyProposals Reason = 23
 )
 
 var reasonNames = map[Reason]string{
@@ -981,6 +1035,10 @@ var reasonNames = map[Reason]string{
 	ReasonOutOfRange: "out_of_range", ReasonLeaderUnknown: "leader_unknown", ReasonShardBusy: "shard_busy",
 	ReasonTableMismatch: "table_mismatch", ReasonUnknownFlag: "unknown_flag", ReasonInternal: "internal",
 	ReasonCommittedNotApplied: "committed_not_applied", ReasonAnswerLost: "answer_lost", ReasonUnclassified: "unclassified",
+	ReasonNotFound: "not_found", ReasonReservedKey: "reserved_key", ReasonCASMismatch: "cas_mismatch",
+	ReasonConditionFailed: "condition_failed", ReasonNoSuchTransaction: "no_such_transaction",
+	ReasonWrongRoutingKey: "wrong_routing_key", ReasonTxnTooLarge: "txn_too_large", ReasonTooManyWaiters: "too_many_waiters",
+	ReasonConflictingFields: "conflicting_fields", ReasonWritesStopped: "writes_stopped", ReasonTooManyProposals: "too_many_proposals",
 }
 
 func (r Reason) String() string {

@@ -123,6 +123,18 @@ func (b *emptyPollBackoff) afterEmpty(ctx context.Context, started time.Time, bl
 
 // extractBlockMS scans TLV-encoded options for OptBlockMS (0x17) and returns
 // its value in milliseconds. Returns 0 if not found.
+// waitMS is how long a request asks the server to wait: a kv.get body's
+// wait_ms, its first field, or any other request's block_ms option.
+func waitMS(op OpCode, value, options []byte) uint64 {
+	if op == OpKVGet {
+		if len(value) >= 9 && value[0] == 1 {
+			return binary.LittleEndian.Uint64(value[1:9])
+		}
+		return 0
+	}
+	return uint64(extractBlockMS(options))
+}
+
 func extractBlockMS(options []byte) uint32 {
 	for i := 0; i+1 < len(options); {
 		tag := options[i]
@@ -158,11 +170,21 @@ func serializeRequest(requestID uint64, opCode OpCode, namespace, key, value, op
 		return nil, ErrValueTooLarge
 	}
 
+	// A table op's payload is [namespace][key][body]: its body, coded by
+	// the op's schema, is `value`, and it takes no options.
+	table := isTableOp(opCode)
+	if table && len(options) > 0 {
+		return nil, fmt.Errorf("flo: op %d takes a body, not options", opCode)
+	}
+
 	// Calculate payload size
 	payloadLen := 2 + len(namespace) + // namespace: [len:u16][data]
 		2 + len(key) + // key: [len:u16][data]
-		4 + len(value) + // value: [len:u32][data]
-		2 + len(options) // options: [len:u16][data]
+		len(value)
+	if !table {
+		payloadLen += 4 + // value: [len:u32]
+			2 + len(options) // options: [len:u16][data]
+	}
 
 	// Allocate buffer for header + payload
 	buf := make([]byte, HeaderSize+payloadLen)
@@ -192,16 +214,20 @@ func serializeRequest(requestID uint64, opCode OpCode, namespace, key, value, op
 	copy(buf[offset:], key)
 	offset += len(key)
 
-	// Value
-	binary.LittleEndian.PutUint32(buf[offset:], uint32(len(value)))
-	offset += 4
-	copy(buf[offset:], value)
-	offset += len(value)
+	if table {
+		copy(buf[offset:], value)
+	} else {
+		// Value
+		binary.LittleEndian.PutUint32(buf[offset:], uint32(len(value)))
+		offset += 4
+		copy(buf[offset:], value)
+		offset += len(value)
 
-	// Options
-	binary.LittleEndian.PutUint16(buf[offset:], uint16(len(options)))
-	offset += 2
-	copy(buf[offset:], options)
+		// Options
+		binary.LittleEndian.PutUint16(buf[offset:], uint16(len(options)))
+		offset += 2
+		copy(buf[offset:], options)
+	}
 
 	// Compute and fill CRC32
 	crc := computeCRC32(buf[:HeaderSize], buf[HeaderSize:])

@@ -1,7 +1,6 @@
 package flo
 
 import (
-	"bytes"
 	"encoding/binary"
 	"io"
 	"net"
@@ -9,9 +8,9 @@ import (
 	"time"
 )
 
-// captureRequest runs call against a fake server that reads one request and
-// hangs up, and returns that request's value and options fields.
-func captureRequest(t *testing.T, call func(c *Client)) (value, options []byte) {
+// capturePayload runs call against a fake server that reads one request and
+// hangs up, and returns that request's payload.
+func capturePayload(t *testing.T, call func(c *Client)) []byte {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -48,6 +47,14 @@ func captureRequest(t *testing.T, call func(c *Client)) (value, options []byte) 
 	if p == nil {
 		t.Fatal("fake server read no request")
 	}
+	return p
+}
+
+// captureRequest is capturePayload for an op still coded by hand: the
+// request's value and options fields.
+func captureRequest(t *testing.T, call func(c *Client)) (value, options []byte) {
+	t.Helper()
+	p := capturePayload(t, call)
 	off := 2 + int(binary.LittleEndian.Uint16(p)) // namespace
 	off += 2 + int(binary.LittleEndian.Uint16(p[off:]))
 	vlen := int(binary.LittleEndian.Uint32(p[off:]))
@@ -55,21 +62,6 @@ func captureRequest(t *testing.T, call func(c *Client)) (value, options []byte) 
 	off += 4 + vlen
 	olen := int(binary.LittleEndian.Uint16(p[off:]))
 	return value, p[off+2 : off+2+olen]
-}
-
-// The server reads the KV TTL option as an 8-byte millisecond count and
-// refuses any other width.
-func TestPutEncodesTTLMs(t *testing.T) {
-	const ttl = uint64(90_500)
-	_, opts := captureRequest(t, func(c *Client) {
-		v := ttl
-		c.KV.Put("k", []byte("v"), &PutOptions{TTLMs: &v})
-	})
-	want := []byte{byte(OptTTLMs), 8}
-	want = binary.LittleEndian.AppendUint64(want, ttl)
-	if !bytes.HasPrefix(opts, want) {
-		t.Errorf("Put options = % x, want prefix % x", opts, want)
-	}
 }
 
 func TestTouchEncodesMs(t *testing.T) {

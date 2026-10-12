@@ -14,9 +14,11 @@ import (
 
 // fakeReply builds a response frame for requestID carrying a KV Get body
 // (version u64 followed by the value).
+// fakeReply is an ok answer to a kv.get: [version:u64][value_len:u32][value].
 func fakeReply(requestID uint64, value string) []byte {
-	data := make([]byte, 8+len(value))
-	copy(data[8:], value)
+	data := make([]byte, 12+len(value))
+	binary.LittleEndian.PutUint32(data[8:12], uint32(len(value)))
+	copy(data[12:], value)
 	frame := make([]byte, HeaderSize+len(data))
 	binary.LittleEndian.PutUint32(frame[0:4], Magic)
 	binary.LittleEndian.PutUint32(frame[4:8], uint32(len(data)))

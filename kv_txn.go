@@ -92,30 +92,12 @@ func (t *KVTransaction) Put(key string, value []byte, opts *PutOptions) (PutResu
 	if t.done {
 		return PutResult{}, fmt.Errorf("flo: transaction already finished")
 	}
-	if opts == nil {
-		opts = &PutOptions{}
+	o := PutOptions{}
+	if opts != nil {
+		o = *opts
 	}
-	builder := t.txnOptionsBuilder()
-	if opts.TTLMs != nil {
-		builder.AddU64(OptTTLMs, *opts.TTLMs)
-	}
-	if opts.CASVersion != nil {
-		builder.AddU64(OptCASVersion, *opts.CASVersion)
-	}
-	if opts.IfNotExists {
-		builder.AddFlag(OptIfNotExists)
-	}
-	if opts.IfExists {
-		builder.AddFlag(OptIfExists)
-	}
-	resp, err := t.client.sendAndCheck(OpKVPut, t.namespace, []byte(key), value, builder.Build(), true)
-	if err != nil {
-		return PutResult{}, err
-	}
-	if len(resp.Data) < 8 {
-		return PutResult{Version: 0}, nil
-	}
-	return PutResult{Version: binary.LittleEndian.Uint64(resp.Data[0:8])}, nil
+	o.RoutingKey = t.routingKey
+	return t.client.kvSet(t.namespace, key, value, &o, &t.id)
 }
 
 // Get reads a key inside the transaction (sees the transaction's own buffered
@@ -124,21 +106,7 @@ func (t *KVTransaction) Get(key string) (*GetResult, error) {
 	if t.done {
 		return nil, fmt.Errorf("flo: transaction already finished")
 	}
-	builder := t.txnOptionsBuilder()
-	resp, err := t.client.sendAndCheck(OpKVGet, t.namespace, []byte(key), nil, builder.Build(), true)
-	if err != nil {
-		return nil, err
-	}
-	if resp.Status == StatusNotFound {
-		return nil, nil
-	}
-	if len(resp.Data) < 8 {
-		return &GetResult{Value: nil, Version: 0}, nil
-	}
-	return &GetResult{
-		Value:   resp.Data[8:],
-		Version: binary.LittleEndian.Uint64(resp.Data[0:8]),
-	}, nil
+	return t.client.kvGet(t.namespace, key, &GetOptions{RoutingKey: t.routingKey}, &t.id)
 }
 
 // Delete buffers a delete inside the transaction.
@@ -248,11 +216,8 @@ func (t *KVTransaction) Commit() (*KVCommitResult, error) {
 	}
 	t.done = true
 	builder := NewOptionsBuilder()
-	if t.routingKey != "" {
-		builder.AddBytes(OptRoutingKey, []byte(t.routingKey))
-	}
 	builder.AddU64(OptTxnID, t.id)
-	resp, err := t.client.sendAndCheck(OpKVCommitTxn, t.namespace, []byte(t.routingKey), nil, builder.Build(), false)
+	resp, err := t.client.sendAndCheck(OpKVCommitTxn, t.namespace, nil, nil, builder.Build(), false)
 	if err != nil {
 		return nil, err
 	}
@@ -274,10 +239,7 @@ func (t *KVTransaction) Rollback() error {
 	}
 	t.done = true
 	builder := NewOptionsBuilder()
-	if t.routingKey != "" {
-		builder.AddBytes(OptRoutingKey, []byte(t.routingKey))
-	}
 	builder.AddU64(OptTxnID, t.id)
-	_, err := t.client.sendAndCheck(OpKVRollbackTxn, t.namespace, []byte(t.routingKey), nil, builder.Build(), false)
+	_, err := t.client.sendAndCheck(OpKVRollbackTxn, t.namespace, nil, nil, builder.Build(), false)
 	return err
 }
