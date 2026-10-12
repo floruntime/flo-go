@@ -43,8 +43,10 @@ const (
 	maxRoutingKey = 4096
 	// maxMGetKey is the longest key one MGet looks up.
 	maxMGetKey = 4096
-	// maxMGetBody is the largest kv.mget body that fits one request frame.
-	maxMGetBody = 257949
+	// maxMGetKeyBytes is the most one kv.mget request's encoded keys (each
+	// length and bytes, not the count) may total: the request frame less
+	// the count and the longest routing key.
+	maxMGetKeyBytes = 253848
 	// maxScanCursor is the longest scan cursor; its length prefix is a u8.
 	maxScanCursor = 64
 	// defaultHistoryLimit is the version count when the caller gives none.
@@ -375,36 +377,40 @@ func checkMGetKeys(keys []string) error {
 	return nil
 }
 
-// mgetBatch is how many of keys, from the first, fit one kv.mget body.
+// mgetBatch is how many of keys, from the first, fit one kv.mget request.
 // Keys must have passed checkMGetKeys, so at least one always fits.
 func mgetBatch(keys []string) int {
-	size := 2
+	size := 0
 	for i, k := range keys {
 		size += 2 + len(k)
-		if size > maxMGetBody {
+		if size > maxMGetKeyBytes {
 			return i
 		}
 	}
 	return len(keys)
 }
 
-// encodeMGetBody codes kv.mget's request: keys.
-func encodeMGetBody(keys []string) ([]byte, error) {
+// encodeMGetBody codes kv.mget's request: keys, routing_key.
+func encodeMGetBody(keys []string, routingKey string) ([]byte, error) {
 	if err := checkMGetKeys(keys); err != nil {
 		return nil, err
 	}
-	size := 2
+	if err := checkRoutingKey(routingKey); err != nil {
+		return nil, err
+	}
+	size := 0
 	for _, k := range keys {
 		size += 2 + len(k)
 	}
-	if size > maxMGetBody {
-		return nil, fmt.Errorf("flo: mget body of %d bytes, at most %d", size, maxMGetBody)
+	if size > maxMGetKeyBytes {
+		return nil, fmt.Errorf("flo: mget keys of %d bytes, at most %d", size, maxMGetKeyBytes)
 	}
-	w := bodyWriter{buf: make([]byte, 0, size)}
+	w := bodyWriter{buf: make([]byte, 0, 2+size+3+len(routingKey))}
 	w.u16(uint16(len(keys)))
 	for _, k := range keys {
 		w.bytes16([]byte(k))
 	}
+	w.routingKey(routingKey)
 	return w.buf, nil
 }
 
