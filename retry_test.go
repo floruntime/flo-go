@@ -140,6 +140,23 @@ func TestBackoffStaysUnderItsDoublingCeiling(t *testing.T) {
 	}
 }
 
+func TestOutOfRangeBackoffsAreNormalized(t *testing.T) {
+	for _, p := range []RetryPolicy{
+		{MaxAttempts: 4, InitialBackoff: -time.Second, MaxBackoff: -time.Millisecond},
+		{MaxAttempts: 4, InitialBackoff: 50 * time.Millisecond, MaxBackoff: 0},
+		{MaxAttempts: 4, InitialBackoff: 50 * time.Millisecond, MaxBackoff: 10 * time.Millisecond},
+	} {
+		c := NewClient("127.0.0.1:1", WithRetry(p))
+		b := backoff{initial: c.retry.InitialBackoff, max: c.retry.MaxBackoff}
+		ceiling := max(p.InitialBackoff, 0)
+		for i := 0; i < 50; i++ {
+			if d := b.next(); d < 0 || d > ceiling {
+				t.Fatalf("%+v wait %d: %v, want within [0, %v]", p, i, d, ceiling)
+			}
+		}
+	}
+}
+
 func TestStreamWorkerRetriesARefusedGroupJoin(t *testing.T) {
 	var joins atomic.Int64
 	var s scripted

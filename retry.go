@@ -30,11 +30,19 @@ var DefaultRetryPolicy = RetryPolicy{
 }
 
 // WithRetry sets how refused-but-not-run requests are retried.
-// WithRetry(RetryPolicy{MaxAttempts: 1}) turns retrying off.
+// WithRetry(RetryPolicy{MaxAttempts: 1}) turns retrying off. A negative
+// backoff counts as 0, and a MaxBackoff below InitialBackoff as
+// InitialBackoff.
 func WithRetry(p RetryPolicy) ClientOption {
 	return func(c *Client) {
-		c.retry = p
+		c.retry = p.normalized()
 	}
+}
+
+func (p RetryPolicy) normalized() RetryPolicy {
+	p.InitialBackoff = max(p.InitialBackoff, 0)
+	p.MaxBackoff = max(p.MaxBackoff, p.InitialBackoff)
+	return p
 }
 
 // refusedUnrun reports whether a response is a refusal the server says it
