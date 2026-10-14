@@ -2,7 +2,7 @@
 //
 // These tests exercise the full processing lifecycle through the Go SDK:
 // pipeline submission, record flow verification, operator correctness,
-// job management (status, list, stop, savepoint, restore, rescale, cancel),
+// job management (status, list, stop, cancel),
 // and declarative sync.
 //
 // # Running
@@ -574,7 +574,7 @@ func TestKVEnrichmentPipeline(t *testing.T) {
 }
 
 // ===========================================================================
-// 7. Job Lifecycle — status, list, stop, savepoint, restore, rescale, cancel
+// 7. Job Lifecycle — status, list, stop, cancel
 // ===========================================================================
 
 func TestJobLifecycle(t *testing.T) {
@@ -612,8 +612,8 @@ func TestJobLifecycle(t *testing.T) {
 		if err != nil {
 			t.Logf("Status API (known broken): %v", err)
 		} else {
-			t.Logf("Status API returned: status=%s parallelism=%d batch_size=%d",
-				status.Status, status.Parallelism, status.BatchSize)
+			t.Logf("Status API returned: status=%s batch_size=%d",
+				status.Status, status.BatchSize)
 		}
 	})
 
@@ -637,18 +637,6 @@ func TestJobLifecycle(t *testing.T) {
 		}
 	})
 
-	// --- Savepoint ---
-	var savepointID string
-	t.Run("Savepoint", func(t *testing.T) {
-		sp, err := client.Processing.Savepoint(jobID, nil)
-		if err != nil {
-			t.Logf("Savepoint failed (may be routing bug): %v", err)
-			t.Skip("Savepoint not available — likely same routing bug as Status")
-		}
-		savepointID = sp
-		t.Logf("Created savepoint: %s", savepointID)
-	})
-
 	// --- Stop ---
 	t.Run("Stop", func(t *testing.T) {
 		if err := client.Processing.Stop(jobID, nil); err != nil {
@@ -666,34 +654,6 @@ func TestJobLifecycle(t *testing.T) {
 				t.Logf("WARN: Expected 'stopped', got %q", entry.Status)
 			}
 		}
-	})
-
-	// --- Restore from savepoint ---
-	t.Run("Restore", func(t *testing.T) {
-		if savepointID == "" {
-			t.Skip("No savepoint to restore from")
-		}
-		if err := client.Processing.Restore(jobID, savepointID, nil); err != nil {
-			t.Logf("Restore failed: %v", err)
-			t.Skip("Restore not available")
-		}
-		t.Logf("Restored from savepoint %s", savepointID)
-
-		time.Sleep(500 * time.Millisecond)
-
-		entry := findJobInList(jobID)
-		if entry != nil {
-			t.Logf("Status after restore: %s", entry.Status)
-		}
-	})
-
-	// --- Rescale ---
-	t.Run("Rescale", func(t *testing.T) {
-		if err := client.Processing.Rescale(jobID, 2, nil); err != nil {
-			t.Logf("Rescale failed (may be routing bug): %v", err)
-			t.Skip("Rescale not available")
-		}
-		t.Log("Rescaled to parallelism=2")
 	})
 
 	// --- Cancel ---

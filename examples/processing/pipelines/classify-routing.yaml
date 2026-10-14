@@ -1,7 +1,6 @@
 kind: Processing
 name: event-router
 namespace: e2e
-parallelism: 1
 batch_size: 50
 
 sources:

@@ -97,47 +97,6 @@ func (p *ProcessingClient) Cancel(jobID string, opts *ProcessingCancelOptions) e
 	return err
 }
 
-// Savepoint triggers a savepoint for a processing job.
-// Returns the savepoint ID.
-func (p *ProcessingClient) Savepoint(jobID string, opts *ProcessingSavepointOptions) (string, error) {
-	if opts == nil {
-		opts = &ProcessingSavepointOptions{}
-	}
-	namespace := p.client.getNamespace(opts.Namespace)
-
-	resp, err := p.client.sendAndCheck(OpProcessingSavepoint, namespace, []byte(jobID), nil, nil, false)
-	if err != nil {
-		return "", err
-	}
-
-	return string(resp.Data), nil
-}
-
-// Restore restores a processing job from a savepoint.
-func (p *ProcessingClient) Restore(jobID string, savepointID string, opts *ProcessingRestoreOptions) error {
-	if opts == nil {
-		opts = &ProcessingRestoreOptions{}
-	}
-	namespace := p.client.getNamespace(opts.Namespace)
-
-	_, err := p.client.sendAndCheck(OpProcessingRestore, namespace, []byte(jobID), []byte(savepointID), nil, false)
-	return err
-}
-
-// Rescale changes the parallelism of a processing job.
-func (p *ProcessingClient) Rescale(jobID string, parallelism uint32, opts *ProcessingRescaleOptions) error {
-	if opts == nil {
-		opts = &ProcessingRescaleOptions{}
-	}
-	namespace := p.client.getNamespace(opts.Namespace)
-
-	value := make([]byte, 4)
-	binary.LittleEndian.PutUint32(value, parallelism)
-
-	_, err := p.client.sendAndCheck(OpProcessingRescale, namespace, []byte(jobID), value, nil, false)
-	return err
-}
-
 // =============================================================================
 // Declarative Sync
 // =============================================================================
@@ -237,7 +196,7 @@ var processingStatusNames = []string{"running", "stopped", "cancelled", "failed"
 //
 // Wire format: [job_id_len:u16][job_id][name_len:u16][name][status:u8]
 //
-//	[parallelism:u32][batch_size:u32][records_processed:u64][created_at:i64]
+//	[batch_size:u32][records_processed:u64][created_at:i64]
 func parseProcessingStatus(data []byte) (*ProcessingStatusResult, error) {
 	pos := 0
 
@@ -283,12 +242,6 @@ func parseProcessingStatus(data []byte) (*ProcessingStatusResult, error) {
 	}
 
 	if pos+4 > len(data) {
-		return nil, fmt.Errorf("unexpected end of processing status data at parallelism")
-	}
-	parallelism := binary.LittleEndian.Uint32(data[pos : pos+4])
-	pos += 4
-
-	if pos+4 > len(data) {
 		return nil, fmt.Errorf("unexpected end of processing status data at batch_size")
 	}
 	batchSize := binary.LittleEndian.Uint32(data[pos : pos+4])
@@ -309,7 +262,6 @@ func parseProcessingStatus(data []byte) (*ProcessingStatusResult, error) {
 		JobID:            jobID,
 		Name:             name,
 		Status:           statusStr,
-		Parallelism:      parallelism,
 		BatchSize:        batchSize,
 		RecordsProcessed: recordsProcessed,
 		CreatedAt:        createdAt,
@@ -320,7 +272,7 @@ func parseProcessingStatus(data []byte) (*ProcessingStatusResult, error) {
 //
 // Wire format: [count:u32]([name_len:u16][name][job_id_len:u16][job_id]
 //
-//	[status_len:u16][status][parallelism:u32][created_at:i64])*
+//	[status_len:u16][status][created_at:i64])*
 //	[has_more:u8][cursor_len:u16]
 func parseProcessingList(data []byte) ([]*ProcessingListEntry, error) {
 	if len(data) < 4 {
@@ -368,12 +320,6 @@ func parseProcessingList(data []byte) ([]*ProcessingListEntry, error) {
 			return nil, fmt.Errorf("parse processing list entry %d status: %w", i, err)
 		}
 
-		if pos+4 > len(data) {
-			return nil, fmt.Errorf("unexpected end of processing list data at parallelism for entry %d", i)
-		}
-		parallelism := binary.LittleEndian.Uint32(data[pos : pos+4])
-		pos += 4
-
 		if pos+8 > len(data) {
 			return nil, fmt.Errorf("unexpected end of processing list data at created_at for entry %d", i)
 		}
@@ -381,11 +327,10 @@ func parseProcessingList(data []byte) ([]*ProcessingListEntry, error) {
 		pos += 8
 
 		results = append(results, &ProcessingListEntry{
-			Name:        name,
-			JobID:       jobID,
-			Status:      status,
-			Parallelism: parallelism,
-			CreatedAt:   createdAt,
+			Name:      name,
+			JobID:     jobID,
+			Status:    status,
+			CreatedAt: createdAt,
 		})
 	}
 
