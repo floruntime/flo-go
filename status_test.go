@@ -83,7 +83,8 @@ func TestErrorStatusDoesNotDesyncNextCall(t *testing.T) {
 				}
 				return fakeReply(id, "fresh")
 			})
-			c := NewClient(ln.Addr().String(), WithTimeout(time.Second))
+			// Not retried, so the second call reads the next reply.
+			c := NewClient(ln.Addr().String(), WithTimeout(time.Second), WithRetry(RetryPolicy{MaxAttempts: 1}))
 			if err := c.Connect(); err != nil {
 				t.Fatal(err)
 			}

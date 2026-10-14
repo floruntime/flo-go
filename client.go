@@ -19,6 +19,7 @@ type Client struct {
 	namespace string
 	timeout   time.Duration
 	debug     bool
+	retry     RetryPolicy
 
 	conn net.Conn
 	// live mirrors conn for readers that don't hold mu (IsConnected,
@@ -68,6 +69,7 @@ func NewClient(endpoint string, opts ...ClientOption) *Client {
 		namespace: "default",
 		timeout:   5 * time.Second,
 		debug:     false,
+		retry:     DefaultRetryPolicy,
 	}
 
 	for _, opt := range opts {
@@ -297,8 +299,26 @@ func (c *Client) getNamespace(override string) string {
 	return c.namespace
 }
 
-// sendRequest sends a request and receives the response.
+// sendRequest sends a request and receives the response, sending it again
+// as c.retry allows while the server refuses it without running it.
 func (c *Client) sendRequest(opCode OpCode, namespace string, key, value, options []byte) (*rawResponse, error) {
+	wait := backoff{initial: c.retry.InitialBackoff, max: c.retry.MaxBackoff}
+	for attempt := 1; ; attempt++ {
+		resp, err := c.sendOnce(opCode, namespace, key, value, options)
+		if err != nil || attempt >= c.retry.MaxAttempts || !refusedUnrun(resp) {
+			return resp, err
+		}
+		d := wait.next()
+		if c.debug {
+			log.Printf("[flo] %s, not run: retrying in %v", resp.Status, d)
+		}
+		time.Sleep(d)
+	}
+}
+
+// sendOnce sends a request, under a new request id, and receives its
+// response.
+func (c *Client) sendOnce(opCode OpCode, namespace string, key, value, options []byte) (*rawResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
