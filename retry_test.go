@@ -157,6 +157,15 @@ func TestOutOfRangeBackoffsAreNormalized(t *testing.T) {
 	}
 }
 
+func TestAHugeMaxBackoffNeverWrapsNegative(t *testing.T) {
+	b := backoff{initial: time.Second, max: time.Duration(1<<63 - 1)}
+	for i := 0; i < 80; i++ {
+		if d := b.next(); d < 0 {
+			t.Fatalf("wait %d: %v", i, d)
+		}
+	}
+}
+
 func TestStreamWorkerRetriesARefusedGroupJoin(t *testing.T) {
 	var joins atomic.Int64
 	var s scripted

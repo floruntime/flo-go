@@ -3,6 +3,7 @@ package flo
 import (
 	"context"
 	"errors"
+	"math"
 	"math/rand"
 	"time"
 )
@@ -76,8 +77,18 @@ func (b *backoff) next() time.Duration {
 	if b.ceiling == 0 {
 		b.ceiling = b.initial
 	}
-	d := time.Duration(rand.Int63n(int64(b.ceiling) + 1))
-	b.ceiling = min(b.ceiling*2, b.max)
+	var d time.Duration
+	if b.ceiling == math.MaxInt64 {
+		d = time.Duration(rand.Int63())
+	} else {
+		d = time.Duration(rand.Int63n(int64(b.ceiling) + 1))
+	}
+	// Doubling saturates: a huge MaxBackoff must not wrap negative.
+	if b.ceiling > b.max/2 {
+		b.ceiling = b.max
+	} else {
+		b.ceiling = min(b.ceiling*2, b.max)
+	}
 	return d
 }
 
