@@ -62,6 +62,7 @@ client := flo.NewClient("localhost:9000",
     flo.WithNamespace("default"),    // Default namespace for operations
     flo.WithTimeout(5 * time.Second), // Connection/operation timeout
     flo.WithDebug(true),              // Enable debug logging
+    flo.WithRetry(flo.DefaultRetryPolicy), // Retries of refused, not-run requests (the default)
 )
 
 // Connect to server
@@ -315,10 +316,10 @@ if err != nil {
     } else if flo.IsUnauthorized(err) {
         // Authentication failed
     } else if flo.IsOverloaded(err) {
-        // Server is overloaded, retry later
+        // Server is overloaded, and the client's retries ran out
     } else if flo.IsUnavailable(err) {
-        // No leader or the shard isn't taking writes; retry later
-        // (the message says whether an operator must act first)
+        // No leader or the shard isn't taking writes, and the client's
+        // retries ran out (the message says whether an operator must act first)
     } else if flo.IsInternal(err) {
         // Internal server error
     }
@@ -331,6 +332,38 @@ if errors.Is(err, flo.ErrNotConnected) {
 if errors.Is(err, flo.ErrConnectionFailed) {
     // Connection failed
 }
+```
+
+### Retries
+
+When the server refuses a request as `overloaded` or `unavailable` and says it
+didn't run it (`ServerError.Ran == flo.RanNo`), the client sends it again
+itself, as a new request, after a jittered wait. Because the server never ran
+it, this is safe for writes too. Any other refusal, or one that may have run,
+comes straight back.
+
+| `RetryPolicy` field | Default | |
+|---|---|---|
+| `MaxAttempts` | 4 | Tries in all, the first included; 1 turns retrying off |
+| `InitialBackoff` | 50 ms | Ceiling of the first wait; it doubles each retry |
+| `MaxBackoff` | 1 s | Largest ceiling |
+
+Each wait is uniform between 0 and its ceiling, so with the defaults a refused
+request is given back after at most about 350 ms of waiting. The request goes
+again on the same connection; the server routes it afresh.
+
+The action and stream workers wait the same way between failed polls, from
+100 ms up to 5 s, starting again from 100 ms after a poll that succeeds. A
+stream worker retries a group join refused this way instead of stopping.
+
+```go
+// Up to 8 tries, waiting at most 2 s between them
+client := flo.NewClient("localhost:9000", flo.WithRetry(flo.RetryPolicy{
+    MaxAttempts: 8, InitialBackoff: 100 * time.Millisecond, MaxBackoff: 2 * time.Second,
+}))
+
+// No retries
+client := flo.NewClient("localhost:9000", flo.WithRetry(flo.RetryPolicy{MaxAttempts: 1}))
 ```
 
 ## Thread Safety

@@ -244,6 +244,7 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 		WithNamespace(c.namespace),
 		WithTimeout(opts.NetworkTimeout),
 		WithDebug(c.debug),
+		WithRetry(c.retry),
 	)
 
 	if err := workerClient.Connect(); err != nil {
@@ -254,6 +255,7 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 		WithNamespace(c.namespace),
 		WithTimeout(opts.NetworkTimeout),
 		WithDebug(c.debug),
+		WithRetry(c.retry),
 	)
 	if err := ackClient.Connect(); err != nil {
 		workerClient.Close()
@@ -371,10 +373,13 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 //
 // A connection error (a stalled or dropped connection at startup) triggers a
 // reconnect-and-retry instead of failing the worker — handleReconnect retries
-// with backoff until the context is cancelled. Non-connection errors (e.g. an
+// with backoff until the context is cancelled. A join the server refused
+// without running it (overloaded or unavailable, past the client's own
+// retries) is tried again with the worker backoff. Other errors (e.g. an
 // invalid request) remain fatal and are returned immediately.
 func (sw *StreamWorker) joinGroups() error {
 	for _, stream := range sw.streams {
+		failed := newWorkerBackoff()
 		for {
 			if sw.ctx.Err() != nil {
 				return sw.ctx.Err()
@@ -382,6 +387,12 @@ func (sw *StreamWorker) joinGroups() error {
 			err := sw.client.Stream.GroupJoin(stream, sw.config.Group, sw.config.Consumer, nil)
 			if err == nil {
 				break
+			}
+			if isRefusedUnrun(err) {
+				d := failed.next()
+				sw.logger.Printf("[%s] Group join refused: %v, retrying in %v...", stream, err, d)
+				sleepCtx(sw.ctx, d)
+				continue
 			}
 			if !IsConnectionError(err) {
 				return fmt.Errorf("failed to join consumer group on stream %s: %w", stream, err)
@@ -399,6 +410,7 @@ func (sw *StreamWorker) joinGroups() error {
 // pollStream runs a single stream's poll loop.
 func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 	var backoff emptyPollBackoff
+	failed := newWorkerBackoff()
 	for {
 		select {
 		case <-sw.ctx.Done():
@@ -420,12 +432,15 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 						}
 						sw.logger.Printf("[%s] Reconnect failed: %v, retrying...", stream, reconErr)
 					}
+					time.Sleep(time.Second)
 				} else {
-					sw.logger.Printf("[%s] GroupRead error: %v, retrying...", stream, err)
+					d := failed.next()
+					sw.logger.Printf("[%s] GroupRead error: %v, retrying in %v...", stream, err, d)
+					sleepCtx(sw.ctx, d)
 				}
-				time.Sleep(time.Second)
 				continue
 			}
+			failed.reset()
 
 			if result == nil || len(result.Records) == 0 {
 				backoff.afterEmpty(sw.ctx, polled, sw.config.BlockMS)

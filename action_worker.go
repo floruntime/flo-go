@@ -102,6 +102,7 @@ func (c *Client) NewActionWorker(opts ActionWorkerOptions) (*ActionWorker, error
 		WithNamespace(c.namespace),
 		WithTimeout(opts.ActionTimeout),
 		WithDebug(c.debug),
+		WithRetry(c.retry),
 	)
 
 	if err := workerClient.Connect(); err != nil {
@@ -115,6 +116,7 @@ func (c *Client) NewActionWorker(opts ActionWorkerOptions) (*ActionWorker, error
 		WithNamespace(c.namespace),
 		WithTimeout(opts.ActionTimeout),
 		WithDebug(c.debug),
+		WithRetry(c.retry),
 	)
 
 	if err := resultClient.Connect(); err != nil {
@@ -232,6 +234,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 
 	// Main polling loop
 	var backoff emptyPollBackoff
+	failed := newWorkerBackoff()
 	for {
 		select {
 		case <-w.ctx.Done():
@@ -270,11 +273,13 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 					}
 					w.logger.Printf("Reconnected, resuming work")
 				} else {
-					w.logger.Printf("Await error: %v, retrying...", err)
-					time.Sleep(time.Second)
+					d := failed.next()
+					w.logger.Printf("Await error: %v, retrying in %v...", err, d)
+					sleepCtx(w.ctx, d)
 				}
 				continue
 			}
+			failed.reset()
 
 			if task == nil {
 				<-sem // Release slot - no task available
