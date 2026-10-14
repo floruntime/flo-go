@@ -102,6 +102,7 @@ func (c *Client) NewActionWorker(opts ActionWorkerOptions) (*ActionWorker, error
 		WithNamespace(c.namespace),
 		WithTimeout(opts.ActionTimeout),
 		WithDebug(c.debug),
+		WithRetry(c.retry),
 	)
 
 	if err := workerClient.Connect(); err != nil {
@@ -115,6 +116,7 @@ func (c *Client) NewActionWorker(opts ActionWorkerOptions) (*ActionWorker, error
 		WithNamespace(c.namespace),
 		WithTimeout(opts.ActionTimeout),
 		WithDebug(c.debug),
+		WithRetry(c.retry),
 	)
 
 	if err := resultClient.Connect(); err != nil {

@@ -185,3 +185,26 @@ func TestStreamWorkerRetriesARefusedGroupJoin(t *testing.T) {
 		t.Fatalf("joined after %d tries, want 4", n)
 	}
 }
+
+func TestWorkerConnectionsKeepTheClientsRetryPolicy(t *testing.T) {
+	p := RetryPolicy{MaxAttempts: 7, InitialBackoff: 3 * time.Millisecond, MaxBackoff: 9 * time.Millisecond}
+	addr := serveAll(t, func(id uint64) []byte { return fakeReply(id, "") }).Addr().String()
+	sw, err := NewClient(addr, WithRetry(p)).NewStreamWorker(StreamWorkerOptions{
+		Stream:                      "s",
+		RedeliverPendingOnReconnect: new(bool),
+	}, func(*StreamContext) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sw.Close() })
+	aw, err := NewClient(addr, WithRetry(p)).NewActionWorker(ActionWorkerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { aw.Close() })
+	for name, c := range map[string]*Client{"stream": sw.client, "stream ack": sw.ackClient, "action": aw.client, "action result": aw.resultClient} {
+		if c.retry != p {
+			t.Errorf("%s connection has %+v, want %+v", name, c.retry, p)
+		}
+	}
+}

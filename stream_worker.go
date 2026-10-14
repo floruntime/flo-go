@@ -244,6 +244,7 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 		WithNamespace(c.namespace),
 		WithTimeout(opts.NetworkTimeout),
 		WithDebug(c.debug),
+		WithRetry(c.retry),
 	)
 
 	if err := workerClient.Connect(); err != nil {
@@ -254,6 +255,7 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 		WithNamespace(c.namespace),
 		WithTimeout(opts.NetworkTimeout),
 		WithDebug(c.debug),
+		WithRetry(c.retry),
 	)
 	if err := ackClient.Connect(); err != nil {
 		workerClient.Close()
