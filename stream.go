@@ -526,9 +526,18 @@ func parseStreamReadResponse(data []byte) (*StreamReadResult, error) {
 	count := binary.LittleEndian.Uint32(data[pos:])
 	pos += 4
 
+	// Each record is at least [seq:u64][ts:i64][tier:u8][partition:u32]
+	// [key_present:u8][payload_len:u32][header_count:u32]. A count the data
+	// can't hold is refused before it sizes an allocation, and an answer
+	// that ends before its count of records is refused, not returned short.
+	const minRecord = 8 + 8 + 1 + 4 + 1 + 4 + 4
+	if uint64(count) > uint64(len(data)-pos)/minRecord {
+		return nil, fmt.Errorf("incomplete stream read: %d records can't fit in %d bytes", count, len(data)-pos)
+	}
+
 	records := make([]StreamRecord, 0, count)
 
-	for i := uint32(0); i < count && pos < len(data); i++ {
+	for i := uint32(0); i < count; i++ {
 		// Read sequence
 		if pos+8 > len(data) {
 			return nil, fmt.Errorf("incomplete stream record: missing sequence")
