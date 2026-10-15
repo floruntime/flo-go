@@ -3,6 +3,7 @@ package flo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -48,6 +49,13 @@ type ActionWorker struct {
 	// This avoids mutex contention with the blocking Await call
 	// on the polling connection, which holds the lock for up to BlockMS.
 	resultClient *Client
+	// resultMu serializes reconnects of resultClient, so handlers that hit
+	// the same dropped connection reconnect it once.
+	resultMu sync.Mutex
+	// closeCtx ends when Close is called; it bounds result reconnects, which
+	// outlive Stop.
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
 
 	// Action handlers
 	mu       sync.RWMutex
@@ -124,7 +132,10 @@ func (c *Client) NewActionWorker(opts ActionWorkerOptions) (*ActionWorker, error
 		return nil, fmt.Errorf("failed to connect result client: %w", err)
 	}
 
+	closeCtx, closeCancel := context.WithCancel(context.Background())
 	w := &ActionWorker{
+		closeCtx:     closeCtx,
+		closeCancel:  closeCancel,
 		config:       opts,
 		client:       workerClient,
 		resultClient: resultClient,
@@ -264,7 +275,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 						continue
 					}
 					// Also reconnect result client
-					if reconErr := w.resultClient.ReconnectWithContext(w.ctx); reconErr != nil {
+					if reconErr := w.reconnectResult(); reconErr != nil {
 						w.logger.Printf("Warning: failed to reconnect result client: %v", reconErr)
 					}
 					// Re-register worker after reconnect
@@ -305,20 +316,21 @@ func (w *ActionWorker) Stop() {
 	if w.cancel != nil {
 		w.cancel()
 	}
-	// Interrupt connections to unblock any in-flight Await call immediately.
-	// Interrupt bypasses the mutex so it won't block behind a 30s Await.
+	// Interrupt the poll connection to unblock an in-flight Await at once.
+	// Interrupt bypasses the mutex so it won't block behind a 30s Await. The
+	// result connection stays up so handlers still running can report.
 	if w.client != nil {
 		w.client.Interrupt()
-	}
-	if w.resultClient != nil {
-		w.resultClient.Interrupt()
 	}
 }
 
 // Close closes the connections.
 func (w *ActionWorker) Close() error {
 	w.Stop()
+	w.closeCancel()
 	if w.resultClient != nil {
+		// Don't wait out a stalled result send.
+		w.resultClient.Interrupt()
 		w.resultClient.Close()
 	}
 	if w.client != nil {
@@ -327,14 +339,31 @@ func (w *ActionWorker) Close() error {
 	return nil
 }
 
-// executeTask executes a task with error recovery.
+// errActionTimeout is the cause of a handler context that hit ActionTimeout,
+// telling it apart from a worker that is stopping.
+var errActionTimeout = errors.New("flo: action timed out")
+
+// executeTask runs a task's handler and reports its outcome. The handler's
+// outcome alone decides complete or fail: a complete that can't be sent is
+// never turned into a fail.
 func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignment) {
+	fail := func(msg string, retry bool) {
+		w.sendResult("fail", task.TaskID, func() error {
+			return workerClient.Fail(task.TaskType, task.TaskID, msg, &WorkerFailOptions{Retry: retry})
+		})
+	}
+	complete := func(data []byte, opts *WorkerCompleteOptions) {
+		if w.sendResult("complete", task.TaskID, func() error {
+			return workerClient.Complete(task.TaskType, task.TaskID, data, opts)
+		}) == nil {
+			w.logger.Printf("Action completed: %s (task=%s)", task.TaskType, task.TaskID)
+		}
+	}
+
 	defer func() {
 		if r := recover(); r != nil {
 			w.logger.Printf("Action handler panicked: %v", r)
-			w.sendWithRetry("fail", func() error {
-				return workerClient.Fail(task.TaskType, task.TaskID, fmt.Sprintf("action panicked: %v", r), nil)
-			})
+			fail(fmt.Sprintf("action panicked: %v", r), false)
 		}
 	}()
 
@@ -348,14 +377,11 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 
 	if handler == nil {
 		w.logger.Printf("No handler registered for action: %s", task.TaskType)
-		w.sendWithRetry("fail", func() error {
-			return workerClient.Fail(task.TaskType, task.TaskID, fmt.Sprintf("no handler for: %s", task.TaskType), nil)
-		})
+		fail(fmt.Sprintf("no handler for: %s", task.TaskType), false)
 		return
 	}
 
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(w.ctx, w.config.ActionTimeout)
+	ctx, cancel := context.WithTimeoutCause(w.ctx, w.config.ActionTimeout, errActionTimeout)
 	defer cancel()
 
 	// Create action context
@@ -371,31 +397,25 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 		workerClient:       workerClient,
 	}
 
-	// Execute handler
 	result, err := handler(actx)
 
-	// Determine outcome
 	if err != nil {
-		if err == context.DeadlineExceeded {
-			w.logger.Printf("Action timed out: %s", task.TaskType)
-			w.sendWithRetry("fail", func() error {
-				return workerClient.Fail(task.TaskType, task.TaskID, "action timed out", &WorkerFailOptions{Retry: false})
-			})
-		} else if err == context.Canceled {
-			w.logger.Printf("Action cancelled: %s", task.TaskType)
-			w.sendWithRetry("fail", func() error {
-				return workerClient.Fail(task.TaskType, task.TaskID, "action cancelled", &WorkerFailOptions{Retry: false})
-			})
-		} else if IsNonRetryable(err) {
+		ctxErr := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+		switch {
+		case ctxErr && context.Cause(ctx) == errActionTimeout:
+			w.logger.Printf("Action timed out: %s (task=%s)", task.TaskType, task.TaskID)
+			fail("action timed out", false)
+		case ctxErr && w.ctx.Err() != nil:
+			// The worker is stopping, not the task failing: let it run
+			// again elsewhere.
+			w.logger.Printf("Action interrupted by worker stop: %s (task=%s)", task.TaskType, task.TaskID)
+			fail("worker stopped", true)
+		case IsNonRetryable(err):
 			w.logger.Printf("Action failed (non-retryable): %s - %v", task.TaskType, err)
-			w.sendWithRetry("fail", func() error {
-				return workerClient.Fail(task.TaskType, task.TaskID, err.Error(), &WorkerFailOptions{Retry: false})
-			})
-		} else {
+			fail(err.Error(), false)
+		default:
 			w.logger.Printf("Action failed: %s - %v", task.TaskType, err)
-			w.sendWithRetry("fail", func() error {
-				return workerClient.Fail(task.TaskType, task.TaskID, err.Error(), &WorkerFailOptions{Retry: true})
-			})
+			fail(err.Error(), true)
 		}
 		return
 	}
@@ -403,60 +423,81 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 	// Success — dispatch based on result type
 	switch v := result.(type) {
 	case *ActionResult:
-		if err := w.sendWithRetry("complete", func() error {
-			return workerClient.Complete(task.TaskType, task.TaskID, v.Data, &WorkerCompleteOptions{Outcome: v.Outcome})
-		}); err != nil {
-			w.logger.Printf("Failed to report completion after retries: %v", err)
-		} else {
-			w.logger.Printf("Action completed: %s (outcome: %s)", task.TaskType, v.Outcome)
-		}
+		complete(v.Data, &WorkerCompleteOptions{Outcome: v.Outcome})
 	case []byte:
-		if err := w.sendWithRetry("complete", func() error {
-			return workerClient.Complete(task.TaskType, task.TaskID, v, nil)
-		}); err != nil {
-			w.logger.Printf("Failed to report completion after retries: %v", err)
-		} else {
-			w.logger.Printf("Action completed: %s", task.TaskType)
-		}
+		complete(v, nil)
 	default:
 		// Auto-marshal to JSON
 		data, marshalErr := json.Marshal(v)
 		if marshalErr != nil {
 			w.logger.Printf("Failed to marshal result: %v", marshalErr)
-			w.sendWithRetry("fail", func() error {
-				return workerClient.Fail(task.TaskType, task.TaskID, fmt.Sprintf("marshal error: %v", marshalErr), &WorkerFailOptions{Retry: false})
-			})
+			fail(fmt.Sprintf("marshal error: %v", marshalErr), false)
 			return
 		}
-		if err := w.sendWithRetry("complete", func() error {
-			return workerClient.Complete(task.TaskType, task.TaskID, data, nil)
-		}); err != nil {
-			w.logger.Printf("Failed to report completion after retries: %v", err)
-		} else {
-			w.logger.Printf("Action completed: %s", task.TaskType)
-		}
+		complete(data, nil)
 	}
 }
 
-// sendWithRetry attempts to send a result (Complete/Fail) to the server,
-// reconnecting if the connection was lost while the task was being processed.
-// This prevents silent result loss when a connection drops mid-execution.
-func (w *ActionWorker) sendWithRetry(op string, fn func() error) error {
-	const maxAttempts = 3
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		err := fn()
-		if err == nil {
+// maxResultSends is how many times a result is sent before it is dropped.
+const maxResultSends = 3
+
+// Bounds on one reconnect of the result connection. Once the worker is
+// stopping the bound is short, so an unsendable result doesn't hold up
+// Start's return for long.
+const (
+	resultReconnectWait = 30 * time.Second
+	stopReconnectWait   = 2 * time.Second
+)
+
+// sendResult sends a complete or fail. On a connection error or timeout it
+// reconnects and sends the same result again, up to maxResultSends in all;
+// the server doesn't know whether a lost one arrived, and a task reported
+// twice is safer than one never reported. A refusal is not resent. A
+// result still unsent is dropped with a log line, and the server hands the
+// task out again when its lease runs out.
+func (w *ActionWorker) sendResult(op, taskID string, send func() error) error {
+	var err error
+	for n := 1; ; n++ {
+		if err = send(); err == nil {
 			return nil
 		}
-		if !IsConnectionError(err) || w.ctx.Err() != nil {
-			return err
+		if !IsConnectionError(err) || n == maxResultSends {
+			break
 		}
-		w.logger.Printf("Connection lost while sending %s result (attempt %d/%d), reconnecting...", op, attempt, maxAttempts)
-		if reconErr := w.resultClient.ReconnectWithContext(w.ctx); reconErr != nil {
-			return reconErr
+		w.logger.Printf("Connection lost sending %s for task %s (send %d/%d), reconnecting...", op, taskID, n, maxResultSends)
+		if rerr := w.reconnectResult(); rerr != nil {
+			err = fmt.Errorf("reconnect: %w", rerr)
+			break
 		}
 	}
-	return fmt.Errorf("failed to send %s result after %d attempts", op, maxAttempts)
+	stopping := ""
+	if w.ctx.Err() != nil {
+		stopping = " while the worker stops"
+	}
+	w.logger.Printf("Error: dropped %s for task %s%s: %v", op, taskID, stopping, err)
+	return err
+}
+
+// reconnectResult reconnects the result connection unless a concurrent
+// caller already has.
+func (w *ActionWorker) reconnectResult() error {
+	w.resultMu.Lock()
+	defer w.resultMu.Unlock()
+	if w.resultClient.IsConnected() {
+		return nil
+	}
+	wait := resultReconnectWait
+	if w.ctx.Err() != nil {
+		wait = stopReconnectWait
+	}
+	ctx, cancel := context.WithTimeout(w.closeCtx, wait)
+	defer cancel()
+	// Shorten a reconnect already under way when the worker starts stopping.
+	stop := context.AfterFunc(w.ctx, func() {
+		time.AfterFunc(stopReconnectWait, cancel)
+	})
+	defer stop()
+	return w.resultClient.ReconnectWithContext(ctx)
 }
 
 // ActionContext provides context to action handlers.
