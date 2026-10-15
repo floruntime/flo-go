@@ -1,0 +1,29 @@
+package flo
+
+import (
+	"encoding/binary"
+	"testing"
+)
+
+// [count=1][seq][ts][tier][partition][key_present=0][payload_len=0][header_count=0]
+func tierRecord(tier byte) []byte {
+	buf := make([]byte, 4+8+8+1+4+1+4+4)
+	binary.LittleEndian.PutUint32(buf, 1)
+	buf[20] = tier
+	return buf
+}
+
+func TestStreamRecordTierIsReadAsTheServerSendsIt(t *testing.T) {
+	for b, want := range map[byte]StorageTier{0: StorageTierHot, 1: StorageTierWarm} {
+		res, err := parseStreamReadResponse(tierRecord(b))
+		if err != nil {
+			t.Fatalf("tier %d: %v", b, err)
+		}
+		if got := res.Records[0].Tier; got != want {
+			t.Fatalf("tier %d read as %d, want %d", b, got, want)
+		}
+	}
+	if _, err := parseStreamReadResponse(tierRecord(2)); err == nil {
+		t.Fatal("tier 2 was accepted; the server sends only 0 and 1")
+	}
+}
