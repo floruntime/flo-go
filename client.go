@@ -345,7 +345,7 @@ func (c *Client) sendOnce(opCode OpCode, namespace string, key, value, options [
 			// closes the connection; its error says why.
 			err = newServerError(resp.Status, resp.Data)
 		} else {
-			err = fmt.Errorf("flo: response is for request %d, expected %d", resp.RequestID, requestID)
+			err = fmt.Errorf("%w: response is for request %d, expected %d", errResponseMismatch, resp.RequestID, requestID)
 		}
 	}
 	if err != nil {

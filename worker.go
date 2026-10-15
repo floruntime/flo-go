@@ -254,7 +254,9 @@ func (w *WorkerClient) Complete(actionName string, taskID string, result []byte,
 	offset += 2
 	copy(value[offset:], result)
 
-	_, err := w.client.sendAndCheck(OpActionComplete, namespace, []byte(w.workerID), value, nil, true)
+	// not_found means the run or namespace is unknown, never "already
+	// done" (a duplicate complete answers ok), so it is a refusal.
+	_, err := w.client.sendAndCheck(OpActionComplete, namespace, []byte(w.workerID), value, nil, false)
 	return err
 }
 
@@ -293,7 +295,8 @@ func (w *WorkerClient) Fail(actionName string, taskID string, errorMessage strin
 	// error_message
 	copy(value[offset:], errorMessage)
 
-	_, err := w.client.sendAndCheck(OpActionFail, namespace, []byte(w.workerID), value, nil, true)
+	// As for Complete, not_found is a refusal.
+	_, err := w.client.sendAndCheck(OpActionFail, namespace, []byte(w.workerID), value, nil, false)
 	return err
 }
 

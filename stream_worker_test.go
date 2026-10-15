@@ -307,9 +307,11 @@ func TestStreamWorkerStopKeepsAcksCloseInterrupts(t *testing.T) {
 // A failed ack is logged with the record id so its redelivery is explicable.
 func TestStreamWorkerLogsFailedAck(t *testing.T) {
 	cases := map[string]func(t *testing.T, sw *StreamWorker){
-		"not retried": func(t *testing.T, sw *StreamWorker) {
+		"stop deadline passed": func(t *testing.T, sw *StreamWorker) {
 			sw.ackClient.Close()
-			sw.cancel() // stopping: a connection error is not retried
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel() // no reconnect once the stop deadline has passed
+			sw.ackCtx = ctx
 		},
 		"out of attempts": func(t *testing.T, sw *StreamWorker) {
 			sw.ackClient = NewClient(hangUpServer(t), WithTimeout(time.Second))
@@ -319,7 +321,9 @@ func TestStreamWorkerLogsFailedAck(t *testing.T) {
 		},
 		"reconnect failed": func(t *testing.T, sw *StreamWorker) {
 			sw.ackClient = NewClient("127.0.0.1:1", WithTimeout(time.Second))
-			sw.ctx, sw.cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			t.Cleanup(cancel)
+			sw.ackCtx = ctx
 		},
 	}
 	for name, setup := range cases {
@@ -329,8 +333,8 @@ func TestStreamWorkerLogsFailedAck(t *testing.T) {
 			sw := newSplitWorker(t, poll, ack, logger)
 			setup(t, sw)
 			sw.ackWithRetry("s", testID, true)
-			if !logger.has("Warning: [s] ack for " + testID.String()) {
-				t.Errorf("no warning naming %s in %q", testID, logger.lines)
+			if !logger.has("Error: [s] dropped ack for " + testID.String()) {
+				t.Errorf("no error naming %s in %q", testID, logger.lines)
 			}
 		})
 	}

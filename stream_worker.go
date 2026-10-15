@@ -140,6 +140,11 @@ type StreamWorker struct {
 	ackClient        *Client
 	ackReconnectMu   sync.Mutex
 	lastAckReconnect time.Time
+	// ackCtx bounds ack reconnects: it ends stopResultWait after the worker
+	// starts stopping, or at Close.
+	ackCtx      context.Context
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -267,13 +272,17 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 		opts.Stream = streams[0]
 	}
 
+	closeCtx, closeCancel := context.WithCancel(context.Background())
 	return &StreamWorker{
-		config:    opts,
-		streams:   streams,
-		client:    workerClient,
-		ackClient: ackClient,
-		handler:   handler,
-		logger:    opts.Logger,
+		ackCtx:      closeCtx,
+		closeCtx:    closeCtx,
+		closeCancel: closeCancel,
+		config:      opts,
+		streams:     streams,
+		client:      workerClient,
+		ackClient:   ackClient,
+		handler:     handler,
+		logger:      opts.Logger,
 	}, nil
 }
 
@@ -281,6 +290,12 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 func (sw *StreamWorker) Start(ctx context.Context) error {
 	sw.ctx, sw.cancel = context.WithCancel(ctx)
 	defer sw.cancel()
+
+	// Handlers can outlive Start; once stopping, their acks may still
+	// reconnect for stopResultWait.
+	ackCtx, ackCancel := context.WithCancel(sw.closeCtx)
+	sw.ackCtx = ackCtx
+	context.AfterFunc(sw.ctx, func() { time.AfterFunc(stopResultWait, ackCancel) })
 
 	sw.logger.Printf("Starting stream worker (id=%s, streams=%v, group=%s, consumer=%s)",
 		sw.config.WorkerID, sw.streams, sw.config.Group, sw.config.Consumer)
@@ -618,17 +633,17 @@ func (sw *StreamWorker) ackWithRetry(stream string, id StreamID, ack bool) {
 		if err == nil {
 			return
 		}
-		if !IsConnectionError(err) || sw.ctx.Err() != nil {
-			sw.logger.Printf("Warning: [%s] %s for %s failed, the record will be redelivered: %v", stream, op, id, err)
+		if !resultLost(err) {
+			sw.logger.Printf("Error: [%s] dropped %s for %s, the record will be redelivered: %v", stream, op, id, err)
 			return
 		}
 		if attempt == maxAttempts {
-			sw.logger.Printf("Warning: [%s] %s for %s failed after %d attempts, the record will be redelivered: %v", stream, op, id, maxAttempts, err)
+			sw.logger.Printf("Error: [%s] dropped %s for %s after %d sends, the record will be redelivered: %v", stream, op, id, maxAttempts, err)
 			return
 		}
 		sw.logger.Printf("[%s] Connection lost sending %s for %s (attempt %d/%d), reconnecting...", stream, op, id, attempt, maxAttempts)
 		if reconErr := sw.reconnectAck(); reconErr != nil {
-			sw.logger.Printf("Warning: [%s] %s for %s not sent, reconnect failed, the record will be redelivered: %v", stream, op, id, reconErr)
+			sw.logger.Printf("Error: [%s] dropped %s for %s, reconnect failed, the record will be redelivered: %v", stream, op, id, reconErr)
 			return
 		}
 	}
@@ -643,7 +658,9 @@ func (sw *StreamWorker) reconnectAck() error {
 	if time.Since(sw.lastAckReconnect) < 2*time.Second && sw.ackClient.IsConnected() {
 		return nil
 	}
-	if err := sw.ackClient.ReconnectWithContext(sw.ctx); err != nil {
+	ctx, cancel := context.WithTimeout(sw.ackCtx, resultReconnectWait)
+	defer cancel()
+	if err := sw.ackClient.ReconnectWithContext(ctx); err != nil {
 		return err
 	}
 	sw.lastAckReconnect = time.Now()
@@ -666,6 +683,7 @@ func (sw *StreamWorker) Stop() {
 // Close stops the worker and closes its dedicated connections.
 func (sw *StreamWorker) Close() error {
 	sw.Stop()
+	sw.closeCancel()
 	if sw.ackClient != nil {
 		// Stop leaves the ack connection up so in-flight acks land during a
 		// drain; Close doesn't wait out a stalled one.

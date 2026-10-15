@@ -401,6 +401,10 @@ w.MustRegisterAction("process-order", func(actx *flo.ActionContext) ([]byte, err
 w.Start(ctx)
 ```
 
+Delivery is at-least-once: a handler may see a task or record again, for
+example when a dropped connection loses its result, so make handlers safe to
+run twice.
+
 ## License
 
 Apache-2.0 - see [LICENSE](LICENSE) for details.
