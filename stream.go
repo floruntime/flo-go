@@ -548,6 +548,9 @@ func parseStreamReadResponse(data []byte) (*StreamReadResult, error) {
 			return nil, fmt.Errorf("incomplete stream record: missing tier")
 		}
 		tier := StorageTier(data[pos])
+		if tier != StorageTierHot && tier != StorageTierWarm {
+			return nil, fmt.Errorf("stream record: unknown tier %d", tier)
+		}
 		pos += 1
 
 		// Skip partition

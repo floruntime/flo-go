@@ -496,14 +496,13 @@ func (id StreamID) Next() StreamID {
 	}
 }
 
-// StorageTier indicates the storage tier of a stream record.
+// StorageTier is the tier a stream record was served from. These are the
+// only two the server sends.
 type StorageTier uint8
 
 const (
-	StorageTierHot     StorageTier = 0
-	StorageTierPending StorageTier = 1
-	StorageTierWarm    StorageTier = 2
-	StorageTierCold    StorageTier = 3
+	StorageTierHot  StorageTier = 0 // the in-memory log
+	StorageTierWarm StorageTier = 1 // the warm store, after the record left the log
 )
 
 // StreamRecord represents a single stream record.
