@@ -38,6 +38,15 @@ func TestAStreamReadAnswerShortOfItsCountIsRefused(t *testing.T) {
 	if res, err := parseStreamReadResponse(two[:len(tierRecord(0))]); err == nil {
 		t.Fatalf("an answer one record short returned %d records", len(res.Records))
 	}
+	// One record with a 40-byte payload under a count of two: the bytes could
+	// hold two minimal records, so only reading to the count refuses it.
+	big := tierRecord(0)
+	binary.LittleEndian.PutUint32(big, 2)
+	binary.LittleEndian.PutUint32(big[26:], 40)
+	big = append(big[:30], append(make([]byte, 40), big[30:]...)...)
+	if res, err := parseStreamReadResponse(big); err == nil {
+		t.Fatalf("a one-record answer with a count of two returned %d records", len(res.Records))
+	}
 	huge := tierRecord(0)
 	binary.LittleEndian.PutUint32(huge, 0xffffffff)
 	if _, err := parseStreamReadResponse(huge); err == nil {
