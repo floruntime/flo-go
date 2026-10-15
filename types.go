@@ -614,13 +614,13 @@ type StreamGroupReadOptions struct {
 // StreamGroupAckOptions contains options for consumer group ack.
 type StreamGroupAckOptions struct {
 	Namespace string
-	Consumer  string // Consumer ID (required for correct ack matching)
+	Consumer  string // Consumer ID; sent, but the server doesn't check it: any consumer can ack an entry
 }
 
 // StreamGroupNackOptions contains options for consumer group nack.
 type StreamGroupNackOptions struct {
 	Namespace string
-	Consumer  string // Consumer ID (required for correct nack matching)
+	Consumer  string // Consumer ID; sent, but the server doesn't check it: any consumer can nack an entry
 }
 
 // =============================================================================
