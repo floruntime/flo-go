@@ -121,6 +121,17 @@ func newServerError(status StatusCode, data []byte) error {
 	}
 }
 
+// errResponseMismatch is an answer carrying another request's id.
+var errResponseMismatch = errors.New("flo: answer for another request")
+
+// resultLost reports whether a result (complete, fail, ack, nack) may not
+// have reached the server and is worth sending again on a new connection:
+// the connection broke or timed out, or the answer was unreadable, which
+// leaves the outcome unknown (the client drops the connection on each).
+func resultLost(err error) bool {
+	return IsConnectionError(err) || errors.Is(err, ErrInvalidChecksum) || errors.Is(err, errResponseMismatch)
+}
+
 // IsConnectionError returns true if the error indicates a broken connection
 // that may be resolved by reconnecting.
 func IsConnectionError(err error) bool {

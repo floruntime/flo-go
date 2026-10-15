@@ -52,10 +52,13 @@ type ActionWorker struct {
 	// resultMu serializes reconnects of resultClient, so handlers that hit
 	// the same dropped connection reconnect it once.
 	resultMu sync.Mutex
-	// closeCtx ends when Close is called; it bounds result reconnects, which
-	// outlive Stop.
+	// closeCtx ends when Close is called.
 	closeCtx    context.Context
 	closeCancel context.CancelFunc
+	// resultCtx bounds result reconnects. It ends stopResultWait after the
+	// worker starts stopping, or at Close, so Start isn't held up for long
+	// by a result that can't be sent.
+	resultCtx context.Context
 
 	// Action handlers
 	mu       sync.RWMutex
@@ -119,10 +122,12 @@ func (c *Client) NewActionWorker(opts ActionWorkerOptions) (*ActionWorker, error
 
 	// Create a second connection for sending Complete/Fail results.
 	// The polling connection holds its mutex during blocking Await calls
-	// (up to BlockMS), so a separate connection prevents contention.
+	// (up to BlockMS), so a separate connection prevents contention. Its
+	// timeout is the parent's: a result is a short request, and a stalled
+	// one must not hold up Stop for an ActionTimeout.
 	resultClient := NewClient(c.endpoint,
 		WithNamespace(c.namespace),
-		WithTimeout(opts.ActionTimeout),
+		WithTimeout(c.timeout),
 		WithDebug(c.debug),
 		WithRetry(c.retry),
 	)
@@ -136,6 +141,7 @@ func (c *Client) NewActionWorker(opts ActionWorkerOptions) (*ActionWorker, error
 	w := &ActionWorker{
 		closeCtx:     closeCtx,
 		closeCancel:  closeCancel,
+		resultCtx:    closeCtx,
 		config:       opts,
 		client:       workerClient,
 		resultClient: resultClient,
@@ -177,6 +183,27 @@ func (w *ActionWorker) MustRegisterAction(actionName string, handler ActionHandl
 func (w *ActionWorker) Start(ctx context.Context) error {
 	w.ctx, w.cancel = context.WithCancel(ctx)
 	defer w.cancel()
+
+	// Once stopping, results may still be sent for stopResultWait; then the
+	// result connection is cut so Start returns promptly.
+	resultCtx, resultCancel := context.WithCancel(w.closeCtx)
+	defer resultCancel()
+	w.resultCtx = resultCtx
+	started := make(chan struct{})
+	defer close(started)
+	go func() {
+		select {
+		case <-started:
+			return
+		case <-w.ctx.Done():
+		}
+		select {
+		case <-started:
+		case <-time.After(stopResultWait):
+			resultCancel()
+			w.resultClient.Interrupt()
+		}
+	}()
 
 	w.logger.Printf("Starting Flo worker (id=%s, namespace=%s, concurrency=%d)",
 		w.config.WorkerID, w.client.Namespace(), w.config.Concurrency)
@@ -441,18 +468,18 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 // maxResultSends is how many times a result is sent before it is dropped.
 const maxResultSends = 3
 
-// Bounds on one reconnect of the result connection. Once the worker is
-// stopping the bound is short, so an unsendable result doesn't hold up
-// Start's return for long.
 const (
+	// resultReconnectWait bounds one reconnect of a result connection.
 	resultReconnectWait = 30 * time.Second
-	stopReconnectWait   = 2 * time.Second
+	// stopResultWait is how long after a worker starts stopping its
+	// results may still be sent.
+	stopResultWait = 2 * time.Second
 )
 
-// sendResult sends a complete or fail. On a connection error or timeout it
-// reconnects and sends the same result again, up to maxResultSends in all;
-// the server doesn't know whether a lost one arrived, and a task reported
-// twice is safer than one never reported. A refusal is not resent. A
+// sendResult sends a complete or fail. On a connection error, a timeout or
+// an unreadable answer it reconnects and sends the same result again, up to
+// maxResultSends in all: the worker can't tell whether a lost one arrived,
+// and a task reported twice is safer than one never reported. A refusal is not resent. A
 // result still unsent is dropped with a log line, and the server hands the
 // task out again when its lease runs out.
 func (w *ActionWorker) sendResult(op, taskID string, send func() error) error {
@@ -461,7 +488,7 @@ func (w *ActionWorker) sendResult(op, taskID string, send func() error) error {
 		if err = send(); err == nil {
 			return nil
 		}
-		if !IsConnectionError(err) || n == maxResultSends {
+		if !resultLost(err) || n == maxResultSends {
 			break
 		}
 		w.logger.Printf("Connection lost sending %s for task %s (send %d/%d), reconnecting...", op, taskID, n, maxResultSends)
@@ -486,17 +513,8 @@ func (w *ActionWorker) reconnectResult() error {
 	if w.resultClient.IsConnected() {
 		return nil
 	}
-	wait := resultReconnectWait
-	if w.ctx.Err() != nil {
-		wait = stopReconnectWait
-	}
-	ctx, cancel := context.WithTimeout(w.closeCtx, wait)
+	ctx, cancel := context.WithTimeout(w.resultCtx, resultReconnectWait)
 	defer cancel()
-	// Shorten a reconnect already under way when the worker starts stopping.
-	stop := context.AfterFunc(w.ctx, func() {
-		time.AfterFunc(stopReconnectWait, cancel)
-	})
-	defer stop()
 	return w.resultClient.ReconnectWithContext(ctx)
 }
 

@@ -18,6 +18,9 @@ type reply struct {
 	stall  bool       // never answer
 	status StatusCode // answer with this status...
 	body   []byte     // ...and body
+	// Unreadable answers, whose outcome the client can't know.
+	badCRC  bool
+	wrongID bool
 }
 
 // frameServer records every request frame it receives and answers each as
@@ -74,7 +77,15 @@ func (s *frameServer) serve(conn net.Conn) {
 		case r.stall:
 			continue
 		}
-		if _, err := conn.Write(statusFrame(binary.LittleEndian.Uint64(header[8:16]), r.status, r.body)); err != nil {
+		id := binary.LittleEndian.Uint64(header[8:16])
+		if r.wrongID {
+			id++
+		}
+		f := statusFrame(id, r.status, r.body)
+		if r.badCRC {
+			f[16] ^= 0xff
+		}
+		if _, err := conn.Write(f); err != nil {
 			return
 		}
 	}
@@ -86,12 +97,13 @@ func (s *frameServer) got(op OpCode) [][]byte {
 	return append([][]byte(nil), s.frames[op]...)
 }
 
-// resultTestWorker is an action worker on addr whose handler for action
-// "a" is h, ready for executeTask without Start.
-func resultTestWorker(t *testing.T, addr string, timeout time.Duration, h ActionHandler) (*ActionWorker, *captureLogger) {
+// resultTestWorker is an action worker on addr, with request timeout
+// netTimeout and ActionTimeout actionTimeout, whose handler for action "a"
+// is h, ready for executeTask without Start.
+func resultTestWorker(t *testing.T, addr string, netTimeout, actionTimeout time.Duration, h ActionHandler) (*ActionWorker, *captureLogger) {
 	t.Helper()
 	logger := &captureLogger{}
-	w, err := NewClient(addr).NewActionWorker(ActionWorkerOptions{ActionTimeout: timeout, Logger: logger})
+	w, err := NewClient(addr, WithTimeout(netTimeout)).NewActionWorker(ActionWorkerOptions{ActionTimeout: actionTimeout, Logger: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +140,7 @@ func hangUpFirst(op OpCode) func(OpCode, int) reply {
 
 func TestDroppedCompleteIsResentNeverFailed(t *testing.T) {
 	s, addr := newFrameServer(t, hangUpFirst(OpActionComplete))
-	w, _ := resultTestWorker(t, addr, time.Second, succeed)
+	w, _ := resultTestWorker(t, addr, time.Second, time.Minute, succeed)
 	runTask(w)
 	checkSends(t, s, 2, 0)
 }
@@ -137,8 +149,8 @@ func TestTimedOutCompleteIsResentNeverFailed(t *testing.T) {
 	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
 		return reply{stall: op == OpActionComplete && n == 0}
 	})
-	// ActionTimeout is also the result connection's request timeout.
-	w, _ := resultTestWorker(t, addr, 200*time.Millisecond, succeed)
+	// A long ActionTimeout: results time out on the client's own timeout.
+	w, _ := resultTestWorker(t, addr, 200*time.Millisecond, time.Hour, succeed)
 	runTask(w)
 	checkSends(t, s, 2, 0)
 }
@@ -174,9 +186,15 @@ func TestRefusedCompleteIsNotResent(t *testing.T) {
 				}
 				return reply{}
 			})
-			w, _ := resultTestWorker(t, addr, time.Second, succeed)
+			w, logger := resultTestWorker(t, addr, time.Second, time.Minute, succeed)
 			runTask(w)
 			checkSends(t, s, 1, 0)
+			if !logger.has("Error: dropped complete for task t1") {
+				t.Errorf("no error naming the task; log: %q", logger.lines)
+			}
+			if logger.has("Action completed") {
+				t.Error("a refused complete was logged as completed")
+			}
 		})
 	}
 }
@@ -184,18 +202,14 @@ func TestRefusedCompleteIsNotResent(t *testing.T) {
 // A handler that gives up because the worker is stopping is failed with
 // retry, so the task runs again elsewhere.
 func TestStopDuringHandlerFailsWithRetry(t *testing.T) {
-	task := []byte{2, 0, 't', '1', 1, 0, 'a'}
-	task = binary.LittleEndian.AppendUint64(task, 0) // created_at
-	task = binary.LittleEndian.AppendUint32(task, 1) // attempt
-	task = append(task, 0)                           // has_caller
 	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
 		if op == OpActionAwait && n == 0 {
-			return reply{body: task}
+			return reply{body: taskT1()}
 		}
 		return reply{}
 	})
 	started := make(chan struct{})
-	w, _ := resultTestWorker(t, addr, time.Minute, func(actx *ActionContext) (interface{}, error) {
+	w, _ := resultTestWorker(t, addr, time.Second, time.Minute, func(actx *ActionContext) (interface{}, error) {
 		close(started)
 		<-actx.Ctx().Done()
 		return nil, actx.Ctx().Err()
@@ -230,7 +244,7 @@ func TestStopDuringHandlerFailsWithRetry(t *testing.T) {
 // A handler that hits ActionTimeout is still failed without retry.
 func TestActionTimeoutFailsWithoutRetry(t *testing.T) {
 	s, addr := newFrameServer(t, func(OpCode, int) reply { return reply{} })
-	w, _ := resultTestWorker(t, addr, 50*time.Millisecond, func(actx *ActionContext) (interface{}, error) {
+	w, _ := resultTestWorker(t, addr, time.Second, 50*time.Millisecond, func(actx *ActionContext) (interface{}, error) {
 		<-actx.Ctx().Done()
 		return nil, actx.Ctx().Err()
 	})
@@ -260,7 +274,7 @@ func sameApartFromID(a, b []byte) bool {
 
 func TestResentCompleteIsByteIdentical(t *testing.T) {
 	s, addr := newFrameServer(t, hangUpFirst(OpActionComplete))
-	w, _ := resultTestWorker(t, addr, time.Second, succeed)
+	w, _ := resultTestWorker(t, addr, time.Second, time.Minute, succeed)
 	runTask(w)
 	completes := s.got(OpActionComplete)
 	if len(completes) != 2 {
@@ -278,7 +292,7 @@ func TestCompleteDroppedAfterThreeSends(t *testing.T) {
 	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
 		return reply{hangUp: op == OpActionComplete}
 	})
-	w, logger := resultTestWorker(t, addr, time.Second, succeed)
+	w, logger := resultTestWorker(t, addr, time.Second, time.Minute, succeed)
 	runTask(w)
 	checkSends(t, s, 3, 0)
 	if !logger.has("dropped complete for task t1") {
@@ -288,5 +302,72 @@ func TestCompleteDroppedAfterThreeSends(t *testing.T) {
 	// of sends, and none after the last.
 	if n := s.accepted.Load(); n != 4 {
 		t.Errorf("server accepted %d connections, want 4", n)
+	}
+}
+
+// taskT1 is an await answer assigning task "t1" of action "a".
+func taskT1() []byte {
+	task := []byte{2, 0, 't', '1', 1, 0, 'a'}
+	task = binary.LittleEndian.AppendUint64(task, 0) // created_at
+	task = binary.LittleEndian.AppendUint32(task, 1) // attempt
+	return append(task, 0)                           // has_caller
+}
+
+// A result send that stalls when Stop is called is given up within the
+// stop deadline, so Start returns promptly, and the drop is logged.
+func TestStopDoesNotWaitOutAStalledResult(t *testing.T) {
+	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
+		switch op {
+		case OpActionAwait:
+			if n == 0 {
+				return reply{body: taskT1()}
+			}
+		case OpActionComplete:
+			return reply{stall: true}
+		}
+		return reply{}
+	})
+	// The request timeout alone would hold the send for a minute.
+	w, logger := resultTestWorker(t, addr, time.Minute, time.Minute, succeed)
+	done := make(chan struct{})
+	go func() {
+		w.Start(context.Background())
+		close(done)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(s.got(OpActionComplete)) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("complete never sent")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	stopAt := time.Now()
+	w.Stop()
+	select {
+	case <-done:
+	case <-time.After(stopResultWait + 3*time.Second):
+		t.Fatalf("Start still running %v after Stop", time.Since(stopAt))
+	}
+	if !logger.has("Error: dropped complete for task t1 while the worker stops") {
+		t.Errorf("no drop logged; log: %q", logger.lines)
+	}
+	checkSends(t, s, 1, 0)
+}
+
+// An answer the client can't read leaves the outcome unknown, so the
+// complete is resent.
+func TestUnreadableCompleteAnswerIsResent(t *testing.T) {
+	for name, bad := range map[string]reply{"bad crc": {badCRC: true}, "wrong request id": {wrongID: true}} {
+		t.Run(name, func(t *testing.T) {
+			s, addr := newFrameServer(t, func(op OpCode, n int) reply {
+				if op == OpActionComplete && n == 0 {
+					return bad
+				}
+				return reply{}
+			})
+			w, _ := resultTestWorker(t, addr, time.Second, time.Minute, succeed)
+			runTask(w)
+			checkSends(t, s, 2, 0)
+		})
 	}
 }
