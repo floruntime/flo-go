@@ -58,6 +58,6 @@ FLO_IMAGE=ghcr.io/floruntime/flo:nightly go test -v -count=1 ./examples/processi
 | `TestFlatMapPipeline` | Array explosion, element key extraction |
 | `TestClassifyRoutingPipeline` | Tag-based classify, multi-sink AND matching |
 | `TestKVEnrichmentPipeline` | KV seeding, kv_lookup enrich mode |
-| `TestJobLifecycle` | Status, List, Savepoint, Stop, Restore, Rescale, Cancel |
+| `TestJobLifecycle` | Status, List, Stop, Cancel |
 | `TestDeclarativeSync` | SyncBytes, SyncDir |
 | `TestMultiplePipelines` | Concurrent pipeline submission and listing |

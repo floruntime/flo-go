@@ -6,10 +6,9 @@
 //  2. Write records to the source stream
 //  3. Read transformed records from the sink stream
 //  4. Inspect job status and list running jobs
-//  5. Create a savepoint and stop the job
-//  6. Restore from savepoint and rescale
-//  7. Declarative sync (SyncBytes + SyncDir)
-//  8. Cancel the job
+//  5. Stop the job
+//  6. Declarative sync (SyncBytes + SyncDir)
+//  7. Cancel the job
 //
 // Usage:
 //
@@ -109,16 +108,9 @@ func main() {
 	}
 
 	// -------------------------------------------------------------------------
-	// 5. Create a savepoint and stop the job
+	// 5. Stop the job
 	// -------------------------------------------------------------------------
-	fmt.Println("\n--- Savepoint + Stop ---")
-
-	sp, err := client.Processing.Savepoint(jobID, nil)
-	if err != nil {
-		fmt.Printf("  Savepoint failed (non-fatal): %v\n", err)
-	} else {
-		fmt.Printf("  Created savepoint: %s\n", sp)
-	}
+	fmt.Println("\n--- Stop ---")
 
 	if err := client.Processing.Stop(jobID, nil); err != nil {
 		fmt.Printf("  Stop failed (non-fatal): %v\n", err)
@@ -129,26 +121,7 @@ func main() {
 	time.Sleep(500 * time.Millisecond)
 
 	// -------------------------------------------------------------------------
-	// 6. Restore from savepoint and rescale
-	// -------------------------------------------------------------------------
-	fmt.Println("\n--- Restore + Rescale ---")
-
-	if sp != "" {
-		if err := client.Processing.Restore(jobID, sp, nil); err != nil {
-			fmt.Printf("  Restore failed (non-fatal): %v\n", err)
-		} else {
-			fmt.Printf("  Restored from savepoint %s\n", sp)
-		}
-	}
-
-	if err := client.Processing.Rescale(jobID, 2, nil); err != nil {
-		fmt.Printf("  Rescale failed (non-fatal): %v\n", err)
-	} else {
-		fmt.Println("  Rescaled to parallelism=2")
-	}
-
-	// -------------------------------------------------------------------------
-	// 7. Declarative sync
+	// 6. Declarative sync
 	// -------------------------------------------------------------------------
 	fmt.Println("\n--- Declarative Sync ---")
 
@@ -176,7 +149,7 @@ func main() {
 	}
 
 	// -------------------------------------------------------------------------
-	// 8. Cancel the original job
+	// 7. Cancel the original job
 	// -------------------------------------------------------------------------
 	fmt.Println("\n--- Cancel ---")
 

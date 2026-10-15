@@ -143,12 +143,12 @@ func TestAnswersDecodeWhole(t *testing.T) {
 }
 
 func TestNewReasonsHaveNames(t *testing.T) {
-	for r := ReasonNotFound; r <= ReasonTooManyTransactions; r++ {
+	for r := ReasonNotFound; r <= ReasonStaleReport; r++ {
 		if _, ok := reasonNames[r]; !ok {
 			t.Errorf("reason %d has no name", r)
 		}
 	}
-	for r, want := range map[Reason]string{ReasonNoSuchTransaction: "no_such_transaction", ReasonWrongType: "wrong_type", ReasonTooManyTransactions: "too_many_transactions"} {
+	for r, want := range map[Reason]string{ReasonNoSuchTransaction: "no_such_transaction", ReasonWrongType: "wrong_type", ReasonTooManyTransactions: "too_many_transactions", ReasonStaleReport: "stale_report"} {
 		if r.String() != want {
 			t.Errorf("reason %d = %q, want %q", r, r.String(), want)
 		}

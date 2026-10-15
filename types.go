@@ -30,7 +30,7 @@ const (
 	// into every request header. A server built from another table refuses
 	// the request, and its answers carry its own hash, which this client
 	// refuses. It changes with every server release that changes a layout.
-	TableHash uint64 = 0xc93e40aa0f2795fe
+	TableHash uint64 = 0x5194dd26f737dba9
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -167,14 +167,11 @@ const (
 	OpWorkflowListDefinitions OpCode = 0x34A
 
 	// ── Processing (0x360 – 0x37F) ──
-	OpProcessingSubmit    OpCode = 0x360
-	OpProcessingStop      OpCode = 0x361
-	OpProcessingCancel    OpCode = 0x362
-	OpProcessingStatus    OpCode = 0x363
-	OpProcessingList      OpCode = 0x364
-	OpProcessingSavepoint OpCode = 0x365
-	OpProcessingRestore   OpCode = 0x366
-	OpProcessingRescale   OpCode = 0x367
+	OpProcessingSubmit OpCode = 0x360
+	OpProcessingStop   OpCode = 0x361
+	OpProcessingCancel OpCode = 0x362
+	OpProcessingStatus OpCode = 0x363
+	OpProcessingList   OpCode = 0x364
 )
 
 // StatusCode represents status codes for Flo protocol responses.
@@ -936,21 +933,6 @@ type ProcessingCancelOptions struct {
 	Namespace string
 }
 
-// ProcessingSavepointOptions contains options for triggering a savepoint.
-type ProcessingSavepointOptions struct {
-	Namespace string
-}
-
-// ProcessingRestoreOptions contains options for restoring from a savepoint.
-type ProcessingRestoreOptions struct {
-	Namespace string
-}
-
-// ProcessingRescaleOptions contains options for rescaling a processing job.
-type ProcessingRescaleOptions struct {
-	Namespace string
-}
-
 // ProcessingSyncOptions contains options for declarative processing sync.
 type ProcessingSyncOptions struct {
 	Namespace string
@@ -961,7 +943,6 @@ type ProcessingStatusResult struct {
 	JobID            string
 	Name             string
 	Status           string
-	Parallelism      uint32
 	BatchSize        uint32
 	RecordsProcessed uint64
 	CreatedAt        int64
@@ -969,11 +950,10 @@ type ProcessingStatusResult struct {
 
 // ProcessingListEntry represents a single entry in a processing job list.
 type ProcessingListEntry struct {
-	Name        string
-	JobID       string
-	Status      string
-	Parallelism uint32
-	CreatedAt   int64
+	Name      string
+	JobID     string
+	Status    string
+	CreatedAt int64
 }
 
 // Reason says why the server refused a request. It mirrors the server's
@@ -1025,6 +1005,10 @@ const (
 	// ReasonTooManyTransactions: the shard holds as many open transactions
 	// as it may.
 	ReasonTooManyTransactions Reason = 25
+	// ReasonStaleReport: an action complete or fail for a run that has moved
+	// on (another worker holds it, or it finished). It was dropped; resending
+	// it is refused the same way.
+	ReasonStaleReport Reason = 26
 )
 
 var reasonNames = map[Reason]string{
@@ -1037,6 +1021,7 @@ var reasonNames = map[Reason]string{
 	ReasonWrongRoutingKey: "wrong_routing_key", ReasonTxnTooLarge: "txn_too_large", ReasonTooManyWaiters: "too_many_waiters",
 	ReasonConflictingFields: "conflicting_fields", ReasonWritesStopped: "writes_stopped", ReasonTooManyProposals: "too_many_proposals",
 	ReasonWrongType: "wrong_type", ReasonTooManyTransactions: "too_many_transactions",
+	ReasonStaleReport: "stale_report",
 }
 
 func (r Reason) String() string {
