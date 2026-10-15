@@ -27,3 +27,29 @@ func TestStreamRecordTierIsReadAsTheServerSendsIt(t *testing.T) {
 		t.Fatal("tier 2 was accepted; the server sends only 0 and 1")
 	}
 }
+
+func TestAStreamReadAnswerShortOfItsCountIsRefused(t *testing.T) {
+	two := append(tierRecord(0), tierRecord(0)[4:]...)
+	binary.LittleEndian.PutUint32(two, 2)
+	if res, err := parseStreamReadResponse(two); err != nil || len(res.Records) != 2 {
+		t.Fatalf("whole answer: %v, %v", res, err)
+	}
+	// Cut at the record boundary: one whole record, but a count of two.
+	if res, err := parseStreamReadResponse(two[:len(tierRecord(0))]); err == nil {
+		t.Fatalf("an answer one record short returned %d records", len(res.Records))
+	}
+	// One record with a 40-byte payload under a count of two: the bytes could
+	// hold two minimal records, so only reading to the count refuses it.
+	big := tierRecord(0)
+	binary.LittleEndian.PutUint32(big, 2)
+	binary.LittleEndian.PutUint32(big[26:], 40)
+	big = append(big[:30], append(make([]byte, 40), big[30:]...)...)
+	if res, err := parseStreamReadResponse(big); err == nil {
+		t.Fatalf("a one-record answer with a count of two returned %d records", len(res.Records))
+	}
+	huge := tierRecord(0)
+	binary.LittleEndian.PutUint32(huge, 0xffffffff)
+	if _, err := parseStreamReadResponse(huge); err == nil {
+		t.Fatal("a count the data can't hold was accepted")
+	}
+}
