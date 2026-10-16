@@ -146,9 +146,8 @@ func TestLiveQueueEnqueueDequeueAck(t *testing.T) {
 	}
 }
 
-// The worker runs an invoked action with its input and the server accepts
-// its complete. (Status can't read the run's answer yet, so the accepted
-// complete is the proof.)
+// The worker runs an invoked action with its input, and the run's status
+// then says it completed, with the worker's output.
 func TestLiveActionWorkerCompletesAnInvokedRun(t *testing.T) {
 	c := liveClient(t)
 	logger := &captureLogger{}
@@ -171,7 +170,8 @@ func TestLiveActionWorkerCompletesAnInvokedRun(t *testing.T) {
 		<-done
 	}()
 
-	if _, err := c.Action.Invoke("echo", []byte("hi"), nil); err != nil {
+	run, err := c.Action.Invoke("echo", []byte("hi"), nil)
+	if err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -183,9 +183,19 @@ func TestLiveActionWorkerCompletesAnInvokedRun(t *testing.T) {
 		t.Fatal("the worker never ran the invoked action")
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for !logger.has("Action completed: echo") {
+	for {
+		st, err := c.Action.Status(run.RunID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Status == RunStatusCompleted {
+			if string(st.Output) != "ok" || st.Attempt != 1 || st.CompletedAt == nil {
+				t.Fatalf("completed run: %+v", st)
+			}
+			return
+		}
 		if time.Now().After(deadline) {
-			t.Fatalf("complete not accepted; log: %q", logger.all())
+			t.Fatalf("run still %v; log: %q", st.Status, logger.all())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

@@ -19,7 +19,8 @@ func isTableOp(op OpCode) bool {
 	switch op {
 	case OpKVPut, OpKVGet, OpKVMGet, OpKVDelete, OpKVScan, OpKVHistory,
 		OpKVIncr, OpKVJsonGet, OpKVJsonSet, OpKVJsonDel,
-		OpKVBeginTxn, OpKVCommitTxn, OpKVRollbackTxn, OpKVExpire, OpKVExists:
+		OpKVBeginTxn, OpKVCommitTxn, OpKVRollbackTxn, OpKVExpire, OpKVExists,
+		OpActionStatus:
 		return true
 	}
 	return false
