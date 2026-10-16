@@ -300,7 +300,9 @@ func (w *WorkerClient) Fail(actionName string, taskID string, errorMessage strin
 	return err
 }
 
-// Touch extends the lease on a task.
+// Touch extends the lease on a task, for the longer of opts.ExtendMS and
+// the action's timeout. It returns ErrNotFound for a run that no longer
+// exists, and a conflict for one that isn't running.
 // Wire format: [action_name_len:u16][action_name][task_id_len:u16][task_id][extend_ms:u32]
 func (w *WorkerClient) Touch(actionName string, taskID string, opts *WorkerTouchOptions) error {
 	if opts == nil {
@@ -332,7 +334,7 @@ func (w *WorkerClient) Touch(actionName string, taskID string, opts *WorkerTouch
 	// extend_ms
 	binary.LittleEndian.PutUint32(value[offset:], extendMS)
 
-	_, err := w.client.sendAndCheck(OpActionTouch, namespace, []byte(w.workerID), value, nil, true)
+	_, err := w.client.sendAndCheck(OpActionTouch, namespace, []byte(w.workerID), value, nil, false)
 	return err
 }
 

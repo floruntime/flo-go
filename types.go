@@ -666,11 +666,24 @@ type ActionRunStatus struct {
 }
 
 // ActionRegisterOptions contains options for action registration.
+// Registering replaces the action's settings: the last registration wins.
 type ActionRegisterOptions struct {
-	Namespace   string
-	Description string
-	TimeoutMS   *uint64
-	MaxRetries  *uint8
+	Namespace string
+	// TimeoutMS is how long a run may go without its worker completing,
+	// failing or touching it before it's taken back; 0 means never. nil
+	// sends 30000, the server's default today.
+	TimeoutMS *uint32
+	// MaxRetries counts attempts in all, the first included. nil sends 3,
+	// the server's default today.
+	MaxRetries *uint32
+	Owner      string
+}
+
+func (o *ActionRegisterOptions) timeoutMS() uint32 {
+	if o.TimeoutMS == nil {
+		return 30000
+	}
+	return *o.TimeoutMS
 }
 
 // ActionInvokeOptions contains options for action invocation.

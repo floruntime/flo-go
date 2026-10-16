@@ -34,6 +34,11 @@ type ActionWorkerOptions struct {
 	// 0 means 30000.
 	BlockMS uint32
 
+	// AutoTouch touches each run every third of its action's timeout while
+	// the handler runs. Off by default: a handler that runs past the
+	// action's timeout without calling Touch is taken back and run again.
+	AutoTouch bool
+
 	// Logger for worker output (optional, defaults to log.Printf)
 	Logger Logger
 }
@@ -63,6 +68,8 @@ type ActionWorker struct {
 	// Action handlers
 	mu       sync.RWMutex
 	handlers map[string]ActionHandler
+	// timeouts holds each action's registered timeout_ms.
+	timeouts map[string]uint32
 
 	// Worker state
 	ctx    context.Context
@@ -146,14 +153,20 @@ func (c *Client) NewActionWorker(opts ActionWorkerOptions) (*ActionWorker, error
 		client:       workerClient,
 		resultClient: resultClient,
 		handlers:     make(map[string]ActionHandler),
+		timeouts:     make(map[string]uint32),
 		logger:       opts.Logger,
 	}
 
 	return w, nil
 }
 
-// RegisterAction registers an action handler.
-func (w *ActionWorker) RegisterAction(actionName string, handler ActionHandler) error {
+// RegisterAction registers an action handler, and the action with the
+// server with exactly opts (nil sends a 30 s timeout and 3 attempts, the
+// server's defaults today). Registering replaces the action's settings, so workers that
+// register one action with different options leave it with whichever
+// registered last. opts.Namespace is ignored: the action goes in the
+// worker's.
+func (w *ActionWorker) RegisterAction(actionName string, handler ActionHandler, opts *ActionRegisterOptions) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -161,20 +174,25 @@ func (w *ActionWorker) RegisterAction(actionName string, handler ActionHandler) 
 		return fmt.Errorf("action '%s' is already registered", actionName)
 	}
 
-	// Register the action with the server
-	if err := w.client.Action.Register(actionName, ActionTypeUser, nil); err != nil {
+	var reg ActionRegisterOptions
+	if opts != nil {
+		reg = *opts
+	}
+	reg.Namespace = ""
+	if err := w.client.Action.Register(actionName, ActionTypeUser, &reg); err != nil {
 		return fmt.Errorf("failed to register action '%s': %w", actionName, err)
 	}
 
 	w.handlers[actionName] = handler
+	w.timeouts[actionName] = reg.timeoutMS()
 
 	w.logger.Printf("Registered action: %s", actionName)
 	return nil
 }
 
 // MustRegisterAction registers an action handler and panics on error.
-func (w *ActionWorker) MustRegisterAction(actionName string, handler ActionHandler) {
-	if err := w.RegisterAction(actionName, handler); err != nil {
+func (w *ActionWorker) MustRegisterAction(actionName string, handler ActionHandler, opts *ActionRegisterOptions) {
+	if err := w.RegisterAction(actionName, handler, opts); err != nil {
 		panic(fmt.Sprintf("failed to register action: %v", err))
 	}
 }
@@ -424,7 +442,11 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 		workerClient:       workerClient,
 	}
 
+	// Deferred too, so a panicking handler stops touching before its fail.
+	stopTouching := w.startTouching(workerClient, task)
+	defer stopTouching()
 	result, err := handler(actx)
+	stopTouching()
 
 	if err != nil {
 		ctxErr := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
@@ -462,6 +484,73 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 			return
 		}
 		complete(data, nil)
+	}
+}
+
+const (
+	// minTouchInterval: AutoTouch never touches more often, whatever the timeout.
+	minTouchInterval = 100 * time.Millisecond
+	// maxTouchExtendMS is the longest lease a touch may ask for; the server refuses more.
+	maxTouchExtendMS = 3_600_000
+)
+
+// touchPace is how often to touch a run of an action with timeoutMS, and
+// the lease each touch asks for: the timeout, at most an hour, touched every
+// third of that (at least minTouchInterval apart) so two can fail in a row.
+func touchPace(timeoutMS uint32) (interval time.Duration, extendMS uint32) {
+	extendMS = min(timeoutMS, maxTouchExtendMS)
+	return max(time.Duration(extendMS)*time.Millisecond/3, minTouchInterval), extendMS
+}
+
+// startTouching touches task's run every third of its action's timeout
+// (of an hour, for longer ones) until the returned stop is called, which waits for a touch in flight, so
+// the outcome is sent after it. Each touch asks for this worker's timeout
+// (at most an hour), so the lease covers it even if another worker's
+// registration shortened the action's. Conflict, not found or bad request
+// means the run moved on and touching stops; any other refusal, or a lost
+// touch, is tried again next interval, a lost connection reconnected first.
+func (w *ActionWorker) startTouching(wc *WorkerClient, task *TaskAssignment) (stop func()) {
+	w.mu.RLock()
+	timeoutMS := w.timeouts[task.TaskType]
+	w.mu.RUnlock()
+	if !w.config.AutoTouch || timeoutMS == 0 {
+		return func() {}
+	}
+	interval, extend := touchPace(timeoutMS)
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-timer.C:
+			}
+			err := wc.Touch(task.TaskType, task.TaskID, &WorkerTouchOptions{ExtendMS: &extend})
+			var se *ServerError
+			switch {
+			case err == nil:
+			case errors.As(err, &se) && (se.Status == StatusConflict || se.Status == StatusNotFound || se.Status == StatusBadRequest):
+				w.logger.Printf("Touch for task %s was refused, stopping: %v", task.TaskID, err)
+				return
+			case IsConnectionError(err):
+				w.logger.Printf("Touch for task %s lost: %v; reconnecting", task.TaskID, err)
+				_ = w.reconnectResult()
+			default:
+				w.logger.Printf("Touch for task %s failed: %v; trying again", task.TaskID, err)
+			}
+			timer.Reset(interval)
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-finished
+		})
 	}
 }
 

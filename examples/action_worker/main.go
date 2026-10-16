@@ -497,33 +497,33 @@ func main() {
 	defer w.Close()
 
 	// General actions
-	w.MustRegisterAction("process-order", processOrder)
-	w.MustRegisterAction("send-notification", sendNotification)
-	w.MustRegisterAction("generate-report", generateReport)
-	w.MustRegisterAction("health-check", healthCheck)
+	w.MustRegisterAction("process-order", processOrder, nil)
+	w.MustRegisterAction("send-notification", sendNotification, nil)
+	w.MustRegisterAction("generate-report", generateReport, nil)
+	w.MustRegisterAction("health-check", healthCheck, nil)
 
 	// Workflow actions (used by workflow e2e)
-	w.MustRegisterAction("validate-order", validateOrder)
-	w.MustRegisterAction("charge-payment", chargePayment)
-	w.MustRegisterAction("ship-order", shipOrder)
-	w.MustRegisterAction("validate-expense", validateExpense)
-	w.MustRegisterAction("process-expense", processExpense)
+	w.MustRegisterAction("validate-order", validateOrder, nil)
+	w.MustRegisterAction("charge-payment", chargePayment, nil)
+	w.MustRegisterAction("ship-order", shipOrder, nil)
+	w.MustRegisterAction("validate-expense", validateExpense, nil)
+	w.MustRegisterAction("process-expense", processExpense, nil)
 
 	// Outcome-based actions (used by workflow e2e outcome test)
-	w.MustRegisterAction("review-order", reviewOrder)
-	w.MustRegisterAction("fulfill-order", fulfillOrder)
-	w.MustRegisterAction("notify-rejection", notifyRejection)
-	w.MustRegisterAction("manual-review", manualReview)
+	w.MustRegisterAction("review-order", reviewOrder, nil)
+	w.MustRegisterAction("fulfill-order", fulfillOrder, nil)
+	w.MustRegisterAction("notify-rejection", notifyRejection, nil)
+	w.MustRegisterAction("manual-review", manualReview, nil)
 
 	// Order-processing workflow actions (used by order-workflow.yaml)
-	w.MustRegisterAction("validate-payment", validatePayment)
-	w.MustRegisterAction("process-payment", processPayment)
-	w.MustRegisterAction("process-payment-fallback", processPaymentFallback)
-	w.MustRegisterAction("send-confirmation", sendConfirmation)
-	w.MustRegisterAction("send-rejection", sendRejection)
+	w.MustRegisterAction("validate-payment", validatePayment, nil)
+	w.MustRegisterAction("process-payment", processPayment, nil)
+	w.MustRegisterAction("process-payment-fallback", processPaymentFallback, nil)
+	w.MustRegisterAction("send-confirmation", sendConfirmation, nil)
+	w.MustRegisterAction("send-rejection", sendRejection, nil)
 
 	// Scheduled workflow actions
-	w.MustRegisterAction("reconcile-spend", reconcileSpend)
+	w.MustRegisterAction("reconcile-spend", reconcileSpend, nil)
 
 	// Handle graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
