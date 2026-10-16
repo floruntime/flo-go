@@ -29,7 +29,8 @@ const (
 	// TableHash is the hash of the op table this SDK was built for, written
 	// into every request header. A server built from another table refuses
 	// the request, and its answers carry its own hash, which this client
-	// refuses. It changes with every server release that changes a layout.
+	// refuses. CI's live tests run against the flo commit in
+	// .github/flo-ref.env: change both in one commit.
 	TableHash uint64 = 0xc8a2c3c65e95d11d
 
 	// Size limits (for client-side validation)
