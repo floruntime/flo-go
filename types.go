@@ -31,7 +31,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0xc8a2c3c65e95d11d
+	TableHash uint64 = 0x0594d65e5909af22
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -660,14 +660,17 @@ type TaskAssignment struct {
 
 // ActionRunStatus represents the status of an action invocation.
 type ActionRunStatus struct {
-	RunID        string
-	Status       RunStatus
-	CreatedAt    int64
-	StartedAt    *int64
-	CompletedAt  *int64
-	Output       []byte
+	RunID       string
+	Status      RunStatus
+	CreatedAt   int64  // ms since the epoch
+	StartedAt   *int64 // ms; nil until a worker first claims it
+	CompletedAt *int64 // ms; nil until it finishes
+	// Attempt is how many attempts have begun, the current one included.
+	Attempt uint32
+	// Output is what the worker completed it with; nil until it completes.
+	Output []byte
+	// ErrorMessage is why its last attempt failed, if one did.
 	ErrorMessage string
-	RetryCount   uint32
 }
 
 // ActionRegisterOptions contains options for action registration.

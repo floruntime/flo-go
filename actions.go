@@ -87,12 +87,18 @@ func (a *ActionClient) Status(runID string, opts *ActionStatusOptions) (*ActionR
 
 	namespace := a.client.getNamespace(opts.Namespace)
 
-	resp, err := a.client.sendAndCheck(OpActionStatus, namespace, []byte(runID), nil, nil, true)
+	// A table op: the run id is the key, and the body is empty.
+	resp, err := a.client.sendAndCheck(OpActionStatus, namespace, []byte(runID), nil, nil, false)
 	if err != nil {
 		return nil, err
 	}
 
-	return parseActionRunStatus(resp.Data)
+	st, err := decodeActionStatusAnswer(resp.Data)
+	if err != nil {
+		return nil, err
+	}
+	st.RunID = runID
+	return st, nil
 }
 
 // Delete deletes an action.
@@ -124,131 +130,32 @@ func parseActionInvokeResult(data []byte) (*ActionInvokeResult, error) {
 	return &ActionInvokeResult{RunID: string(data[2 : 2+runIDLen])}, nil
 }
 
-func parseActionRunStatus(data []byte) (*ActionRunStatus, error) {
-	if len(data) < 14 { // Minimum size
-		return nil, fmt.Errorf("incomplete action run status response")
+// decodeActionStatusAnswer reads action.status's answer:
+// [status:u8][created_at_ms:i64][started_at_ms?][completed_at_ms?][attempt:u32]
+// [output?: u16 length][error_message?: u16 length], each ? a present byte first.
+func decodeActionStatusAnswer(data []byte) (*ActionRunStatus, error) {
+	r := bodyReader{buf: data}
+	st := &ActionRunStatus{Status: RunStatus(r.u8()), CreatedAt: int64(r.u64())}
+	if r.present() {
+		v := int64(r.u64())
+		st.StartedAt = &v
 	}
-
-	pos := 0
-
-	// Read run_id
-	if pos+2 > len(data) {
-		return nil, fmt.Errorf("incomplete action run status: missing run_id length")
+	if r.present() {
+		v := int64(r.u64())
+		st.CompletedAt = &v
 	}
-	runIDLen := binary.LittleEndian.Uint16(data[pos:])
-	pos += 2
-
-	if pos+int(runIDLen) > len(data) {
-		return nil, fmt.Errorf("incomplete action run status: missing run_id")
+	st.Attempt = r.u32()
+	if r.present() {
+		st.Output = append([]byte{}, r.bytes16()...)
 	}
-	runID := string(data[pos : pos+int(runIDLen)])
-	pos += int(runIDLen)
-
-	// Read status
-	if pos+1 > len(data) {
-		return nil, fmt.Errorf("incomplete action run status: missing status")
+	if r.present() {
+		st.ErrorMessage = string(r.bytes16())
 	}
-	status := RunStatus(data[pos])
-	pos++
-
-	// Read created_at
-	if pos+8 > len(data) {
-		return nil, fmt.Errorf("incomplete action run status: missing created_at")
+	if err := r.done(); err != nil {
+		return nil, err
 	}
-	createdAt := int64(binary.LittleEndian.Uint64(data[pos:]))
-	pos += 8
-
-	// Read started_at (optional)
-	var startedAt *int64
-	if pos+1 > len(data) {
-		return nil, fmt.Errorf("incomplete action run status: missing started_at flag")
+	if st.Status > RunStatusTimedOut {
+		return nil, fmt.Errorf("flo: action status %d is not one this client knows", st.Status)
 	}
-	if data[pos] == 1 {
-		pos++
-		if pos+8 > len(data) {
-			return nil, fmt.Errorf("incomplete action run status: missing started_at")
-		}
-		v := int64(binary.LittleEndian.Uint64(data[pos:]))
-		startedAt = &v
-		pos += 8
-	} else {
-		pos++
-	}
-
-	// Read completed_at (optional)
-	var completedAt *int64
-	if pos+1 > len(data) {
-		return nil, fmt.Errorf("incomplete action run status: missing completed_at flag")
-	}
-	if data[pos] == 1 {
-		pos++
-		if pos+8 > len(data) {
-			return nil, fmt.Errorf("incomplete action run status: missing completed_at")
-		}
-		v := int64(binary.LittleEndian.Uint64(data[pos:]))
-		completedAt = &v
-		pos += 8
-	} else {
-		pos++
-	}
-
-	// Read output (optional)
-	var output []byte
-	if pos+1 > len(data) {
-		return nil, fmt.Errorf("incomplete action run status: missing output flag")
-	}
-	if data[pos] == 1 {
-		pos++
-		if pos+4 > len(data) {
-			return nil, fmt.Errorf("incomplete action run status: missing output length")
-		}
-		outputLen := binary.LittleEndian.Uint32(data[pos:])
-		pos += 4
-		if pos+int(outputLen) > len(data) {
-			return nil, fmt.Errorf("incomplete action run status: missing output")
-		}
-		output = make([]byte, outputLen)
-		copy(output, data[pos:pos+int(outputLen)])
-		pos += int(outputLen)
-	} else {
-		pos++
-	}
-
-	// Read error_message (optional)
-	var errorMessage string
-	if pos+1 > len(data) {
-		return nil, fmt.Errorf("incomplete action run status: missing error flag")
-	}
-	if data[pos] == 1 {
-		pos++
-		if pos+4 > len(data) {
-			return nil, fmt.Errorf("incomplete action run status: missing error length")
-		}
-		errorLen := binary.LittleEndian.Uint32(data[pos:])
-		pos += 4
-		if pos+int(errorLen) > len(data) {
-			return nil, fmt.Errorf("incomplete action run status: missing error message")
-		}
-		errorMessage = string(data[pos : pos+int(errorLen)])
-		pos += int(errorLen)
-	} else {
-		pos++
-	}
-
-	// Read retry_count
-	if pos+4 > len(data) {
-		return nil, fmt.Errorf("incomplete action run status: missing retry_count")
-	}
-	retryCount := binary.LittleEndian.Uint32(data[pos:])
-
-	return &ActionRunStatus{
-		RunID:        runID,
-		Status:       status,
-		CreatedAt:    createdAt,
-		StartedAt:    startedAt,
-		CompletedAt:  completedAt,
-		Output:       output,
-		ErrorMessage: errorMessage,
-		RetryCount:   retryCount,
-	}, nil
+	return st, nil
 }
