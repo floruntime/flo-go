@@ -381,25 +381,40 @@ client.Connect()
 defer client.Close()
 
 // Create a worker from the client
-w, err := client.NewWorker(flo.WorkerOptions{
+w, err := client.NewActionWorker(flo.ActionWorkerOptions{
     Concurrency: 10,
+    AutoTouch:   true,
 })
 if err != nil {
     log.Fatal(err)
 }
 defer w.Close()
 
-// Register action handlers
-w.MustRegisterAction("process-order", func(actx *flo.ActionContext) ([]byte, error) {
+// Register action handlers, each with the action's options (nil sends a
+// 30 s timeout and 3 attempts, the server's defaults today).
+timeout := uint32(60000)
+w.MustRegisterAction("process-order", func(actx *flo.ActionContext) (interface{}, error) {
     var input map[string]interface{}
-    actx.Into(&input)
+    if err := actx.Into(&input); err != nil {
+        return nil, flo.NewNonRetryableError(err)
+    }
     // Process the order...
-    return actx.Bytes(map[string]string{"status": "done"})
-})
+    return map[string]string{"status": "done"}, nil
+}, &flo.ActionRegisterOptions{TimeoutMS: &timeout})
 
 // Start the worker (blocks until context is cancelled)
 w.Start(ctx)
 ```
+
+Registering an action replaces its settings, so workers that register one
+action with different options leave it with whichever registered last.
+
+A run whose handler goes past the action's `TimeoutMS` without touching it is
+taken back and run again, by this worker or another. `AutoTouch` touches each
+run every third of its action's timeout while the handler runs; it's off by
+default. Without it, call `actx.Touch` from long handlers. The worker also
+stops any handler after its own `ActionTimeout` (5 minutes by default)
+whatever the action's timeout, so raise it for actions that run longer.
 
 Delivery is at-least-once: a handler may see a task or record again, for
 example when a dropped connection loses its result, so make handlers safe to

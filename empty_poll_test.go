@@ -86,7 +86,7 @@ func newTestActionWorker(t *testing.T, addr string) *ActionWorker {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { w.Close() })
-	w.MustRegisterAction("a", func(*ActionContext) (interface{}, error) { return nil, nil })
+	w.MustRegisterAction("a", func(*ActionContext) (interface{}, error) { return nil, nil }, nil)
 	return w
 }
 

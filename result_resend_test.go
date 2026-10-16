@@ -28,6 +28,7 @@ type reply struct {
 type frameServer struct {
 	mu       sync.Mutex
 	frames   map[OpCode][][]byte
+	order    []OpCode // every request's op, in arrival order
 	accepted atomic.Int32
 	decide   func(op OpCode, n int) reply
 }
@@ -69,6 +70,7 @@ func (s *frameServer) serve(conn net.Conn) {
 		s.mu.Lock()
 		n := len(s.frames[op])
 		s.frames[op] = append(s.frames[op], append(header, payload...))
+		s.order = append(s.order, op)
 		s.mu.Unlock()
 		r := s.decide(op, n)
 		switch {
@@ -89,6 +91,13 @@ func (s *frameServer) serve(conn net.Conn) {
 			return
 		}
 	}
+}
+
+// arrivals is every request's op so far, in arrival order.
+func (s *frameServer) arrivals() []OpCode {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]OpCode(nil), s.order...)
 }
 
 func (s *frameServer) got(op OpCode) [][]byte {

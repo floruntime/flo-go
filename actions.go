@@ -23,50 +23,20 @@ func (a *ActionClient) Register(name string, actionType ActionType, opts *Action
 
 	namespace := a.client.getNamespace(opts.Namespace)
 
-	// Build value: [action_type:u8][timeout_ms:u32][max_retries:u32]
-	//              [has_desc:u8][desc_len:u16]?[desc]?
-	//              [has_wasm_module:u8=0][has_wasm_entrypoint:u8=0][has_wasm_memory_limit:u8=0]
-	//              [has_trigger_stream:u8]...[has_trigger_group:u8]
-	value := make([]byte, 0, 256)
-
-	// Action type
-	value = append(value, byte(actionType))
-
-	// Timeout (default 30000)
-	timeoutMS := uint32(30000)
-	if opts.TimeoutMS != nil {
-		timeoutMS = uint32(*opts.TimeoutMS)
-	}
-	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, timeoutMS)
-	value = append(value, buf...)
-
-	// Max retries (default 3)
+	// Value: [action_type:u8][timeout_ms:u32][max_retries:u32][owner_len:u16][owner]
 	maxRetries := uint32(3)
 	if opts.MaxRetries != nil {
-		maxRetries = uint32(*opts.MaxRetries)
+		maxRetries = *opts.MaxRetries
 	}
-	binary.LittleEndian.PutUint32(buf, maxRetries)
-	value = append(value, buf...)
-
-	// Description (optional)
-	if opts.Description != "" {
-		value = append(value, 1) // has_desc
-		buf = make([]byte, 2)
-		binary.LittleEndian.PutUint16(buf, uint16(len(opts.Description)))
-		value = append(value, buf...)
-		value = append(value, []byte(opts.Description)...)
-	} else {
-		value = append(value, 0) // no desc
+	if len(opts.Owner) > math.MaxUint16 {
+		return fmt.Errorf("flo: action owner is longer than %d bytes", math.MaxUint16)
 	}
-
-	// WASM fields (reserved, always zero for wire compat)
-	value = append(value, 0) // no wasm_module
-	value = append(value, 0) // no wasm_entrypoint
-	value = append(value, 0) // no wasm_memory_limit
-
-	value = append(value, 0) // has_trigger_stream
-	value = append(value, 0) // has_trigger_group
+	value := make([]byte, 11, 11+len(opts.Owner))
+	value[0] = byte(actionType)
+	binary.LittleEndian.PutUint32(value[1:], opts.timeoutMS())
+	binary.LittleEndian.PutUint32(value[5:], maxRetries)
+	binary.LittleEndian.PutUint16(value[9:], uint16(len(opts.Owner)))
+	value = append(value, opts.Owner...)
 
 	_, err := a.client.sendAndCheck(OpActionRegister, namespace, []byte(name), value, nil, true)
 	return err
