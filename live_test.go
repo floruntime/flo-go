@@ -146,6 +146,15 @@ func TestLiveQueueEnqueueDequeueAck(t *testing.T) {
 	}
 }
 
+// A run id the server never minted is not found.
+func TestLiveActionStatusOfAnUnknownRunIsNotFound(t *testing.T) {
+	c := liveClient(t)
+	st, err := c.Action.Status("act-0-0", nil)
+	if !IsNotFound(err) {
+		t.Fatalf("status = %+v, %v; want not found", st, err)
+	}
+}
+
 // The worker runs an invoked action with its input, and the run's status
 // then says it completed, with the worker's output.
 func TestLiveActionWorkerCompletesAnInvokedRun(t *testing.T) {
