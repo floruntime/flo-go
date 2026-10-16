@@ -63,8 +63,8 @@ func TestActionStatusRefusesACutAnswerAndAnUnknownStatus(t *testing.T) {
 			t.Fatalf("cut at %d: %v", n, err)
 		}
 	}
-	if _, err := decodeActionStatusAnswer(actionStatusAnswer(RunStatus(9), nil, nil, 0, nil, nil)); err == nil {
-		t.Fatal("status 9 accepted")
+	if _, err := decodeActionStatusAnswer(actionStatusAnswer(RunStatus(9), nil, nil, 0, nil, nil)); !errors.Is(err, ErrIncompleteResponse) {
+		t.Fatalf("status 9: %v", err)
 	}
 	if !isTableOp(OpActionStatus) {
 		t.Fatal("action.status is a table op")

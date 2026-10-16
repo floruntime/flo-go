@@ -155,7 +155,7 @@ func decodeActionStatusAnswer(data []byte) (*ActionRunStatus, error) {
 		return nil, err
 	}
 	if st.Status > RunStatusTimedOut {
-		return nil, fmt.Errorf("flo: action status %d is not one this client knows", st.Status)
+		return nil, fmt.Errorf("%w: action status %d is not one this client knows", ErrIncompleteResponse, st.Status)
 	}
 	return st, nil
 }
