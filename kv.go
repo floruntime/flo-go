@@ -59,7 +59,8 @@ func (c *Client) kvSet(namespace, key string, value []byte, opts *PutOptions, tx
 const MaxMGetKeys = 256
 
 // MGet looks up many keys and returns one entry per requested key, in the
-// same order. Keys may live on different shards. Keys that don't fit one
+// same order. Keys may live on different shards; with a RoutingKey they
+// are all looked up on its shard. Keys that don't fit one
 // request frame are sent in more than one request, and when the server's
 // answer fills up before every key in a request is answered, MGet asks
 // again from the first key left.
@@ -73,12 +74,15 @@ func (kv *KVClient) MGet(keys []string, opts *KVMGetOptions) ([]MGetEntry, error
 	if err := checkMGetKeys(keys); err != nil {
 		return nil, err
 	}
+	if err := checkRoutingKey(opts.RoutingKey); err != nil {
+		return nil, err
+	}
 	namespace := kv.client.getNamespace(opts.Namespace)
 	out := make([]MGetEntry, 0, len(keys))
 	for len(out) < len(keys) {
 		rest := keys[len(out):]
 		rest = rest[:mgetBatch(rest)]
-		body, err := encodeMGetBody(rest)
+		body, err := encodeMGetBody(rest, opts.RoutingKey)
 		if err != nil {
 			return nil, err
 		}

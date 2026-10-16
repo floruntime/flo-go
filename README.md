@@ -154,6 +154,12 @@ entries, err := client.KV.MGet([]string{"a", "b", "c"}, nil)
 for _, e := range entries {
     fmt.Printf("%s found=%v v%d %s\n", e.Key, e.Found, e.Version, e.Value)
 }
+
+// Keys written with the same routing key are all on its shard: name it and
+// they are looked up there, not each on its own key's shard.
+entries, err := client.KV.MGet([]string{"user:1:name", "user:1:email"}, &flo.KVMGetOptions{
+    RoutingKey: "user:1",
+})
 ```
 
 #### Scan

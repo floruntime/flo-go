@@ -30,7 +30,7 @@ const (
 	// into every request header. A server built from another table refuses
 	// the request, and its answers carry its own hash, which this client
 	// refuses. It changes with every server release that changes a layout.
-	TableHash uint64 = 0x5194dd26f737dba9
+	TableHash uint64 = 0xc8a2c3c65e95d11d
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -321,6 +321,10 @@ type MGetEntry struct {
 // KVMGetOptions contains options for KV MGet operations.
 type KVMGetOptions struct {
 	Namespace string
+	// RoutingKey, when set, is the routing key every key was written with:
+	// all are looked up on its shard. Without it each key is looked up on
+	// its own.
+	RoutingKey string
 }
 
 // Message represents a queue message.
