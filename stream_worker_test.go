@@ -205,6 +205,13 @@ func (l *captureLogger) Printf(format string, v ...interface{}) {
 	l.lines = append(l.lines, fmt.Sprintf(format, v...))
 }
 
+// all is a copy of the lines logged so far.
+func (l *captureLogger) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
 func (l *captureLogger) has(sub string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
