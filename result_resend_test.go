@@ -31,6 +31,8 @@ type frameServer struct {
 	order    []OpCode // every request's op, in arrival order
 	accepted atomic.Int32
 	decide   func(op OpCode, n int) reply
+	ln       net.Listener
+	conns    []net.Conn
 }
 
 func newFrameServer(t *testing.T, decide func(op OpCode, n int) reply) (*frameServer, string) {
@@ -40,6 +42,7 @@ func newFrameServer(t *testing.T, decide func(op OpCode, n int) reply) (*frameSe
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.ln = ln
 	t.Cleanup(func() { ln.Close() })
 	go func() {
 		for {
@@ -48,6 +51,9 @@ func newFrameServer(t *testing.T, decide func(op OpCode, n int) reply) (*frameSe
 				return
 			}
 			s.accepted.Add(1)
+			s.mu.Lock()
+			s.conns = append(s.conns, conn)
+			s.mu.Unlock()
 			t.Cleanup(func() { conn.Close() })
 			go s.serve(conn)
 		}
@@ -90,6 +96,16 @@ func (s *frameServer) serve(conn net.Conn) {
 		if _, err := conn.Write(f); err != nil {
 			return
 		}
+	}
+}
+
+// refuse drops every connection and stops listening, so connects are refused.
+func (s *frameServer) refuse() {
+	s.ln.Close()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.conns {
+		c.Close()
 	}
 }
 
@@ -173,6 +189,7 @@ func TestDroppedAckIsResentNeverNacked(t *testing.T) {
 	}
 	t.Cleanup(func() { sw.Close() })
 	sw.ctx, sw.cancel = context.WithCancel(context.Background())
+	sw.pollCtx = sw.ctx
 	sw.processRecord("s", StreamRecord{ID: testID})
 	acks := s.got(OpStreamGroupAck)
 	if len(acks) != 2 {
