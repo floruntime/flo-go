@@ -532,8 +532,13 @@ func main() {
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		// The first signal drains: running work finishes, nothing new
+		// starts. A second one stops at once.
 		<-sigCh
-		log.Println("Shutting down...")
+		log.Println("Draining...")
+		w.Drain()
+		<-sigCh
+		log.Println("Stopping...")
 		w.Stop()
 	}()
 

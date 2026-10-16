@@ -145,6 +145,7 @@ func TestStreamWorkerReconnectsDroppedConnWithinThrottle(t *testing.T) {
 	defer sw.Close()
 
 	sw.ctx = context.Background()
+	sw.pollCtx = sw.ctx
 	sw.lastReconnect = time.Now()
 	sw.client.Close()
 	if err := sw.handleReconnect(); err != nil {

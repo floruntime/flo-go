@@ -252,3 +252,60 @@ func TestLiveAutoTouchKeepsALongHandlerFromRunningTwice(t *testing.T) {
 		t.Fatalf("handler ran %d times, want 1", n)
 	}
 }
+
+// A drain the server announces mid-run lets the running action complete
+// once, then ends Start.
+func TestLiveServerDrainLetsTheRunningActionComplete(t *testing.T) {
+	c := liveClient(t)
+	hb := heartbeatInterval
+	heartbeatInterval = 100 * time.Millisecond
+	defer func() { heartbeatInterval = hb }()
+	logger := &captureLogger{}
+	w, err := c.NewActionWorker(ActionWorkerOptions{BlockMS: 500, Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	running := make(chan struct{}, 1)
+	var runs atomic.Int32
+	w.MustRegisterAction("slow", func(actx *ActionContext) (interface{}, error) {
+		runs.Add(1)
+		running <- struct{}{}
+		select {
+		case <-time.After(time.Second):
+			return []byte("ok"), nil
+		case <-actx.Context().Done():
+			return nil, actx.Context().Err()
+		}
+	}, nil)
+	done := make(chan error, 1)
+	go func() { done <- w.Start(context.Background()) }()
+
+	run, err := c.Action.Invoke("slow", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-running:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the worker never ran the invoked action")
+	}
+	if err := c.workerClient(w.config.WorkerID).Drain(nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start = %v after a drain; log: %q", err, logger.all())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("Start did not return after a drain; log: %q", logger.all())
+	}
+	st, err := c.Action.Status(run.RunID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Status != RunStatusCompleted || st.Attempt != 1 || runs.Load() != 1 {
+		t.Fatalf("run %+v after %d runs, want completed once; log: %q", st, runs.Load(), logger.all())
+	}
+}
