@@ -238,6 +238,7 @@ func newSplitWorker(t *testing.T, poll, ack *opServer, logger Logger) *StreamWor
 		t.Fatal(err)
 	}
 	sw.ctx, sw.cancel = context.WithCancel(context.Background())
+	sw.pollCtx = sw.ctx
 	t.Cleanup(func() { sw.Close() })
 	// Connect returns at the handshake, before the servers count the accept;
 	// wait so tests can compare accept counts. NewStreamWorker dials poll

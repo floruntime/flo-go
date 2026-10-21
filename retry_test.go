@@ -184,6 +184,7 @@ func TestStreamWorkerRetriesARefusedGroupJoin(t *testing.T) {
 	}
 	t.Cleanup(func() { sw.Close() })
 	sw.ctx, sw.cancel = context.WithCancel(context.Background())
+	sw.pollCtx = sw.ctx
 	if err := sw.client.Connect(); err != nil {
 		t.Fatal(err)
 	}
