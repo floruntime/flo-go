@@ -71,9 +71,14 @@ type ActionWorker struct {
 	// timeouts holds each action's registered timeout_ms.
 	timeouts map[string]uint32
 
-	// Worker state
+	// Worker state. ctx ends on Stop or when Start's context does; handler
+	// contexts derive from it, so a drain, which doesn't end it, lets
+	// handlers finish. runMu guards cancel, which Stop reads while Start
+	// sets it.
+	runMu  sync.Mutex
 	ctx    context.Context
 	cancel context.CancelFunc
+	drain  drainState
 	wg     sync.WaitGroup
 	logger Logger
 }
@@ -153,6 +158,7 @@ func (c *Client) NewActionWorker(opts ActionWorkerOptions) (*ActionWorker, error
 		client:       workerClient,
 		resultClient: resultClient,
 		handlers:     make(map[string]ActionHandler),
+		drain:        newDrainState(),
 		timeouts:     make(map[string]uint32),
 		logger:       opts.Logger,
 	}
@@ -199,8 +205,13 @@ func (w *ActionWorker) MustRegisterAction(actionName string, handler ActionHandl
 
 // Start begins polling and executing actions.
 func (w *ActionWorker) Start(ctx context.Context) error {
+	w.runMu.Lock()
 	w.ctx, w.cancel = context.WithCancel(ctx)
+	runCtx := w.ctx // goroutines that may outlive this run read this, not w.ctx
+	pollCtx := w.drain.begin(runCtx)
+	w.runMu.Unlock()
 	defer w.cancel()
+	defer w.drain.end()
 
 	// Once stopping, results may still be sent for stopResultWait; then the
 	// result connection is cut so Start returns promptly.
@@ -213,7 +224,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 		select {
 		case <-started:
 			return
-		case <-w.ctx.Done():
+		case <-runCtx.Done():
 		}
 		select {
 		case <-started:
@@ -255,10 +266,14 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 
 	// Register worker in the worker registry
 	workerClient := w.client.workerClient(w.config.WorkerID)
+	// Before registering: a registration whose answer was lost still counts.
+	defer sendOnPoll(w.client, w.closeCtx, func() error { return workerClient.Deregister(nil) })
 	if err := workerClient.Register(regOpts); err != nil {
+		if w.drain.active() {
+			return nil // drained before it took any work
+		}
 		return fmt.Errorf("failed to register worker: %w", err)
 	}
-	defer workerClient.Deregister(nil)
 
 	// Result worker client uses the separate connection for Complete/Fail
 	resultWorkerClient := w.resultClient.workerClient(w.config.WorkerID)
@@ -266,27 +281,14 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 	// Semaphore for concurrency control
 	sem := make(chan struct{}, w.config.Concurrency)
 
-	// Start heartbeat goroutine
-	heartbeatDone := make(chan struct{})
-	go func() {
-		defer close(heartbeatDone)
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-w.ctx.Done():
-				return
-			case <-ticker.C:
-				currentLoad := uint32(len(sem))
-				status, err := workerClient.Heartbeat(currentLoad, nil)
-				if err == nil && status == WorkerStatusDraining {
-					w.logger.Printf("Worker is draining, stopping...")
-					w.cancel()
-					return
-				}
-			}
+	// Heartbeats go on until Start returns, so a draining worker's handlers
+	// still count as alive.
+	defer startHeartbeats(workerClient, func() uint32 { return uint32(len(sem)) }, func() {
+		w.logger.Printf("Worker is draining, finishing running actions...")
+		if w.drain.start() {
+			w.client.Interrupt()
 		}
-	}()
+	})()
 
 	// Main polling loop
 	var backoff emptyPollBackoff
@@ -298,8 +300,17 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 			w.logger.Printf("Worker stopped")
 			return w.ctx.Err()
 		default:
-			// Wait for semaphore slot
-			sem <- struct{}{}
+			if w.drain.active() {
+				return w.finishDrain(workerClient, regOpts)
+			}
+			// Wait for a free slot, or a drain or stop.
+			select {
+			case sem <- struct{}{}:
+			case <-w.drain.wake:
+				continue
+			case <-w.ctx.Done():
+				continue
+			}
 
 			// Await task
 			polled := time.Now()
@@ -308,13 +319,15 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 			})
 			if err != nil {
 				<-sem // Release slot
+				if w.drain.active() {
+					// A drain cut the poll; finishDrain reconnects as needed.
+					continue
+				}
 				if IsConnectionError(err) {
 					w.logger.Printf("Connection lost, reconnecting...")
-					if reconErr := w.client.ReconnectWithContext(w.ctx); reconErr != nil {
-						if w.ctx.Err() != nil {
-							w.wg.Wait()
-							w.logger.Printf("Worker stopped")
-							return w.ctx.Err()
+					if reconErr := w.client.ReconnectWithContext(pollCtx); reconErr != nil {
+						if pollCtx.Err() != nil {
+							continue // a stop or drain; the loop top handles it
 						}
 						w.logger.Printf("Reconnect failed: %v, retrying...", reconErr)
 						continue
@@ -331,7 +344,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 				} else {
 					d := failed.next()
 					w.logger.Printf("Await error: %v, retrying in %v...", err, d)
-					sleepCtx(w.ctx, d)
+					sleepCtx(pollCtx, d)
 				}
 				continue
 			}
@@ -339,7 +352,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 
 			if task == nil {
 				<-sem // Release slot - no task available
-				backoff.afterEmpty(w.ctx, polled, w.config.BlockMS)
+				backoff.afterEmpty(pollCtx, polled, w.config.BlockMS)
 				continue
 			}
 			backoff.reset()
@@ -355,12 +368,46 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 	}
 }
 
+// Drain stops taking new tasks and lets running ones finish, then Start
+// returns nil. The server is told, so it assigns the worker nothing more;
+// the notice is retried while the worker is disconnected. A Stop during a
+// drain still cancels the running handlers.
+func (w *ActionWorker) Drain() {
+	w.logger.Printf("Draining worker...")
+	// Unblock an in-flight Await, as Stop does; with no run, the next Start
+	// still needs the connection.
+	if w.drain.start() && w.client != nil {
+		w.client.Interrupt()
+	}
+}
+
+// finishDrain waits for the running handlers, keeping the server told of the
+// drain meanwhile.
+func (w *ActionWorker) finishDrain(wc *WorkerClient, regOpts *WorkerRegisterOptions) error {
+	reconnect := func(ctx context.Context) error {
+		if err := w.client.ReconnectWithContext(ctx); err != nil {
+			return err
+		}
+		if err := wc.Register(regOpts); err != nil {
+			w.logger.Printf("Warning: failed to re-register worker: %v", err)
+		}
+		return nil
+	}
+	if err := w.drain.finish(w.ctx, &w.wg, w.logger, w.client.IsConnected, func() error { return wc.Drain(nil) }, reconnect); err != nil {
+		return err
+	}
+	w.logger.Printf("Worker drained")
+	return nil
+}
+
 // Stop gracefully stops the worker.
 func (w *ActionWorker) Stop() {
 	w.logger.Printf("Stopping worker...")
+	w.runMu.Lock()
 	if w.cancel != nil {
 		w.cancel()
 	}
+	w.runMu.Unlock()
 	// Interrupt the poll connection to unblock an in-flight Await at once.
 	// Interrupt bypasses the mutex so it won't block behind a 30s Await. The
 	// result connection stays up so handlers still running can report.
@@ -557,7 +604,8 @@ func (w *ActionWorker) startTouching(wc *WorkerClient, task *TaskAssignment) (st
 // maxResultSends is how many times a result is sent before it is dropped.
 const maxResultSends = 3
 
-const (
+// Vars so tests can shorten them.
+var (
 	// resultReconnectWait bounds one reconnect of a result connection.
 	resultReconnectWait = 30 * time.Second
 	// stopResultWait is how long after a worker starts stopping its

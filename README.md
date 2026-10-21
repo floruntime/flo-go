@@ -408,9 +408,16 @@ w.MustRegisterAction("process-order", func(actx *flo.ActionContext) (interface{}
     return map[string]string{"status": "done"}, nil
 }, &flo.ActionRegisterOptions{TimeoutMS: &timeout})
 
-// Start the worker (blocks until context is cancelled)
+// Start blocks until Stop, a cancelled ctx, or a finished drain
 w.Start(ctx)
 ```
+
+`Drain` stops taking work and lets running handlers finish: the worker tells
+the server, keeps heartbeating, and `Start` returns nil once the last handler
+has reported. A drain an operator starts on the server does the same. `Stop`
+cancels the handlers' contexts, also during a drain, and `Start` returns once
+they have. Both workers have them, and a worker can be started again after
+either.
 
 Registering an action replaces its settings, so workers that register one
 action with different options leave it with whichever registered last.
