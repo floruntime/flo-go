@@ -77,12 +77,26 @@ jobs:
             sleep 0.2
           done
           echo "flo server did not start"; cat flo-server.log; exit 1
+      # A second server that removes a worker after a second of silence,
+      # for the re-registration test.
+      - name: Start a fast-expiry flo
+        run: |
+          cd "$RUNNER_TEMP"
+          printf '[workers]\nheartbeat_timeout_ms = 1000\nremove_after_ms = 1000\n' > flo-expiry.toml
+          mkdir -p flo-expiry-data
+          ./flo-bin/flo server start --port 4463 --data-dir "$RUNNER_TEMP/flo-expiry-data" --config "$RUNNER_TEMP/flo-expiry.toml" > flo-expiry.log 2>&1 &
+          for _ in $(seq 1 50); do
+            if (exec 3<>/dev/tcp/127.0.0.1/4463) 2>/dev/null; then exit 0; fi
+            sleep 0.2
+          done
+          echo "fast-expiry flo server did not start"; cat flo-expiry.log; exit 1
       - name: go test
         # CI=1 turns a missing server into a failure, not a skip.
         env:
           CI: "1"
           FLO_ENDPOINT: localhost:4453
+          FLO_EXPIRY_ENDPOINT: localhost:4463
         run: go test -race ./...
       - name: Server log
         if: failure()
-        run: cat "$RUNNER_TEMP/flo-server.log"
+        run: cat "$RUNNER_TEMP/flo-server.log" "$RUNNER_TEMP/flo-expiry.log"

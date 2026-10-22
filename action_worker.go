@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -281,14 +282,25 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 	// Semaphore for concurrency control
 	sem := make(chan struct{}, w.config.Concurrency)
 
+	// Handlers running: sem also holds a slot for the outstanding poll.
+	var running atomic.Int32
+
 	// Heartbeats go on until Start returns, so a draining worker's handlers
 	// still count as alive.
-	defer startHeartbeats(workerClient, func() uint32 { return uint32(len(sem)) }, func() {
-		w.logger.Printf("Worker is draining, finishing running actions...")
-		if w.drain.start() {
-			w.client.Interrupt()
-		}
-	})()
+	beats := &beater{
+		wc:     workerClient,
+		reg:    regOpts,
+		drain:  &w.drain,
+		logger: w.logger,
+		load:   func() uint32 { return uint32(running.Load()) },
+		draining: func() {
+			w.logger.Printf("Worker is draining, finishing running actions...")
+			if w.drain.start() {
+				w.client.Interrupt()
+			}
+		},
+	}
+	defer beats.start(heartbeatInterval)()
 
 	// Main polling loop
 	var backoff emptyPollBackoff
@@ -342,6 +354,17 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 					}
 					w.logger.Printf("Reconnected, resuming work")
 				} else {
+					var se *ServerError
+					if errors.As(err, &se) && se.Reason == ReasonWorkerDraining {
+						w.logger.Printf("Server refused work: worker is draining, finishing running actions...")
+						w.drain.start()
+						continue
+					}
+					if errors.As(err, &se) && se.Reason == ReasonWorkerUnhealthy {
+						// The server missed our heartbeats; one now lets the
+						// next poll take work.
+						beats.beat(runCtx.Done())
+					}
 					d := failed.next()
 					w.logger.Printf("Await error: %v, retrying in %v...", err, d)
 					sleepCtx(pollCtx, d)
@@ -362,6 +385,8 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 			go func(t *TaskAssignment) {
 				defer w.wg.Done()
 				defer func() { <-sem }()
+				running.Add(1)
+				defer running.Add(-1)
 				w.executeTask(resultWorkerClient, t)
 			}(task)
 		}

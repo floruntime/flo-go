@@ -110,7 +110,9 @@ func (w *WorkerClient) Register(opts *WorkerRegisterOptions) error {
 
 // Heartbeat sends a lightweight keep-alive to the worker registry.
 // Wire format: [current_load:u32]
-// Returns the worker's current status (e.g. draining) from the server response.
+// Returns the worker's current status (e.g. draining) from the server
+// response, or ErrNotFound when the server holds no such worker (it removes
+// one silent for long enough): register again.
 func (w *WorkerClient) Heartbeat(currentLoad uint32, opts *WorkerHeartbeatOptions) (WorkerStatus, error) {
 	if opts == nil {
 		opts = &WorkerHeartbeatOptions{}
@@ -121,16 +123,16 @@ func (w *WorkerClient) Heartbeat(currentLoad uint32, opts *WorkerHeartbeatOption
 	value := make([]byte, 4)
 	binary.LittleEndian.PutUint32(value[0:], currentLoad)
 
-	resp, err := w.client.sendAndCheck(OpWorkerHeartbeat, namespace, []byte(w.workerID), value, nil, true)
+	resp, err := w.client.sendAndCheck(OpWorkerHeartbeat, namespace, []byte(w.workerID), value, nil, false)
 	if err != nil {
 		return WorkerStatusActive, err
 	}
 
 	// Server responds with [status:u8]
-	if resp != nil && len(resp.Data) >= 1 {
-		return WorkerStatus(resp.Data[0]), nil
+	if len(resp.Data) != 1 || WorkerStatus(resp.Data[0]) > WorkerStatusUnhealthy {
+		return WorkerStatusActive, fmt.Errorf("%w: heartbeat answer % x", ErrIncompleteResponse, resp.Data)
 	}
-	return WorkerStatusActive, nil
+	return WorkerStatus(resp.Data[0]), nil
 }
 
 // Deregister removes the worker from the registry.
@@ -157,6 +159,85 @@ func (w *WorkerClient) Drain(opts *WorkerDrainOptions) error {
 
 	_, err := w.client.sendAndCheck(OpWorkerDrain, namespace, []byte(w.workerID), nil, nil, true)
 	return err
+}
+
+// MaxWorkerListLimit is the most workers one ListWorkers page may ask for.
+const MaxWorkerListLimit = 1024
+
+// maxWorkerID is the longest worker id, and so the longest list cursor.
+const maxWorkerID = 4096
+
+// ListWorkers returns one page of the namespace's workers, in id order.
+// Pass the result's Cursor in the next call's options to read the next page.
+func (c *Client) ListWorkers(opts *WorkerListOptions) (*WorkerListResult, error) {
+	if opts == nil {
+		opts = &WorkerListOptions{}
+	}
+	body, err := encodeWorkerListBody(opts.Limit, opts.Cursor)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.sendAndCheck(OpWorkerList, c.getNamespace(opts.Namespace), nil, body, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeWorkerListAnswer(resp.Data)
+}
+
+// encodeWorkerListBody codes worker.list's request: limit, cursor.
+func encodeWorkerListBody(limit uint32, cursor []byte) ([]byte, error) {
+	if limit == 0 {
+		limit = MaxWorkerListLimit
+	}
+	if limit > MaxWorkerListLimit {
+		return nil, fmt.Errorf("flo: worker list limit %d, at most %d", limit, MaxWorkerListLimit)
+	}
+	if len(cursor) > maxWorkerID {
+		return nil, fmt.Errorf("flo: worker list cursor is %d bytes, at most %d", len(cursor), maxWorkerID)
+	}
+	w := bodyWriter{buf: make([]byte, 0, 7+len(cursor))}
+	w.u8(1)
+	w.u32(limit)
+	w.bytes16(cursor)
+	return w.buf, nil
+}
+
+// decodeWorkerListAnswer reads worker.list's answer: workers, and the next
+// page's cursor, nil on the last page.
+func decodeWorkerListAnswer(data []byte) (*WorkerListResult, error) {
+	r := bodyReader{buf: data}
+	n := int(r.u16())
+	if n > MaxWorkerListLimit {
+		return nil, ErrIncompleteResponse
+	}
+	got := &WorkerListResult{Workers: make([]WorkerInfo, 0, n)}
+	for i := 0; i < n && !r.bad; i++ {
+		wi := WorkerInfo{
+			ID:              string(r.bytes16()),
+			Type:            WorkerType(r.u8()),
+			Status:          WorkerStatus(r.u8()),
+			CurrentLoad:     r.u32(),
+			MaxConcurrency:  r.u32(),
+			TasksCompleted:  r.u64(),
+			TasksFailed:     r.u64(),
+			RegisteredAtMS:  int64(r.u64()),
+			LastHeartbeatMS: int64(r.u64()),
+		}
+		if r.present() {
+			wi.MachineID = string(r.bytes8())
+		}
+		if wi.Type > WorkerTypeStream || wi.Status > WorkerStatusUnhealthy {
+			r.bad = true
+		}
+		got.Workers = append(got.Workers, wi)
+	}
+	if r.present() {
+		got.Cursor = r.bytes16()
+	}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
 }
 
 // Await waits for a task assignment (action_await).

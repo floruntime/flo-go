@@ -31,7 +31,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0x3ac05a0a877bda48
+	TableHash uint64 = 0x2fba7dd9ae941830
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -671,6 +671,10 @@ type ActionRunStatus struct {
 	Output []byte
 	// ErrorMessage is why its last attempt failed, if one did.
 	ErrorMessage string
+	// WorkerID is the worker holding the run, or that last held it; "" until
+	// one takes it. Only the leader knows a take at once: another node
+	// learns it at the run's next update.
+	WorkerID string
 }
 
 // ActionRegisterOptions contains options for action registration.
@@ -741,15 +745,6 @@ type ProcessEntry struct {
 	Kind ProcessKind // action or stream_consumer
 }
 
-// ProcessStats holds per-process tracking data returned by the server.
-type ProcessStats struct {
-	Name        string
-	Kind        ProcessKind
-	RunCount    uint64
-	FailCount   uint64
-	LastRunAtMS int64
-}
-
 // WorkerAwaitOptions contains options for action_await (blocking wait for task).
 type WorkerAwaitOptions struct {
 	Namespace string
@@ -792,7 +787,18 @@ type WorkerDrainOptions struct {
 // WorkerListOptions contains options for listing workers.
 type WorkerListOptions struct {
 	Namespace string
-	Limit     *uint32
+	// Limit is the most workers on the page, at most MaxWorkerListLimit;
+	// 0 means MaxWorkerListLimit.
+	Limit uint32
+	// Cursor is the previous page's Cursor; nil starts from the first worker.
+	Cursor []byte
+}
+
+// WorkerListResult is one page of a namespace's workers, in id order.
+type WorkerListResult struct {
+	Workers []WorkerInfo
+	// Cursor is where the next page starts; nil on the last page.
+	Cursor []byte
 }
 
 // WorkerInfoOptions contains options for getting worker info.
@@ -818,20 +824,20 @@ const (
 	WorkerStatusUnhealthy WorkerStatus = 3 // Missed heartbeats
 )
 
-// WorkerInfo holds information about a registered worker.
+// WorkerInfo is a registered worker, as worker.list shows it.
 type WorkerInfo struct {
-	ID             string
-	Type           WorkerType
-	Status         WorkerStatus
-	Metadata       string         // JSON metadata
-	MachineID      string         // Machine/host identifier
-	Processes      []ProcessStats // Per-process tracking
-	TasksCompleted uint64
-	TasksFailed    uint64
-	CurrentLoad    uint32
-	MaxConcurrency uint32
-	RegisteredAtMS int64
-	LastHeartbeat  int64
+	ID     string
+	Type   WorkerType
+	Status WorkerStatus
+	// CurrentLoad is the running handlers the worker last reported; 0 once
+	// it is unhealthy.
+	CurrentLoad     uint32
+	MaxConcurrency  uint32
+	TasksCompleted  uint64
+	TasksFailed     uint64
+	RegisteredAtMS  int64
+	LastHeartbeatMS int64
+	MachineID       string // "" when the worker gave none
 }
 
 // =============================================================================
@@ -1030,6 +1036,11 @@ const (
 	// on (another worker holds it, or it finished). It was dropped; resending
 	// it is refused the same way.
 	ReasonStaleReport Reason = 26
+	// ReasonWorkerUnhealthy: an await from a worker that missed its
+	// heartbeats; a heartbeat, or registering again, lets it take work.
+	ReasonWorkerUnhealthy Reason = 27
+	// ReasonWorkerDraining: an await from a worker that is draining.
+	ReasonWorkerDraining Reason = 28
 )
 
 var reasonNames = map[Reason]string{
@@ -1042,7 +1053,7 @@ var reasonNames = map[Reason]string{
 	ReasonWrongRoutingKey: "wrong_routing_key", ReasonTxnTooLarge: "txn_too_large", ReasonTooManyWaiters: "too_many_waiters",
 	ReasonConflictingFields: "conflicting_fields", ReasonWritesStopped: "writes_stopped", ReasonTooManyProposals: "too_many_proposals",
 	ReasonWrongType: "wrong_type", ReasonTooManyTransactions: "too_many_transactions",
-	ReasonStaleReport: "stale_report",
+	ReasonStaleReport: "stale_report", ReasonWorkerUnhealthy: "worker_unhealthy", ReasonWorkerDraining: "worker_draining",
 }
 
 func (r Reason) String() string {

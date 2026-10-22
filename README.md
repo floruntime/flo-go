@@ -419,6 +419,12 @@ cancels the handlers' contexts, also during a drain, and `Start` returns once
 they have. Both workers have them, and a worker can be started again after
 either.
 
+Each worker heartbeats every 30 s with the number of handlers running. One
+the server hasn't heard from for long enough is refused work, and later
+removed; the worker then registers again with the same options, telling the
+server again if it is draining. `client.ListWorkers` pages through a
+namespace's workers.
+
 Registering an action replaces its settings, so workers that register one
 action with different options leave it with whichever registered last.
 
