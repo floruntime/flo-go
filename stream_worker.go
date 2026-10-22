@@ -167,6 +167,8 @@ type StreamWorker struct {
 
 	// Shared concurrency gate (set in Start); reused by the reconnect PEL drain.
 	sem chan struct{}
+	// running counts the record handlers running, for heartbeats.
+	running atomic.Int32
 
 	// Local counters (not sent in heartbeats — server tracks authoritatively)
 	messagesProcessed uint64
@@ -354,12 +356,20 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 
 	// Heartbeats go on until Start returns, so a draining worker's handlers
 	// still count as alive.
-	defer startHeartbeats(wc, func() uint32 { return uint32(len(sem)) }, func() {
-		sw.logger.Printf("Worker is draining, finishing running records...")
-		if sw.drain.start() {
-			sw.client.Interrupt()
-		}
-	})()
+	beats := &beater{
+		wc:     wc,
+		reg:    regOpts,
+		drain:  &sw.drain,
+		logger: sw.logger,
+		load:   func() uint32 { return uint32(sw.running.Load()) },
+		draining: func() {
+			sw.logger.Printf("Worker is draining, finishing running records...")
+			if sw.drain.start() {
+				sw.client.Interrupt()
+			}
+		},
+	}
+	defer beats.start(heartbeatInterval)()
 
 	// One poll loop per stream, all sharing the concurrency semaphore
 	errCh := make(chan error, len(sw.streams))
@@ -622,6 +632,8 @@ func (sw *StreamWorker) drainPending() {
 
 // processRecord handles a single record with ack/nack.
 func (sw *StreamWorker) processRecord(stream string, record StreamRecord) {
+	sw.running.Add(1)
+	defer sw.running.Add(-1)
 	defer func() {
 		if r := recover(); r != nil {
 			sw.logger.Printf("[%s] Stream handler panicked on id %s: %v", stream, record.ID, r)

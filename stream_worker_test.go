@@ -110,8 +110,12 @@ func TestStreamWorkerAckDoesNotWaitForPoll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sw.Close()
-	go sw.Start(context.Background())
+	// Wait for Start, so its closing requests don't outlive the test.
+	started := startWorker(sw.Start)
+	defer func() {
+		sw.Close()
+		<-started
+	}()
 
 	got := <-delivered
 	select {

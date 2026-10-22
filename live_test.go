@@ -2,8 +2,10 @@ package flo
 
 // Live tests against a real flo server: FLO_ENDPOINT names it (CI starts the
 // commit pinned in .github/flo-ref.env), and FLO_BINARY the binary, for the
-// version check. Without FLO_ENDPOINT they skip, except under CI=1, where a
-// missing server is a failure, not a skip.
+// version check. FLO_EXPIRY_ENDPOINT names a second one whose config removes a
+// worker after a second of silence ([workers] heartbeat_timeout_ms and
+// remove_after_ms = 1000). Without their endpoint they skip, except under
+// CI=1, where a missing server is a failure, not a skip.
 
 import (
 	"bytes"
@@ -22,12 +24,17 @@ import (
 
 func liveEndpoint(t *testing.T) string {
 	t.Helper()
-	endpoint := os.Getenv("FLO_ENDPOINT")
+	return liveEnv(t, "FLO_ENDPOINT")
+}
+
+func liveEnv(t *testing.T, name string) string {
+	t.Helper()
+	endpoint := os.Getenv(name)
 	if endpoint == "" {
 		if os.Getenv("CI") == "1" {
-			t.Fatal("CI=1 but FLO_ENDPOINT is not set")
+			t.Fatalf("CI=1 but %s is not set", name)
 		}
-		t.Skip("FLO_ENDPOINT is not set")
+		t.Skipf("%s is not set", name)
 	}
 	return endpoint
 }
@@ -36,7 +43,11 @@ func liveEndpoint(t *testing.T) string {
 // one server don't see each other's keys, streams or actions.
 func liveClient(t *testing.T) *Client {
 	t.Helper()
-	endpoint := liveEndpoint(t)
+	return liveClientAt(t, liveEndpoint(t))
+}
+
+func liveClientAt(t *testing.T, endpoint string) *Client {
+	t.Helper()
 	suffix := make([]byte, 4)
 	_, _ = rand.Read(suffix)
 	c := NewClient(endpoint, WithNamespace("live-"+hex.EncodeToString(suffix)), WithTimeout(10*time.Second))
@@ -198,7 +209,7 @@ func TestLiveActionWorkerCompletesAnInvokedRun(t *testing.T) {
 			t.Fatal(err)
 		}
 		if st.Status == RunStatusCompleted {
-			if string(st.Output) != "ok" || st.Attempt != 1 || st.CompletedAt == nil {
+			if string(st.Output) != "ok" || st.Attempt != 1 || st.CompletedAt == nil || st.WorkerID != w.config.WorkerID {
 				t.Fatalf("completed run: %+v", st)
 			}
 			return
@@ -307,5 +318,122 @@ func TestLiveServerDrainLetsTheRunningActionComplete(t *testing.T) {
 	}
 	if st.Status != RunStatusCompleted || st.Attempt != 1 || runs.Load() != 1 {
 		t.Fatalf("run %+v after %d runs, want completed once; log: %q", st, runs.Load(), logger.all())
+	}
+}
+
+// ListWorkers pages through the namespace's workers in id order.
+func TestLiveListWorkersPagesInIDOrder(t *testing.T) {
+	c := liveClient(t)
+	for _, id := range []string{"w-b", "w-a"} {
+		err := c.workerClient(id).Register(&WorkerRegisterOptions{WorkerType: WorkerTypeStream, MaxConcurrency: 4, MachineID: "host-" + id})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []WorkerInfo
+	var cursor []byte
+	for pages := 0; ; pages++ {
+		if pages == 5 {
+			t.Fatalf("still paging after %d pages: %+v", pages, got)
+		}
+		page, err := c.ListWorkers(&WorkerListOptions{Limit: 1, Cursor: cursor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, page.Workers...)
+		if page.Cursor == nil {
+			break
+		}
+		cursor = page.Cursor
+	}
+	if len(got) != 2 || got[0].ID != "w-a" || got[1].ID != "w-b" {
+		t.Fatalf("listed %+v", got)
+	}
+	for _, w := range got {
+		if w.Type != WorkerTypeStream || w.MaxConcurrency != 4 || w.MachineID != "host-"+w.ID || w.RegisteredAtMS == 0 {
+			t.Errorf("row %+v", w)
+		}
+	}
+}
+
+// listedWorker is worker id's row, or nil when the server doesn't list it.
+func listedWorker(t *testing.T, c *Client, id string) *WorkerInfo {
+	t.Helper()
+	page, err := c.ListWorkers(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range page.Workers {
+		if page.Workers[i].ID == id {
+			return &page.Workers[i]
+		}
+	}
+	return nil
+}
+
+// A worker the server removes for missing its heartbeats registers again,
+// with the same options, when its next heartbeat answers not_found, and
+// still runs work.
+func TestLiveAWorkerTheServerRemovedRegistersAgain(t *testing.T) {
+	c := liveClientAt(t, liveEnv(t, "FLO_EXPIRY_ENDPOINT"))
+	hb := heartbeatInterval
+	heartbeatInterval = 3 * time.Second // the server removes it after 1 s
+	defer func() { heartbeatInterval = hb }()
+	logger := &captureLogger{}
+	w, err := c.NewActionWorker(ActionWorkerOptions{BlockMS: 500, Concurrency: 3, MachineID: "host-expiry", Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	w.MustRegisterAction("echo", func(*ActionContext) (interface{}, error) { return []byte("ok"), nil }, nil)
+	done := make(chan error, 1)
+	go func() { done <- w.Start(context.Background()) }()
+	defer func() {
+		w.Stop()
+		<-done
+	}()
+
+	id := w.config.WorkerID
+	waitLive := func(what string, cond func(*WorkerInfo) bool) *WorkerInfo {
+		t.Helper()
+		for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+			row := listedWorker(t, c, id)
+			if cond(row) {
+				return row
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for the worker to be %s; log: %q", what, logger.all())
+			}
+		}
+	}
+	first := waitLive("registered", func(r *WorkerInfo) bool { return r != nil })
+	waitLive("removed", func(r *WorkerInfo) bool { return r == nil })
+	again := waitLive("registered again", func(r *WorkerInfo) bool { return r != nil })
+	if !logger.has("Worker not found at heartbeat") {
+		t.Errorf("registered again without a not_found heartbeat; log: %q", logger.all())
+	}
+	if again.Type != first.Type || again.MaxConcurrency != 3 || again.MachineID != "host-expiry" ||
+		first.MaxConcurrency != 3 || first.MachineID != "host-expiry" || again.RegisteredAtMS <= first.RegisteredAtMS {
+		t.Errorf("first registered as %+v, then as %+v", first, again)
+	}
+
+	run, err := c.Action.Invoke("echo", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		st, err := c.Action.Status(run.RunID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Status == RunStatusCompleted {
+			if st.WorkerID != id {
+				t.Errorf("completed by %q, want %q", st.WorkerID, id)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run still %v; log: %q", st.Status, logger.all())
+		}
 	}
 }

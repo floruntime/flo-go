@@ -127,40 +127,64 @@ func sendDrainNotice(logger Logger, notice func() error) bool {
 	return true
 }
 
-// heartbeat sends wc's heartbeat every interval until done closes, calling
-// draining once when the server answers Draining, unless done closed while
-// the heartbeat was out: a drain then would reach the next run.
-func heartbeat(wc *WorkerClient, interval time.Duration, done <-chan struct{}, load func() uint32, draining func()) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	told := false
-	for {
-		select {
-		case <-done:
+// beater sends a worker's heartbeats. A heartbeat answered not_found means
+// the server removed the worker for its silence: it registers again with
+// the same options, and, if draining, tells the server again, since a
+// registration marks it active.
+type beater struct {
+	wc     *WorkerClient
+	reg    *WorkerRegisterOptions
+	drain  *drainState
+	logger Logger
+	// load is the number of handlers running.
+	load func() uint32
+	// draining is called once, when the server first answers Draining.
+	draining func()
+	told     atomic.Bool
+}
+
+// beat sends one heartbeat, unless done closed while it was out: a drain
+// then would reach the next run, and a registration outlive this one.
+func (b *beater) beat(done <-chan struct{}) {
+	status, err := b.wc.Heartbeat(b.load(), nil)
+	select {
+	case <-done:
+		return
+	default:
+	}
+	switch {
+	case IsNotFound(err):
+		b.logger.Printf("Worker not found at heartbeat, registering again")
+		if err := b.wc.Register(b.reg); err != nil {
+			b.logger.Printf("Warning: failed to re-register worker: %v", err)
 			return
-		case <-ticker.C:
-			status, err := wc.Heartbeat(load(), nil)
-			select {
-			case <-done:
-				return
-			default:
-			}
-			if err == nil && status == WorkerStatusDraining && !told {
-				told = true
-				draining()
-			}
 		}
+		if b.drain.active() {
+			sendDrainNotice(b.logger, func() error { return b.wc.Drain(nil) })
+		}
+	case err == nil && status == WorkerStatusDraining && !b.told.Swap(true):
+		b.draining()
 	}
 }
 
-// startHeartbeats runs heartbeat until the returned stop, which waits for it.
-func startHeartbeats(wc *WorkerClient, load func() uint32, draining func()) (stop func()) {
+// start beats every interval until the returned stop, which waits for a
+// beat in flight.
+func (b *beater) start(interval time.Duration) (stop func()) {
 	done := make(chan struct{})
 	var running sync.WaitGroup
 	running.Add(1)
 	go func() {
 		defer running.Done()
-		heartbeat(wc, heartbeatInterval, done, load, draining)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				b.beat(done)
+			}
+		}
 	}()
 	return func() {
 		close(done)
