@@ -37,7 +37,7 @@ func writeFakeResponse(conn net.Conn, requestID uint64, data []byte) error {
 	binary.LittleEndian.PutUint64(frame[24:32], TableHash)
 	frame[21] = byte(StatusOK)
 	copy(frame[HeaderSize:], data)
-	binary.LittleEndian.PutUint32(frame[16:20], computeCRC32(frame[:HeaderSize], data))
+	binary.LittleEndian.PutUint32(frame[16:20], computeCRC32C(frame[:HeaderSize], data))
 	_, err := conn.Write(frame)
 	return err
 }

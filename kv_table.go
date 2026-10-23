@@ -246,10 +246,14 @@ func encodeSetBody(value []byte, opts *PutOptions, txn *uint64) ([]byte, error) 
 	return w.buf, nil
 }
 
-// decodeGetAnswer reads kv.get's answer: version, value.
+// decodeGetAnswer reads kv.get's answer: version, value, expiry.
 func decodeGetAnswer(data []byte) (*GetResult, error) {
 	r := bodyReader{buf: data}
 	got := &GetResult{Version: r.u64(), Value: r.bytes32()}
+	if r.present() {
+		at := int64(r.u64())
+		got.ExpiresAtMs = &at
+	}
 	if err := r.done(); err != nil {
 		return nil, err
 	}
@@ -357,7 +361,7 @@ func decodeHistoryAnswer(data []byte) ([]VersionEntry, error) {
 	}
 	out := make([]VersionEntry, 0, n)
 	for i := 0; i < n && !r.bad; i++ {
-		out = append(out, VersionEntry{Version: r.u64(), AtMs: int64(r.u64()), Value: r.bytes32()})
+		out = append(out, VersionEntry{Version: r.u64(), AtMs: int64(r.u64()), Deleted: r.bool(), Value: r.bytes32()})
 	}
 	if err := r.done(); err != nil {
 		return nil, err
@@ -574,7 +578,12 @@ func encodeJSONSetBody(path string, document []byte, routingKey string) ([]byte,
 
 // decodeJSONGetAnswer reads kv.json_get's answer: version, document.
 func decodeJSONGetAnswer(data []byte) (*GetResult, error) {
-	return decodeGetAnswer(data)
+	r := bodyReader{buf: data}
+	got := &GetResult{Version: r.u64(), Value: r.bytes32()}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
 }
 
 // decodeJSONSetAnswer reads kv.json_set's answer: version.

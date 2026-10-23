@@ -12,11 +12,10 @@ import (
 	"time"
 )
 
-// fakeReply builds a response frame for requestID carrying a KV Get body
-// (version u64 followed by the value).
-// fakeReply is an ok answer to a kv.get: [version:u64][value_len:u32][value].
+// fakeReply is an ok answer to a kv.get, version 0 and no expiry:
+// [version:u64][value_len:u32][value][expires_at_ms absent].
 func fakeReply(requestID uint64, value string) []byte {
-	data := make([]byte, 12+len(value))
+	data := make([]byte, 12+len(value)+1)
 	binary.LittleEndian.PutUint32(data[8:12], uint32(len(value)))
 	copy(data[12:], value)
 	frame := make([]byte, HeaderSize+len(data))
@@ -27,7 +26,7 @@ func fakeReply(requestID uint64, value string) []byte {
 	binary.LittleEndian.PutUint64(frame[24:32], TableHash)
 	frame[21] = byte(StatusOK)
 	copy(frame[HeaderSize:], data)
-	binary.LittleEndian.PutUint32(frame[16:20], computeCRC32(frame[:HeaderSize], data))
+	binary.LittleEndian.PutUint32(frame[16:20], computeCRC32C(frame[:HeaderSize], data))
 	return frame
 }
 
@@ -317,7 +316,7 @@ func TestRefusalWithIDZeroKeepsServerError(t *testing.T) {
 		f = append(f[:HeaderSize], msg...)
 		binary.LittleEndian.PutUint32(f[4:8], uint32(len(msg)))
 		f[21] = byte(StatusBadRequest)
-		binary.LittleEndian.PutUint32(f[16:20], computeCRC32(f[:HeaderSize], msg))
+		binary.LittleEndian.PutUint32(f[16:20], computeCRC32C(f[:HeaderSize], msg))
 		return f
 	}
 	ln := serveAll(t, refusal)

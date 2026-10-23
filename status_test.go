@@ -30,7 +30,7 @@ func statusReply(requestID uint64, status StatusCode, msg string) []byte {
 	binary.LittleEndian.PutUint64(frame[24:32], TableHash)
 	frame[21] = byte(status)
 	copy(frame[HeaderSize:], body)
-	binary.LittleEndian.PutUint32(frame[16:20], computeCRC32(frame[:HeaderSize], body))
+	binary.LittleEndian.PutUint32(frame[16:20], computeCRC32C(frame[:HeaderSize], body))
 	return frame
 }
 
@@ -113,7 +113,7 @@ func TestAnswerFromAnotherTableIsRefusedUnread(t *testing.T) {
 	ln := serveAll(t, func(id uint64) []byte {
 		frame := fakeReply(id, "from elsewhere")
 		binary.LittleEndian.PutUint64(frame[24:32], TableHash+1)
-		binary.LittleEndian.PutUint32(frame[16:20], computeCRC32(frame[:HeaderSize], frame[HeaderSize:]))
+		binary.LittleEndian.PutUint32(frame[16:20], computeCRC32C(frame[:HeaderSize], frame[HeaderSize:]))
 		return frame
 	})
 	c := NewClient(ln.Addr().String(), WithTimeout(time.Second))
@@ -140,8 +140,8 @@ func TestRequestsCarryTheTableHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data[22] != 2 || binary.LittleEndian.Uint64(data[24:32]) != 0x2fba7dd9ae941830 {
-		t.Fatalf("header version %d table 0x%016x, want 2 and the pinned table", data[22], binary.LittleEndian.Uint64(data[24:32]))
+	if data[22] != 3 || binary.LittleEndian.Uint64(data[24:32]) != 0x74e680eb8727c3fb {
+		t.Fatalf("header version %d table 0x%016x, want 3 and the pinned table", data[22], binary.LittleEndian.Uint64(data[24:32]))
 	}
 }
 

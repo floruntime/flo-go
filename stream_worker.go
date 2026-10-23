@@ -719,8 +719,10 @@ func (sw *StreamWorker) reconnectAck() error {
 
 // Drain stops reading new records and lets running handlers finish and ack,
 // then Start leaves the groups and returns nil. The server is told; the
-// notice is retried while the worker is disconnected. A Stop during a drain
-// still cancels the running handlers.
+// notice is retried while the worker is disconnected. A held GroupRead
+// doesn't hold it up: the poll connection is closed, since the server
+// doesn't answer it on a drain. A Stop during a drain still cancels the
+// running handlers.
 func (sw *StreamWorker) Drain() {
 	sw.logger.Printf("Draining stream worker...")
 	// Unblock an in-flight GroupRead, as Stop does; with no run, the next

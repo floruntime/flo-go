@@ -113,6 +113,50 @@ func TestLiveKVPutGetAndMGet(t *testing.T) {
 	}
 }
 
+func TestLiveKVGetShowsTheExpiry(t *testing.T) {
+	c := liveClient(t)
+	ttl := uint64(60000)
+	before := time.Now().UnixMilli()
+	if _, err := c.KV.Put("ttl", []byte("v"), &PutOptions{TTLMs: &ttl}); err != nil {
+		t.Fatal(err)
+	}
+	after := time.Now().UnixMilli()
+	got, err := c.KV.Get("ttl", nil)
+	if err != nil || got == nil || got.ExpiresAtMs == nil {
+		t.Fatalf("get = %+v, %v; want an expiry", got, err)
+	}
+	if at := *got.ExpiresAtMs; at < before+int64(ttl) || at > after+int64(ttl) {
+		t.Errorf("expires at %d, want within [%d, %d]", at, before+int64(ttl), after+int64(ttl))
+	}
+	if _, err := c.KV.Put("plain", []byte("v"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.KV.Get("plain", nil); err != nil || got == nil || got.ExpiresAtMs != nil {
+		t.Errorf("get without a TTL = %+v, %v; want no expiry", got, err)
+	}
+}
+
+func TestLiveKVHistoryMarksTheDelete(t *testing.T) {
+	c := liveClient(t)
+	if _, err := c.KV.Put("k", []byte("one"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.KV.Delete("k", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.KV.Put("k", []byte("two"), nil); err != nil {
+		t.Fatal(err)
+	}
+	hist, err := c.KV.History("k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist) != 3 || hist[0].Deleted || !hist[1].Deleted || hist[2].Deleted ||
+		string(hist[0].Value) != "two" || string(hist[2].Value) != "one" {
+		t.Fatalf("history = %+v; want two, a delete, one", hist)
+	}
+}
+
 func TestLiveStreamAppendAndRead(t *testing.T) {
 	c := liveClient(t)
 	for _, p := range []string{"one", "two", "three"} {
