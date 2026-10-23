@@ -197,74 +197,66 @@ var processingStatusNames = []string{"running", "stopped", "cancelled", "failed"
 // Wire format: [job_id_len:u16][job_id][name_len:u16][name][status:u8]
 //
 //	[batch_size:u32][records_processed:u64][created_at:i64]
+//	[reason_len:u16][reason]
 func parseProcessingStatus(data []byte) (*ProcessingStatusResult, error) {
 	pos := 0
-
-	readU16 := func() (int, error) {
-		if pos+2 > len(data) {
-			return 0, fmt.Errorf("unexpected end of processing status data")
-		}
-		v := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		pos += 2
-		return v, nil
+	short := func(field string) error {
+		return fmt.Errorf("%w: processing status ends before %s", ErrIncompleteResponse, field)
 	}
-	readStr := func() (string, error) {
-		n, err := readU16()
-		if err != nil {
-			return "", err
+	readStr := func(field string) (string, error) {
+		if pos+2 > len(data) {
+			return "", short(field)
 		}
+		n := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+		pos += 2
 		if pos+n > len(data) {
-			return "", fmt.Errorf("unexpected end of processing status data")
+			return "", short(field)
 		}
 		s := string(data[pos : pos+n])
 		pos += n
 		return s, nil
 	}
 
-	jobID, err := readStr()
+	jobID, err := readStr("job_id")
 	if err != nil {
-		return nil, fmt.Errorf("parse processing status job_id: %w", err)
+		return nil, err
+	}
+	name, err := readStr("name")
+	if err != nil {
+		return nil, err
 	}
 
-	name, err := readStr()
-	if err != nil {
-		return nil, fmt.Errorf("parse processing status name: %w", err)
-	}
-
-	if pos >= len(data) {
-		return nil, fmt.Errorf("unexpected end of processing status data at status byte")
+	if pos+1+4+8+8 > len(data) {
+		return nil, short("created_at")
 	}
 	statusByte := data[pos]
 	pos++
-	statusStr := fmt.Sprintf("unknown(%d)", statusByte)
-	if int(statusByte) < len(processingStatusNames) {
-		statusStr = processingStatusNames[statusByte]
-	}
-
-	if pos+4 > len(data) {
-		return nil, fmt.Errorf("unexpected end of processing status data at batch_size")
+	if int(statusByte) >= len(processingStatusNames) {
+		return nil, fmt.Errorf("%w: processing status %d is not one this client knows", ErrIncompleteResponse, statusByte)
 	}
 	batchSize := binary.LittleEndian.Uint32(data[pos : pos+4])
 	pos += 4
-
-	if pos+8 > len(data) {
-		return nil, fmt.Errorf("unexpected end of processing status data at records_processed")
-	}
 	recordsProcessed := binary.LittleEndian.Uint64(data[pos : pos+8])
 	pos += 8
-
-	if pos+8 > len(data) {
-		return nil, fmt.Errorf("unexpected end of processing status data at created_at")
-	}
 	createdAt := int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
+	pos += 8
+
+	reason, err := readStr("failure reason")
+	if err != nil {
+		return nil, err
+	}
+	if pos != len(data) {
+		return nil, fmt.Errorf("%w: %d bytes after the processing status", ErrIncompleteResponse, len(data)-pos)
+	}
 
 	return &ProcessingStatusResult{
 		JobID:            jobID,
 		Name:             name,
-		Status:           statusStr,
+		Status:           processingStatusNames[statusByte],
 		BatchSize:        batchSize,
 		RecordsProcessed: recordsProcessed,
 		CreatedAt:        createdAt,
+		FailureReason:    reason,
 	}, nil
 }
 

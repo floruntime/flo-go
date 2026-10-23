@@ -973,6 +973,8 @@ type ProcessingStatusResult struct {
 	BatchSize        uint32
 	RecordsProcessed uint64
 	CreatedAt        int64
+	// FailureReason says why the job failed; empty unless Status is "failed".
+	FailureReason string
 }
 
 // ProcessingListEntry represents a single entry in a processing job list.
