@@ -395,8 +395,9 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 
 // Drain stops taking new tasks and lets running ones finish, then Start
 // returns nil. The server is told, so it assigns the worker nothing more;
-// the notice is retried while the worker is disconnected. A Stop during a
-// drain still cancels the running handlers.
+// the notice is retried while the worker is disconnected. A held Await
+// doesn't hold it up: the poll connection is closed. A Stop during a drain
+// still cancels the running handlers.
 func (w *ActionWorker) Drain() {
 	w.logger.Printf("Draining worker...")
 	// Unblock an in-flight Await, as Stop does; with no run, the next Start

@@ -85,6 +85,9 @@ value, err := client.KV.Get("key", nil)
 if value == nil {
     // Key not found
 }
+if value != nil && value.ExpiresAtMs != nil {
+    // The key's TTL runs out at *value.ExpiresAtMs, Unix milliseconds
+}
 
 // Get with namespace override
 value, err := client.KV.Get("key", &flo.GetOptions{
@@ -185,6 +188,10 @@ for {
 // Versions newest first (default 10, at most 65); a missing key has none
 entries, err := client.KV.History("key", nil)
 for _, entry := range entries {
+    if entry.Deleted {
+        fmt.Printf("v%d at %d ms: deleted\n", entry.Version, entry.AtMs)
+        continue
+    }
     fmt.Printf("v%d at %d ms: %s\n", entry.Version, entry.AtMs, entry.Value)
 }
 
@@ -418,6 +425,14 @@ has reported. A drain an operator starts on the server does the same. `Stop`
 cancels the handlers' contexts, also during a drain, and `Start` returns once
 they have. Both workers have them, and a worker can be started again after
 either.
+
+A drain doesn't wait out a held poll. `Drain` closes the worker's own poll
+connection, so either worker stops polling at once. When an operator drains
+the worker on the server instead, the server answers an action worker's held
+poll at once, refused with `ReasonWorkerDraining`. It doesn't wake a stream
+worker's held read, which it keeps by consumer name, not worker id: the
+stream worker learns of the drain from its next heartbeat, then closes its
+poll connection the same way.
 
 Each worker heartbeats every 30 s with the number of handlers running. One
 the server hasn't heard from for long enough is refused work, and later

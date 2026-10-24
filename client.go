@@ -397,8 +397,8 @@ func (c *Client) exchange(request []byte, waitMs uint64) (*rawResponse, error) {
 		}
 	}
 
-	// Verify CRC32
-	computedCRC := computeCRC32(header, data)
+	// Verify CRC32C
+	computedCRC := computeCRC32C(header, data)
 	if computedCRC != expectedCRC {
 		return nil, fmt.Errorf("%w: 0x%08X != 0x%08X", ErrInvalidChecksum, computedCRC, expectedCRC)
 	}

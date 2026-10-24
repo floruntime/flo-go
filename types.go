@@ -23,7 +23,7 @@ import (
 // Protocol constants
 const (
 	Magic      uint32 = 0x004F4C46 // "FLO\0" in little-endian
-	Version    uint8  = 0x02
+	Version    uint8  = 0x03
 	HeaderSize        = 32
 
 	// TableHash is the hash of the op table this SDK was built for, written
@@ -31,7 +31,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0x2fba7dd9ae941830
+	TableHash uint64 = 0x74e680eb8727c3fb
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -278,8 +278,10 @@ type ScanResult struct {
 type VersionEntry struct {
 	Version uint64
 	// AtMs is when the version was written, in Unix milliseconds.
-	AtMs  int64
-	Value []byte
+	AtMs int64
+	// Deleted is set on the version a delete wrote.
+	Deleted bool
+	Value   []byte
 }
 
 // IncrResult is a counter's value and version after an Incr.
@@ -308,6 +310,9 @@ type KVCommitResult struct {
 type GetResult struct {
 	Value   []byte
 	Version uint64
+	// ExpiresAtMs is when the key's TTL runs out, in Unix milliseconds; nil
+	// when it has none, and always nil from JsonGet.
+	ExpiresAtMs *int64
 }
 
 // MGetEntry is one entry in an MGet response. Found is false when the key did

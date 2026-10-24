@@ -26,7 +26,7 @@ var (
 	// ErrTableMismatch matches a *TableMismatchError.
 	ErrTableMismatch = errors.New("flo: server built from another protocol version or op table")
 
-	// ErrInvalidChecksum indicates a CRC32 checksum validation failure.
+	// ErrInvalidChecksum indicates a CRC32C checksum validation failure.
 	ErrInvalidChecksum = errors.New("flo: invalid checksum")
 
 	// ErrIncompleteResponse indicates an incomplete response.

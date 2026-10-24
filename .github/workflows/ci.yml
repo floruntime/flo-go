@@ -41,6 +41,16 @@ jobs:
           name: flo
           path: flo-src/zig-out/bin/flo
           retention-days: 1
+      # The server's statuses and reasons, for the test that checks the
+      # SDK's against them.
+      - name: Generate ops.json
+        working-directory: flo-src
+        run: zig build gen
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ops-json
+          path: flo-src/zig-out/gen/ops.json
+          retention-days: 1
 
   test:
     needs: flo
@@ -65,6 +75,12 @@ jobs:
         with:
           name: flo
           path: ${{ runner.temp }}/flo-bin
+      - uses: actions/download-artifact@v4
+        with:
+          name: ops-json
+          path: ${{ runner.temp }}/flo-gen
+      - name: Point the tests at ops.json
+        run: echo "FLO_OPS_JSON=$RUNNER_TEMP/flo-gen/ops.json" >> "$GITHUB_ENV"
       - name: Start the pinned flo
         run: |
           cd "$RUNNER_TEMP"

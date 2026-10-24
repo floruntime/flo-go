@@ -21,7 +21,7 @@ func statusFrame(requestID uint64, status StatusCode, body []byte) []byte {
 	f = append(f[:HeaderSize], body...)
 	binary.LittleEndian.PutUint32(f[4:8], uint32(len(body)))
 	f[21] = byte(status)
-	binary.LittleEndian.PutUint32(f[16:20], computeCRC32(f[:HeaderSize], body))
+	binary.LittleEndian.PutUint32(f[16:20], computeCRC32C(f[:HeaderSize], body))
 	return f
 }
 

@@ -82,8 +82,16 @@ func TestKVAnswersMatchTheServer(t *testing.T) {
 	scan, err = decodeScanAnswer(hx(t, "000000"))
 	check("last scan", scan, &ScanResult{Keys: []string{}}, err)
 
-	hist, err := decodeHistoryAnswer(hx(t, "010300000000000000e803000000000000020000007633"))
+	get, err := decodeGetAnswer(hx(t, "0400000000000000020000006869"+"00"))
+	check("get", get, &GetResult{Version: 4, Value: []byte("hi")}, err)
+	expires := int64(1700000000000)
+	get, err = decodeGetAnswer(hx(t, "0400000000000000020000006869"+"010068e5cf8b010000"))
+	check("get with expiry", get, &GetResult{Version: 4, Value: []byte("hi"), ExpiresAtMs: &expires}, err)
+
+	hist, err := decodeHistoryAnswer(hx(t, "010300000000000000e80300000000000000020000007633"))
 	check("history", hist, []VersionEntry{{Version: 3, AtMs: 1000, Value: []byte("v3")}}, err)
+	hist, err = decodeHistoryAnswer(hx(t, "02"+"0400000000000000d00700000000000001"+"00000000"+"0300000000000000e80300000000000000"+"020000007633"))
+	check("history with a delete", hist, []VersionEntry{{Version: 4, AtMs: 2000, Deleted: true, Value: []byte{}}, {Version: 3, AtMs: 1000, Value: []byte("v3")}}, err)
 
 	mget, err := decodeMGetAnswer(hx(t, "0200010200000000000000010000007800000000000000000000000000010200"))
 	next := uint16(2)
@@ -120,9 +128,12 @@ func TestKVAnswersAreDecodedWhole(t *testing.T) {
 		decode func([]byte) error
 		good   string
 	}{
+		// Cut short, "get expiry" ends inside the expiry.
+		"get":        {func(b []byte) error { _, err := decodeGetAnswer(b); return err }, "040000000000000002000000686900"},
+		"get expiry": {func(b []byte) error { _, err := decodeGetAnswer(b); return err }, "040000000000000002000000686901" + "0068e5cf8b010000"},
 		"delete":     {func(b []byte) error { _, err := decodeDeleteAnswer(b); return err }, "0101"},
 		"scan":       {func(b []byte) error { _, err := decodeScanAnswer(b); return err }, "02000100610200626201026332"},
-		"history":    {func(b []byte) error { _, err := decodeHistoryAnswer(b); return err }, "010300000000000000e803000000000000020000007633"},
+		"history":    {func(b []byte) error { _, err := decodeHistoryAnswer(b); return err }, "010300000000000000e80300000000000000020000007633"},
 		"mget":       {func(b []byte) error { _, err := decodeMGetAnswer(b); return err }, "0200010200000000000000010000007800000000000000000000000000010200"},
 		"incr":       {func(b []byte) error { _, err := decodeIncrAnswer(b); return err }, "010400000000000000012a00000000000000"},
 		"exists":     {func(b []byte) error { _, err := decodeExistsAnswer(b); return err }, "010500000000000000"},
@@ -152,6 +163,12 @@ func TestKVAnswersAreDecodedWhole(t *testing.T) {
 		if _, err := decodeDeleteAnswer(hx(t, bad)); !errors.Is(err, ErrIncompleteResponse) {
 			t.Errorf("delete answer %s: %v", bad, err)
 		}
+	}
+	if _, err := decodeGetAnswer(hx(t, "040000000000000002000000686902")); !errors.Is(err, ErrIncompleteResponse) {
+		t.Errorf("get with expiry presence byte 2: %v", err)
+	}
+	if _, err := decodeHistoryAnswer(hx(t, "010300000000000000e80300000000000002020000007633")); !errors.Is(err, ErrIncompleteResponse) {
+		t.Errorf("history with deleted byte 2: %v", err)
 	}
 	// Half an increment answer is malformed.
 	if _, err := decodeIncrAnswer(hx(t, "0104000000000000000000")); !errors.Is(err, ErrIncompleteResponse) {
@@ -192,7 +209,7 @@ func tableServer(t *testing.T, answer func(op OpCode, payload []byte) (StatusCod
 			resp[21] = byte(status)
 			binary.LittleEndian.PutUint64(resp[24:32], TableHash)
 			copy(resp[HeaderSize:], data)
-			binary.LittleEndian.PutUint32(resp[16:20], computeCRC32(resp[:HeaderSize], data))
+			binary.LittleEndian.PutUint32(resp[16:20], computeCRC32C(resp[:HeaderSize], data))
 			if _, err := conn.Write(resp); err != nil {
 				return
 			}
