@@ -438,7 +438,10 @@ Each worker heartbeats every 30 s with the number of handlers running. One
 the server hasn't heard from for long enough is refused work, and later
 removed; the worker then registers again with the same options, telling the
 server again if it is draining. `client.ListWorkers` pages through a
-namespace's workers.
+namespace's workers, and `client.WorkerInfo` returns one worker's row with the
+metadata it registered and its processes, each with its kind and run counts.
+The server refuses a registration of more than 1024 processes, or one whose
+processes wouldn't fit one answer.
 
 Registering an action replaces its settings, so workers that register one
 action with different options leave it with whichever registered last.

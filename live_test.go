@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"os"
 	"os/exec"
 	"regexp"
@@ -397,6 +398,58 @@ func TestLiveListWorkersPagesInIDOrder(t *testing.T) {
 		if w.Type != WorkerTypeStream || w.MaxConcurrency != 4 || w.MachineID != "host-"+w.ID || w.RegisteredAtMS == 0 {
 			t.Errorf("row %+v", w)
 		}
+	}
+}
+
+// WorkerInfo shows a worker's row, metadata and processes as registered; a
+// missing worker is not found.
+func TestLiveWorkerInfoShowsTheRegistration(t *testing.T) {
+	c := liveClient(t)
+	err := c.workerClient("w-info").Register(&WorkerRegisterOptions{
+		WorkerType:     WorkerTypeAction,
+		MaxConcurrency: 3,
+		Processes:      []ProcessEntry{{Name: "resize", Kind: ProcessKindAction}, {Name: "events/g", Kind: ProcessKindStreamConsumer}},
+		Metadata:       `{"zone":"a"}`,
+		MachineID:      "host-info",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.WorkerInfo("w-info", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := got.Worker
+	if w.ID != "w-info" || w.Type != WorkerTypeAction || w.MaxConcurrency != 3 || w.MachineID != "host-info" || w.RegisteredAtMS == 0 {
+		t.Errorf("row %+v", w)
+	}
+	if got.Metadata != `{"zone":"a"}` {
+		t.Errorf("metadata %q", got.Metadata)
+	}
+	want := []WorkerProcess{{Name: "resize", Kind: ProcessKindAction}, {Name: "events/g", Kind: ProcessKindStreamConsumer}}
+	if !slices.Equal(got.Processes, want) {
+		t.Errorf("processes %+v, want %+v", got.Processes, want)
+	}
+	if _, err := c.WorkerInfo("w-missing", nil); !IsNotFound(err) {
+		t.Errorf("missing worker: %v, want not found", err)
+	}
+}
+
+// The server refuses a registration with more processes than worker.info
+// lists; the refusal reaches the caller whole.
+func TestLiveRegisteringTooManyProcessesIsRefused(t *testing.T) {
+	c := liveClient(t)
+	processes := make([]ProcessEntry, 1025)
+	for i := range processes {
+		processes[i] = ProcessEntry{Name: "p" + strconv.Itoa(i), Kind: ProcessKindAction}
+	}
+	err := c.workerClient("w-many").Register(&WorkerRegisterOptions{Processes: processes})
+	var se *ServerError
+	if !errors.As(err, &se) || se.Status != StatusBadRequest || se.Reason != ReasonUnclassified || se.Ran != RanNo || se.Message != "more than 1024 processes" {
+		t.Fatalf("got %#v (%v), want bad_request/unclassified, ran no, \"more than 1024 processes\"", se, err)
+	}
+	if _, err := c.WorkerInfo("w-many", nil); !IsNotFound(err) {
+		t.Errorf("refused worker is registered: %v", err)
 	}
 }
 

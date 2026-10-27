@@ -31,7 +31,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0x74e680eb8727c3fb
+	TableHash uint64 = 0x505fdaa07e866b96
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -843,6 +843,23 @@ type WorkerInfo struct {
 	RegisteredAtMS  int64
 	LastHeartbeatMS int64
 	MachineID       string // "" when the worker gave none
+}
+
+// WorkerDetails is one worker's record, from Client.WorkerInfo.
+type WorkerDetails struct {
+	Worker WorkerInfo
+	// Metadata is what the worker registered with; "" when it gave none.
+	Metadata  string
+	Processes []WorkerProcess
+}
+
+// WorkerProcess is one process a worker registered, with its counts.
+type WorkerProcess struct {
+	Name        string
+	Kind        ProcessKind
+	RunCount    uint64
+	FailCount   uint64
+	LastRunAtMS int64 // 0 before its first run
 }
 
 // =============================================================================

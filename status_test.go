@@ -140,7 +140,7 @@ func TestRequestsCarryTheTableHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data[22] != 3 || binary.LittleEndian.Uint64(data[24:32]) != 0x74e680eb8727c3fb {
+	if data[22] != 3 || binary.LittleEndian.Uint64(data[24:32]) != 0x505fdaa07e866b96 {
 		t.Fatalf("header version %d table 0x%016x, want 3 and the pinned table", data[22], binary.LittleEndian.Uint64(data[24:32]))
 	}
 }
