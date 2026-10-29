@@ -551,12 +551,14 @@ func TestKVReadsCarryTheStaleFlag(t *testing.T) {
 // A flag this SDK doesn't know makes the answer unreadable: refused, and the
 // connection dropped.
 func TestAnUnknownAnswerFlagIsRefused(t *testing.T) {
-	c := flaggedTableServer(t, 0x02, kvReadAnswers)
-	if _, err := c.KV.Get("k", nil); !errors.Is(err, ErrIncompleteResponse) {
-		t.Fatalf("got %v, want ErrIncompleteResponse", err)
-	}
-	if c.IsConnected() {
-		t.Error("still connected after an unreadable answer")
+	for _, flags := range []byte{0x02, 0x80, ResponseStale | 0x80} {
+		c := flaggedTableServer(t, flags, kvReadAnswers)
+		if _, err := c.KV.Get("k", nil); !errors.Is(err, ErrIncompleteResponse) {
+			t.Fatalf("flags 0x%02x: got %v, want ErrIncompleteResponse", flags, err)
+		}
+		if c.IsConnected() {
+			t.Errorf("flags 0x%02x: still connected after an unreadable answer", flags)
+		}
 	}
 }
 

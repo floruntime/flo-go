@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -426,5 +427,40 @@ func TestInterruptClearsConnected(t *testing.T) {
 	}
 	if _, err := c.KV.Get("k", nil); err != nil {
 		t.Errorf("Get after reconnect: %v", err)
+	}
+}
+
+// An answer longer than the server ever sends is refused before it's read
+// or allocated, and the connection dropped; one at the bound is read.
+func TestAnswerSizeIsBounded(t *testing.T) {
+	at := fakeReply(0, strings.Repeat("v", maxAnswerData-13))
+	if n := len(at) - HeaderSize; n != maxAnswerData {
+		t.Fatalf("frame carries %d bytes, want %d", n, maxAnswerData)
+	}
+	for _, over := range []bool{false, true} {
+		value := strings.Repeat("v", maxAnswerData-13)
+		if over {
+			value += "v"
+		}
+		ln := serveAll(t, func(id uint64) []byte {
+			f := fakeReply(id, value)
+			if over {
+				return f[:HeaderSize] // the header alone: a bounded client reads no further
+			}
+			return f
+		})
+		c := NewClient(ln.Addr().String(), WithTimeout(2*time.Second), WithRetry(RetryPolicy{MaxAttempts: 1}))
+		if err := c.Connect(); err != nil {
+			t.Fatal(err)
+		}
+		got, err := c.KV.Get("k", nil)
+		if over {
+			if !errors.Is(err, ErrIncompleteResponse) || c.IsConnected() {
+				t.Errorf("one byte over: %v, connected %v; want ErrIncompleteResponse and a dropped connection", err, c.IsConnected())
+			}
+		} else if err != nil || got == nil || len(got.Value) != maxAnswerData-13 {
+			t.Errorf("at the bound: %v", err)
+		}
+		c.Close()
 	}
 }

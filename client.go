@@ -388,6 +388,12 @@ func (c *Client) exchange(request []byte, waitMs uint64) (*rawResponse, error) {
 		return nil, err
 	}
 
+	// A length past what the server ever sends is a broken stream, not an
+	// allocation to make.
+	if dataLen > maxAnswerData {
+		return nil, fmt.Errorf("%w: answer of %d bytes, at most %d", ErrIncompleteResponse, dataLen, maxAnswerData)
+	}
+
 	// Read response data
 	var data []byte
 	if dataLen > 0 {

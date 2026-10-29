@@ -155,6 +155,8 @@ func (b *beater) beat(done <-chan struct{}) {
 	switch {
 	case IsNotFound(err):
 		b.logger.Printf("Worker not found at heartbeat, registering again")
+		// worker.register isn't logged on the server, so it can't be
+		// refused outcome_pending: resending it is always safe.
 		if err := b.wc.Register(b.reg); err != nil {
 			b.logger.Printf("Warning: failed to re-register worker: %v", err)
 			return
