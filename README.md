@@ -386,7 +386,11 @@ The workers are different: their registration, group join and polls are
 theirs to retry. On `shard_halted` they wait, from 100 ms up to 30 s, logging
 a warning with the server's message each time, and carry on by themselves once
 the shard is repaired; a stop or drain ends the wait. A worker started during a
-halt comes up once it's over.
+halt comes up once it's over. An `outcome_pending` on any of them ends `Start`
+with that refusal after its one send: the call committed, and sending it again
+would write it twice or halt the shard again. Results and acks (complete, fail,
+stream ack) refused by a halted shard aren't resent either; the task or record
+comes back by its own timeout.
 
 A halted shard still answers reads, from its state just before the entry it
 halted at. Such a read succeeds with `Stale` set on its result (`GetResult`,

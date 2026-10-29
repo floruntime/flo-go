@@ -364,6 +364,9 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 			}
 			break
 		}
+		if IsOutcomePending(err) {
+			return err
+		}
 		sw.logger.Printf("Warning: failed to register in worker registry: %v", err)
 		break
 	}
@@ -511,6 +514,11 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 						sw.logger.Printf("[%s] Reconnect failed: %v, retrying...", stream, reconErr)
 					}
 					sleepCtx(sw.pollCtx, time.Second)
+				} else if IsOutcomePending(err) {
+					// Reading again would resend it; the worker stops.
+					sw.logger.Printf("Error: [%s] group read committed but not applied, stopping: %v", stream, err)
+					sw.cancel()
+					return err
 				} else if !waitIfHalted(sw.pollCtx, sw.logger, "["+stream+"] group read", err, &halted) {
 					d := failed.next()
 					sw.logger.Printf("[%s] GroupRead error: %v, retrying in %v...", stream, err, d)

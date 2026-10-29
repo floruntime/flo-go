@@ -38,6 +38,10 @@ const (
 	MaxKeySize       = 64 * 1024        // 64 KB
 	MaxValueSize     = 16 * 1024 * 1024 // 16 MB practical limit
 
+	// maxAnswerData is the most data one answer carries: the server's
+	// largest answer frame, 256 KiB, less its header.
+	maxAnswerData = 256*1024 - HeaderSize
+
 	// MaxBlockMS is the longest blocking wait (BlockMS) the server accepts.
 	MaxBlockMS uint32 = 300000 // 5 minutes
 

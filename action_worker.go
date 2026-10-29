@@ -380,6 +380,13 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 					if waitIfHalted(pollCtx, w.logger, "await", err, &halted) {
 						continue
 					}
+					if IsOutcomePending(err) {
+						// Polling again would resend it; the worker stops.
+						w.logger.Printf("Error: await committed but not applied, stopping: %v", err)
+						w.cancel()
+						w.wg.Wait()
+						return err
+					}
 					d := failed.next()
 					w.logger.Printf("Await error: %v, retrying in %v...", err, d)
 					sleepCtx(pollCtx, d)

@@ -116,13 +116,15 @@ func newHaltedBackoff() backoff {
 	return backoff{initial: workerInitialBackoff, max: haltedMaxBackoff}
 }
 
-// waitIfHalted reports whether err is a halted shard's refusal, and if so
-// warns and waits the next backoff, or until ctx ends. A worker's
-// registration, group join and polls are retried this way until the shard
-// is repaired, unlike a client's own requests, which return the refusal.
+// waitIfHalted reports whether err is a halted shard's refusal of a request
+// it didn't run, and if so warns and waits the next backoff, or until ctx
+// ends. A worker's registration, group join and polls are retried this way
+// until the shard is repaired, unlike a client's own requests, which return
+// the refusal. An outcome_pending is not waited on: that request committed,
+// and resending it would write it twice, or halt the shard again.
 func waitIfHalted(ctx context.Context, logger Logger, what string, err error, b *backoff) bool {
 	var se *ServerError
-	if !errors.As(err, &se) || se.Reason != ReasonShardHalted {
+	if !errors.As(err, &se) || se.Status != StatusUnavailable || se.Ran != RanNo || se.Reason != ReasonShardHalted {
 		return false
 	}
 	d := b.next()
