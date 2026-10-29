@@ -10,7 +10,8 @@ type KVClient struct {
 }
 
 // Get retrieves the value and version for a key. It returns nil if the
-// key is not found, also when a wait (WaitMs) ends without it.
+// key is not found, also when a wait (WaitMs) ends without it; from a halted
+// shard, a missing key is ErrStaleNotFound instead.
 func (kv *KVClient) Get(key string, opts *GetOptions) (*GetResult, error) {
 	if opts == nil {
 		opts = &GetOptions{}
@@ -27,10 +28,15 @@ func (c *Client) kvGet(namespace, key string, opts *GetOptions, txn *uint64) (*G
 	if err != nil {
 		return nil, err
 	}
-	if gone, err := absent(resp); gone || err != nil {
+	if gone, err := absentNow(resp); gone || err != nil {
 		return nil, err
 	}
-	return decodeGetAnswer(resp.Data)
+	got, err := decodeGetAnswer(resp.Data)
+	if err != nil {
+		return nil, err
+	}
+	got.Stale = resp.Stale
+	return got, nil
 }
 
 // Put sets a key-value pair and returns the new version assigned by the
@@ -102,6 +108,7 @@ func (kv *KVClient) MGet(keys []string, opts *KVMGetOptions) ([]MGetEntry, error
 		}
 		for i, e := range got.entries {
 			e.Key = rest[i]
+			e.Stale = resp.Stale
 			out = append(out, e)
 		}
 	}
@@ -153,12 +160,19 @@ func (kv *KVClient) Scan(prefix string, opts *ScanOptions) (*ScanResult, error) 
 	if err != nil {
 		return nil, err
 	}
-	return decodeScanAnswer(resp.Data)
+	got, err := decodeScanAnswer(resp.Data)
+	if err != nil {
+		return nil, err
+	}
+	got.Stale = resp.Stale
+	return got, nil
 }
 
-// History returns a key's versions, newest first: Limit of them (default
-// 10, at most MaxHistoryLimit). A missing key has none.
-func (kv *KVClient) History(key string, opts *HistoryOptions) ([]VersionEntry, error) {
+// History returns a page of a key's versions, newest first: Limit of them
+// (default 10, at most MaxHistoryLimit), older than BeforeVersion when it is
+// set. When the result's More is set, older versions follow: pass the last
+// version's number as the next call's BeforeVersion. A missing key has none.
+func (kv *KVClient) History(key string, opts *HistoryOptions) (*HistoryResult, error) {
 	if opts == nil {
 		opts = &HistoryOptions{}
 	}
@@ -166,7 +180,7 @@ func (kv *KVClient) History(key string, opts *HistoryOptions) ([]VersionEntry, e
 	if opts.Limit != nil {
 		limit = *opts.Limit
 	}
-	body, err := encodeHistoryBody(limit, opts.RoutingKey)
+	body, err := encodeHistoryBody(limit, opts.BeforeVersion, opts.RoutingKey)
 	if err != nil {
 		return nil, err
 	}
@@ -175,9 +189,17 @@ func (kv *KVClient) History(key string, opts *HistoryOptions) ([]VersionEntry, e
 		return nil, err
 	}
 	if gone, err := absent(resp); gone || err != nil {
-		return []VersionEntry{}, err
+		if err != nil {
+			return nil, err
+		}
+		return &HistoryResult{Versions: []VersionEntry{}, Stale: resp.Stale}, nil
 	}
-	return decodeHistoryAnswer(resp.Data)
+	got, err := decodeHistoryAnswer(resp.Data)
+	if err != nil {
+		return nil, err
+	}
+	got.Stale = resp.Stale
+	return got, nil
 }
 
 // KVIncrOptions contains options for KV Incr operations.
@@ -257,23 +279,28 @@ type KVExistsOptions struct {
 
 // Exists reports whether the key is present, without transferring its
 // value.
-func (kv *KVClient) Exists(key string, opts *KVExistsOptions) (bool, error) {
+func (kv *KVClient) Exists(key string, opts *KVExistsOptions) (ExistsResult, error) {
 	if opts == nil {
 		opts = &KVExistsOptions{}
 	}
 	return kv.client.kvExists(kv.client.getNamespace(opts.Namespace), key, opts.RoutingKey, nil)
 }
 
-func (c *Client) kvExists(namespace, key, routingKey string, txn *uint64) (bool, error) {
+func (c *Client) kvExists(namespace, key, routingKey string, txn *uint64) (ExistsResult, error) {
 	body, err := encodeExistsBody(routingKey, txn)
 	if err != nil {
-		return false, err
+		return ExistsResult{}, err
 	}
 	resp, err := c.sendAndCheck(OpKVExists, namespace, []byte(key), body, nil, false)
 	if err != nil {
-		return false, err
+		return ExistsResult{}, err
 	}
-	return decodeExistsAnswer(resp.Data)
+	got, err := decodeExistsAnswer(resp.Data)
+	if err != nil {
+		return ExistsResult{}, err
+	}
+	got.Stale = resp.Stale
+	return got, nil
 }
 
 // KVJsonOptions contains options for JSON operations.
@@ -285,7 +312,8 @@ type KVJsonOptions struct {
 
 // JsonGet reads the value at a JSONPath ("" means the root, "$") inside
 // the JSON document stored at key. It returns nil if the key or path is not
-// found. The result carries the document's version, for a CAS Put.
+// found, or ErrStaleNotFound when a halted shard answered. The result
+// carries the document's version, for a CAS Put.
 func (kv *KVClient) JsonGet(key, path string, opts *KVJsonOptions) (*GetResult, error) {
 	if opts == nil {
 		opts = &KVJsonOptions{}
@@ -298,10 +326,15 @@ func (kv *KVClient) JsonGet(key, path string, opts *KVJsonOptions) (*GetResult, 
 	if err != nil {
 		return nil, err
 	}
-	if gone, err := absent(resp); gone || err != nil {
+	if gone, err := absentNow(resp); gone || err != nil {
 		return nil, err
 	}
-	return decodeJSONGetAnswer(resp.Data)
+	got, err := decodeJSONGetAnswer(resp.Data)
+	if err != nil {
+		return nil, err
+	}
+	got.Stale = resp.Stale
+	return got, nil
 }
 
 // JsonSet writes jsonValue at path ("" means the root, "$") inside the JSON

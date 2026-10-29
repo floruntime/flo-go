@@ -171,9 +171,9 @@ func (t *KVTransaction) Expire(key string, ttlMs uint64, opts *KVTxnCASOptions) 
 
 // Exists checks key existence inside the transaction, seeing its own
 // buffered writes.
-func (t *KVTransaction) Exists(key string) (bool, error) {
+func (t *KVTransaction) Exists(key string) (ExistsResult, error) {
 	if t.done {
-		return false, errTxnFinished
+		return ExistsResult{}, errTxnFinished
 	}
 	return t.client.kvExists(t.namespace, key, t.routingKey, &t.id)
 }
@@ -204,7 +204,7 @@ func (t *KVTransaction) JsonDel(key, path string, opts *KVJsonOptions) (*PutResu
 }
 
 // History is not supported inside a transaction.
-func (t *KVTransaction) History(key string, opts *HistoryOptions) ([]VersionEntry, error) {
+func (t *KVTransaction) History(key string, opts *HistoryOptions) (*HistoryResult, error) {
 	return nil, ErrTxnUnsupportedOp
 }
 

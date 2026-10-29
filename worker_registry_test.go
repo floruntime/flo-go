@@ -53,21 +53,21 @@ func workerListAnswer(cursor *string, rows ...[]byte) []byte {
 }
 
 func TestWorkerListEncodesLimitAndCursor(t *testing.T) {
-	body, err := encodeWorkerListBody(25, []byte("w-07"))
+	body, err := encodeWorkerListBody(25, []byte("w-07"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []byte{1, 25, 0, 0, 0, 4, 0, 'w', '-', '0', '7'}; !bytes.Equal(body, want) {
+	if want := []byte{1, 25, 0, 0, 0, 4, 0, 'w', '-', '0', '7', 0, 0}; !bytes.Equal(body, want) {
 		t.Errorf("body % x, want % x", body, want)
 	}
-	body, _ = encodeWorkerListBody(0, nil)
-	if want := []byte{1, 0, 4, 0, 0, 0, 0}; !bytes.Equal(body, want) {
-		t.Errorf("default body % x, want % x", body, want)
+	body, _ = encodeWorkerListBody(0, nil, "resize")
+	if want := []byte{1, 0, 4, 0, 0, 0, 0, 6, 0, 'r', 'e', 's', 'i', 'z', 'e'}; !bytes.Equal(body, want) {
+		t.Errorf("filtered default body % x, want % x", body, want)
 	}
-	if _, err := encodeWorkerListBody(MaxWorkerListLimit+1, nil); err == nil {
+	if _, err := encodeWorkerListBody(MaxWorkerListLimit+1, nil, ""); err == nil {
 		t.Error("limit past the most was sent")
 	}
-	if _, err := encodeWorkerListBody(1, make([]byte, maxWorkerID+1)); err == nil {
+	if _, err := encodeWorkerListBody(1, make([]byte, maxWorkerID+1), ""); err == nil {
 		t.Error("cursor past the longest id was sent")
 	}
 	if !isTableOp(OpWorkerList) {
@@ -132,9 +132,103 @@ func TestListWorkersSendsATableRequest(t *testing.T) {
 	if len(frames) != 1 {
 		t.Fatalf("sent %d worker.list requests", len(frames))
 	}
-	want := []byte{2, 0, 'n', 's', 0, 0, 1, 2, 0, 0, 0, 3, 0, 'w', '-', '0'}
+	want := []byte{2, 0, 'n', 's', 0, 0, 1, 2, 0, 0, 0, 3, 0, 'w', '-', '0', 0, 0}
 	if got := frames[0][HeaderSize:]; !bytes.Equal(got, want) {
 		t.Errorf("payload % x, want % x", got, want)
+	}
+}
+
+// processRow is one worker.info process row as the server encodes it.
+func processRow(name string, kind ProcessKind, runs, fails uint64, lastRun int64) []byte {
+	b := binary.LittleEndian.AppendUint16(nil, uint16(len(name)))
+	b = append(append(b, name...), byte(kind))
+	b = binary.LittleEndian.AppendUint64(b, runs)
+	b = binary.LittleEndian.AppendUint64(b, fails)
+	return binary.LittleEndian.AppendUint64(b, uint64(lastRun))
+}
+
+func workerInfoAnswer(row []byte, metadata *string, processes ...[]byte) []byte {
+	b := append([]byte{}, row...)
+	if metadata == nil {
+		b = append(b, 0)
+	} else {
+		b = append(binary.LittleEndian.AppendUint16(append(b, 1), uint16(len(*metadata))), *metadata...)
+	}
+	b = binary.LittleEndian.AppendUint16(b, uint16(len(processes)))
+	for _, p := range processes {
+		b = append(b, p...)
+	}
+	return b
+}
+
+func TestWorkerInfoDecodesRowMetadataAndProcesses(t *testing.T) {
+	host, meta := "host-a", `{"zone":"a"}`
+	got, err := decodeWorkerInfoAnswer(workerInfoAnswer(workerRow("w-1", WorkerTypeAction, WorkerStatusActive, 3, &host), &meta,
+		processRow("resize", ProcessKindAction, 7, 1, 1500),
+		processRow("events/g", ProcessKindStreamConsumer, 0, 0, 0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := WorkerDetails{
+		Worker:   WorkerInfo{ID: "w-1", Type: WorkerTypeAction, Status: WorkerStatusActive, CurrentLoad: 3, MaxConcurrency: 8, TasksCompleted: 5, TasksFailed: 2, RegisteredAtMS: 1000, LastHeartbeatMS: 2000, MachineID: "host-a"},
+		Metadata: meta,
+		Processes: []WorkerProcess{
+			{Name: "resize", Kind: ProcessKindAction, RunCount: 7, FailCount: 1, LastRunAtMS: 1500},
+			{Name: "events/g", Kind: ProcessKindStreamConsumer},
+		},
+	}
+	if got.Worker != want.Worker || got.Metadata != want.Metadata || !slices.Equal(got.Processes, want.Processes) {
+		t.Fatalf("decoded %+v, want %+v", got, want)
+	}
+
+	bare, err := decodeWorkerInfoAnswer(workerInfoAnswer(workerRow("w-2", WorkerTypeStream, WorkerStatusIdle, 0, nil), nil))
+	if err != nil || bare.Worker.ID != "w-2" || bare.Worker.MachineID != "" || bare.Metadata != "" || len(bare.Processes) != 0 {
+		t.Fatalf("no metadata or processes: %+v, %v", bare, err)
+	}
+}
+
+func TestWorkerInfoRefusesACutAnswerAndUnknownKind(t *testing.T) {
+	meta := "m"
+	whole := workerInfoAnswer(workerRow("w", WorkerTypeAction, WorkerStatusIdle, 0, nil), &meta, processRow("p", ProcessKindAction, 1, 0, 9))
+	for n := range whole {
+		if _, err := decodeWorkerInfoAnswer(whole[:n]); !errors.Is(err, ErrIncompleteResponse) {
+			t.Fatalf("cut at %d: %v", n, err)
+		}
+	}
+	if _, err := decodeWorkerInfoAnswer(append(whole, 0)); !errors.Is(err, ErrIncompleteResponse) {
+		t.Errorf("trailing byte: %v", err)
+	}
+	bad := workerInfoAnswer(workerRow("w", WorkerTypeAction, WorkerStatusIdle, 0, nil), nil, processRow("p", ProcessKind(2), 0, 0, 0))
+	if _, err := decodeWorkerInfoAnswer(bad); !errors.Is(err, ErrIncompleteResponse) {
+		t.Errorf("unknown process kind: %v", err)
+	}
+}
+
+// WorkerInfo sends [namespace][worker id] and no body, and a missing worker
+// is not found.
+func TestWorkerInfoSendsATableRequest(t *testing.T) {
+	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
+		if n == 0 {
+			return reply{body: workerInfoAnswer(workerRow("w-1", WorkerTypeAction, WorkerStatusIdle, 0, nil), nil)}
+		}
+		return notFound("worker not found")
+	})
+	c := NewClient(addr, WithNamespace("ns"), WithTimeout(time.Second))
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	got, err := c.WorkerInfo("w-1", nil)
+	if err != nil || got.Worker.ID != "w-1" {
+		t.Fatalf("info %+v, %v", got, err)
+	}
+	frames := s.got(OpWorkerInfo)
+	want := []byte{2, 0, 'n', 's', 3, 0, 'w', '-', '1'}
+	if len(frames) != 1 || !bytes.Equal(frames[0][HeaderSize:], want) {
+		t.Fatalf("sent %d requests, first payload % x, want % x", len(frames), frames, want)
+	}
+	if _, err := c.WorkerInfo("gone", nil); !IsNotFound(err) {
+		t.Errorf("missing worker: %v, want not found", err)
 	}
 }
 

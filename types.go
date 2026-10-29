@@ -23,7 +23,7 @@ import (
 // Protocol constants
 const (
 	Magic      uint32 = 0x004F4C46 // "FLO\0" in little-endian
-	Version    uint8  = 0x02
+	Version    uint8  = 0x03
 	HeaderSize        = 32
 
 	// TableHash is the hash of the op table this SDK was built for, written
@@ -31,7 +31,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0x2fba7dd9ae941830
+	TableHash uint64 = 0x05fe53f432e943c4
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -192,7 +192,14 @@ const (
 	StatusOverloaded           StatusCode = 10
 	StatusRateLimited          StatusCode = 11 // Request rate limit exceeded (WebSocket)
 	StatusUnavailable          StatusCode = 12 // No leader, or the shard isn't taking writes; retryable
+	// StatusOutcomePending: the write committed but hasn't applied, because
+	// its shard halted at or before it. Never resend it unchanged.
+	StatusOutcomePending StatusCode = 13
 )
+
+// ResponseStale is the answer flag a halted shard sets on a read it serves
+// from the state just before the entry it halted at.
+const ResponseStale uint8 = 0x01
 
 // String returns a human-readable message for the status code.
 func (s StatusCode) String() string {
@@ -223,6 +230,8 @@ func (s StatusCode) String() string {
 		return "Request rate limit exceeded"
 	case StatusUnavailable:
 		return "Unavailable: no leader or the shard isn't taking writes; retry"
+	case StatusOutcomePending:
+		return "Committed, not applied: its shard halted; don't resend it unchanged"
 	default:
 		return fmt.Sprintf("Unknown status %d", uint8(s))
 	}
@@ -272,14 +281,35 @@ const (
 type ScanResult struct {
 	Keys   []string
 	Cursor []byte
+	// Stale: a halted shard answered, from its state before the halt.
+	Stale bool
+}
+
+// HistoryResult is one page of a key's versions, newest first.
+type HistoryResult struct {
+	Versions []VersionEntry
+	// More says older versions follow: ask again with BeforeVersion set to
+	// the last version here.
+	More bool
+	// Stale: a halted shard answered, from its state before the halt.
+	Stale bool
+}
+
+// ExistsResult says whether a key is present.
+type ExistsResult struct {
+	Exists bool
+	// Stale: a halted shard answered, from its state before the halt.
+	Stale bool
 }
 
 // VersionEntry is one version of a key from History.
 type VersionEntry struct {
 	Version uint64
 	// AtMs is when the version was written, in Unix milliseconds.
-	AtMs  int64
-	Value []byte
+	AtMs int64
+	// Deleted is set on the version a delete wrote.
+	Deleted bool
+	Value   []byte
 }
 
 // IncrResult is a counter's value and version after an Incr.
@@ -308,6 +338,12 @@ type KVCommitResult struct {
 type GetResult struct {
 	Value   []byte
 	Version uint64
+	// ExpiresAtMs is when the key's TTL runs out, in Unix milliseconds; nil
+	// when it has none, and always nil from JsonGet.
+	ExpiresAtMs *int64
+	// Stale: a halted shard answered, from its state just before the entry
+	// it halted at. The read succeeded; writes since aren't in it.
+	Stale bool
 }
 
 // MGetEntry is one entry in an MGet response. Found is false when the key did
@@ -317,6 +353,8 @@ type MGetEntry struct {
 	Value   []byte
 	Version uint64
 	Found   bool
+	// Stale: a halted shard answered, from its state before the halt.
+	Stale bool
 }
 
 // KVMGetOptions contains options for KV MGet operations.
@@ -414,6 +452,9 @@ type HistoryOptions struct {
 	Namespace string
 	// Limit is the most versions returned: 1..MaxHistoryLimit, default 10.
 	Limit *uint32
+	// BeforeVersion, when set, returns only versions older than it: the
+	// previous page's last version reads the next page.
+	BeforeVersion *uint64
 	// RoutingKey routes the request in place of the key.
 	RoutingKey string
 }
@@ -792,6 +833,8 @@ type WorkerListOptions struct {
 	Limit uint32
 	// Cursor is the previous page's Cursor; nil starts from the first worker.
 	Cursor []byte
+	// Action, when set, lists only the workers that run this action.
+	Action string
 }
 
 // WorkerListResult is one page of a namespace's workers, in id order.
@@ -838,6 +881,23 @@ type WorkerInfo struct {
 	RegisteredAtMS  int64
 	LastHeartbeatMS int64
 	MachineID       string // "" when the worker gave none
+}
+
+// WorkerDetails is one worker's record, from Client.WorkerInfo.
+type WorkerDetails struct {
+	Worker WorkerInfo
+	// Metadata is what the worker registered with; "" when it gave none.
+	Metadata  string
+	Processes []WorkerProcess
+}
+
+// WorkerProcess is one process a worker registered, with its counts.
+type WorkerProcess struct {
+	Name        string
+	Kind        ProcessKind
+	RunCount    uint64
+	FailCount   uint64
+	LastRunAtMS int64 // 0 before its first run
 }
 
 // =============================================================================
@@ -1043,6 +1103,10 @@ const (
 	ReasonWorkerUnhealthy Reason = 27
 	// ReasonWorkerDraining: an await from a worker that is draining.
 	ReasonWorkerDraining Reason = 28
+	// ReasonShardHalted: the shard halted at an entry and takes no writes
+	// until an operator repairs it. With StatusUnavailable the write didn't
+	// run; with StatusOutcomePending it committed and waits on the repair.
+	ReasonShardHalted Reason = 29
 )
 
 var reasonNames = map[Reason]string{
@@ -1056,6 +1120,7 @@ var reasonNames = map[Reason]string{
 	ReasonConflictingFields: "conflicting_fields", ReasonWritesStopped: "writes_stopped", ReasonTooManyProposals: "too_many_proposals",
 	ReasonWrongType: "wrong_type", ReasonTooManyTransactions: "too_many_transactions",
 	ReasonStaleReport: "stale_report", ReasonWorkerUnhealthy: "worker_unhealthy", ReasonWorkerDraining: "worker_draining",
+	ReasonShardHalted: "shard_halted",
 }
 
 func (r Reason) String() string {

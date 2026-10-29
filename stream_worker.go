@@ -350,8 +350,22 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 	// Whatever the registration's answer: one whose answer was lost, or a
 	// drain's reconnect, still registers the worker.
 	defer sendOnPoll(sw.client, sw.closeCtx, func() error { return wc.Deregister(nil) })
-	if err := wc.Register(regOpts); err != nil {
+	// A halted shard holds the start until it's repaired, or a stop or
+	// drain ends the wait.
+	halted := newHaltedBackoff()
+	for {
+		err := wc.Register(regOpts)
+		if err == nil {
+			break
+		}
+		if waitIfHalted(sw.pollCtx, sw.logger, "worker registration", err, &halted) {
+			if sw.pollCtx.Err() == nil {
+				continue
+			}
+			break
+		}
 		sw.logger.Printf("Warning: failed to register in worker registry: %v", err)
+		break
 	}
 
 	// Heartbeats go on until Start returns, so a draining worker's handlers
@@ -432,6 +446,7 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 func (sw *StreamWorker) joinGroups() error {
 	for _, stream := range sw.streams {
 		failed := newWorkerBackoff()
+		halted := newHaltedBackoff()
 		for {
 			if sw.pollCtx.Err() != nil {
 				return sw.ctx.Err()
@@ -439,6 +454,9 @@ func (sw *StreamWorker) joinGroups() error {
 			err := sw.client.Stream.GroupJoin(stream, sw.config.Group, sw.config.Consumer, nil)
 			if err == nil {
 				break
+			}
+			if waitIfHalted(sw.pollCtx, sw.logger, "["+stream+"] group join", err, &halted) {
+				continue
 			}
 			if isRefusedUnrun(err) {
 				d := failed.next()
@@ -463,6 +481,7 @@ func (sw *StreamWorker) joinGroups() error {
 func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 	var backoff emptyPollBackoff
 	failed := newWorkerBackoff()
+	halted := newHaltedBackoff()
 	for {
 		select {
 		case <-sw.ctx.Done():
@@ -492,7 +511,7 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 						sw.logger.Printf("[%s] Reconnect failed: %v, retrying...", stream, reconErr)
 					}
 					sleepCtx(sw.pollCtx, time.Second)
-				} else {
+				} else if !waitIfHalted(sw.pollCtx, sw.logger, "["+stream+"] group read", err, &halted) {
 					d := failed.next()
 					sw.logger.Printf("[%s] GroupRead error: %v, retrying in %v...", stream, err, d)
 					sleepCtx(sw.pollCtx, d)
@@ -500,6 +519,7 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 				continue
 			}
 			failed.reset()
+			halted.reset()
 
 			if result == nil || len(result.Records) == 0 {
 				backoff.afterEmpty(sw.pollCtx, polled, sw.config.BlockMS)
@@ -719,8 +739,10 @@ func (sw *StreamWorker) reconnectAck() error {
 
 // Drain stops reading new records and lets running handlers finish and ack,
 // then Start leaves the groups and returns nil. The server is told; the
-// notice is retried while the worker is disconnected. A Stop during a drain
-// still cancels the running handlers.
+// notice is retried while the worker is disconnected. A held GroupRead
+// doesn't hold it up: the poll connection is closed, since the server
+// doesn't answer it on a drain. A Stop during a drain still cancels the
+// running handlers.
 func (sw *StreamWorker) Drain() {
 	sw.logger.Printf("Draining stream worker...")
 	// Unblock an in-flight GroupRead, as Stop does; with no run, the next

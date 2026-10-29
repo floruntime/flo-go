@@ -26,7 +26,7 @@ var (
 	// ErrTableMismatch matches a *TableMismatchError.
 	ErrTableMismatch = errors.New("flo: server built from another protocol version or op table")
 
-	// ErrInvalidChecksum indicates a CRC32 checksum validation failure.
+	// ErrInvalidChecksum indicates a CRC32C checksum validation failure.
 	ErrInvalidChecksum = errors.New("flo: invalid checksum")
 
 	// ErrIncompleteResponse indicates an incomplete response.
@@ -40,6 +40,12 @@ var (
 
 	// ErrValueTooLarge indicates the value exceeds maximum size.
 	ErrValueTooLarge = errors.New("flo: value too large (max 16 MB)")
+
+	// ErrStaleNotFound: a halted shard answered that the key doesn't exist
+	// as of the entry it halted at; it may exist since. Get and JsonGet
+	// return it wrapped with the server's not-found refusal, so IsNotFound
+	// and IsStale both report it.
+	ErrStaleNotFound = errors.New("flo: not found as of a halted shard's state")
 
 	// ErrBlockTooLong indicates a BlockMS over MaxBlockMS. The server refuses
 	// it with bad_request, so the SDK refuses it first.
@@ -94,13 +100,20 @@ var (
 	ErrOverloaded = &ServerError{Status: StatusOverloaded}
 
 	// ErrUnavailable indicates the write reached no leader, or the shard
-	// stopped taking writes or is offline. Retryable, but an offline shard
-	// stays unavailable until an operator acts; the server's message says
-	// which case it is.
+	// stopped taking writes, is offline or halted. Retryable, but an offline
+	// or halted shard stays unavailable until an operator acts; the
+	// server's message says which case it is. One with ReasonShardHalted
+	// is never retried automatically.
 	ErrUnavailable = &ServerError{Status: StatusUnavailable}
 
 	// ErrInternal indicates an internal server error.
 	ErrInternal = &ServerError{Status: StatusInternalError}
+
+	// ErrOutcomePending matches a write that committed but hasn't applied,
+	// because its shard halted; the message says whether it applies when
+	// the shard resumes. It is never retried: resending it would write it
+	// twice, or halt again.
+	ErrOutcomePending = &ServerError{Status: StatusOutcomePending}
 )
 
 // newServerError reads a refusal's body: [reason:u16][ran:u8][message].
@@ -219,9 +232,29 @@ func IsOverloaded(err error) bool {
 }
 
 // IsUnavailable returns true if the error is an unavailable error: no leader,
-// or the shard isn't taking writes. Retryable, like overloaded.
+// or the shard isn't taking writes. Retryable, like overloaded, unless
+// IsShardHalted.
 func IsUnavailable(err error) bool {
 	return errors.Is(err, ErrUnavailable)
+}
+
+// IsStale reports a not-found answer from a halted shard (ErrStaleNotFound).
+func IsStale(err error) bool {
+	return errors.Is(err, ErrStaleNotFound)
+}
+
+// IsOutcomePending reports a write that committed but hasn't applied
+// because its shard halted. Don't resend it unchanged.
+func IsOutcomePending(err error) bool {
+	return errors.Is(err, ErrOutcomePending)
+}
+
+// IsShardHalted reports a refusal from a halted shard: an unavailable write
+// that didn't run, or an outcome-pending one. Neither is retried; the
+// shard takes no writes until an operator repairs it.
+func IsShardHalted(err error) bool {
+	var se *ServerError
+	return errors.As(err, &se) && se.Reason == ReasonShardHalted
 }
 
 // IsInternal returns true if the error is an internal server error. Not

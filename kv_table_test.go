@@ -122,11 +122,11 @@ func TestOutOfBoundFieldsAreRefusedBeforeARoundTrip(t *testing.T) {
 }
 
 func TestAnswersDecodeWhole(t *testing.T) {
-	got, err := decodeGetAnswer(cat(u64le(4), []byte{2, 0, 0, 0}, []byte("hi")))
-	if err != nil || got.Version != 4 || string(got.Value) != "hi" {
+	got, err := decodeGetAnswer(cat(u64le(4), []byte{2, 0, 0, 0}, []byte("hi"), []byte{0}))
+	if err != nil || got.Version != 4 || string(got.Value) != "hi" || got.ExpiresAtMs != nil {
 		t.Errorf("get answer = %+v, %v", got, err)
 	}
-	for _, bad := range [][]byte{nil, cat(u64le(4), []byte{3, 0, 0, 0}, []byte("hi")), cat(u64le(4), []byte{1, 0, 0, 0}, []byte("hi"))} {
+	for _, bad := range [][]byte{nil, cat(u64le(4), []byte{3, 0, 0, 0}, []byte("hi"), []byte{0}), cat(u64le(4), []byte{1, 0, 0, 0}, []byte("hi"), []byte{0})} {
 		if _, err := decodeGetAnswer(bad); !errors.Is(err, ErrIncompleteResponse) {
 			t.Errorf("get answer % x: %v, want ErrIncompleteResponse", bad, err)
 		}

@@ -42,8 +42,9 @@ func TestKVRequestBodiesMatchTheServer(t *testing.T) {
 	}{
 		{"delete", enc(encodeDeleteBody(&cas, "rk", nil)), "010700000000000000010200726b00"},
 		{"scan", enc(encodeScanBody(2, []byte("c1"))), "0102000000026331"},
-		{"history", enc(encodeHistoryBody(2, "")), "010200000000"},
-		{"history with routing key", enc(encodeHistoryBody(2, "rk")), "0102000000010200726b"},
+		{"history", enc(encodeHistoryBody(2, nil, "")), "01020000000000"},
+		{"history before a version", enc(encodeHistoryBody(2, Uint64Ptr(5), "")), "0102000000010500000000000000" + "00"},
+		{"history with routing key", enc(encodeHistoryBody(2, nil, "rk")), "010200000000010200726b"},
 		{"mget", enc(encodeMGetBody([]string{"a", "b"}, "")), "020001006101006200"},
 		{"mget with routing key", enc(encodeMGetBody([]string{"a", "b"}, "rk")), "0200010061010062010200726b"},
 		{"incr", enc(encodeIncrBody(-5, "", &txn9)), "01fbffffffffffffff00010900000000000000"},
@@ -82,8 +83,16 @@ func TestKVAnswersMatchTheServer(t *testing.T) {
 	scan, err = decodeScanAnswer(hx(t, "000000"))
 	check("last scan", scan, &ScanResult{Keys: []string{}}, err)
 
-	hist, err := decodeHistoryAnswer(hx(t, "010300000000000000e803000000000000020000007633"))
-	check("history", hist, []VersionEntry{{Version: 3, AtMs: 1000, Value: []byte("v3")}}, err)
+	get, err := decodeGetAnswer(hx(t, "0400000000000000020000006869"+"00"))
+	check("get", get, &GetResult{Version: 4, Value: []byte("hi")}, err)
+	expires := int64(1700000000000)
+	get, err = decodeGetAnswer(hx(t, "0400000000000000020000006869"+"010068e5cf8b010000"))
+	check("get with expiry", get, &GetResult{Version: 4, Value: []byte("hi"), ExpiresAtMs: &expires}, err)
+
+	hist, err := decodeHistoryAnswer(hx(t, "010300000000000000e8030000000000000002000000763300"))
+	check("history", hist, &HistoryResult{Versions: []VersionEntry{{Version: 3, AtMs: 1000, Value: []byte("v3")}}}, err)
+	hist, err = decodeHistoryAnswer(hx(t, "02"+"0400000000000000d00700000000000001"+"00000000"+"0300000000000000e80300000000000000"+"020000007633"+"01"))
+	check("history with a delete, and more", hist, &HistoryResult{Versions: []VersionEntry{{Version: 4, AtMs: 2000, Deleted: true, Value: []byte{}}, {Version: 3, AtMs: 1000, Value: []byte("v3")}}, More: true}, err)
 
 	mget, err := decodeMGetAnswer(hx(t, "0200010200000000000000010000007800000000000000000000000000010200"))
 	next := uint16(2)
@@ -97,7 +106,7 @@ func TestKVAnswersMatchTheServer(t *testing.T) {
 	check("expire", nil, nil, decodeEmptyAnswer(nil))
 
 	exists, err := decodeExistsAnswer(hx(t, "010500000000000000"))
-	check("exists", exists, true, err)
+	check("exists", exists, ExistsResult{Exists: true}, err)
 
 	doc, err := decodeJSONGetAnswer(hx(t, "0300000000000000020000007b7d"))
 	check("json_get", doc, &GetResult{Version: 3, Value: []byte("{}")}, err)
@@ -120,9 +129,12 @@ func TestKVAnswersAreDecodedWhole(t *testing.T) {
 		decode func([]byte) error
 		good   string
 	}{
+		// Cut short, "get expiry" ends inside the expiry.
+		"get":        {func(b []byte) error { _, err := decodeGetAnswer(b); return err }, "040000000000000002000000686900"},
+		"get expiry": {func(b []byte) error { _, err := decodeGetAnswer(b); return err }, "040000000000000002000000686901" + "0068e5cf8b010000"},
 		"delete":     {func(b []byte) error { _, err := decodeDeleteAnswer(b); return err }, "0101"},
 		"scan":       {func(b []byte) error { _, err := decodeScanAnswer(b); return err }, "02000100610200626201026332"},
-		"history":    {func(b []byte) error { _, err := decodeHistoryAnswer(b); return err }, "010300000000000000e803000000000000020000007633"},
+		"history":    {func(b []byte) error { _, err := decodeHistoryAnswer(b); return err }, "010300000000000000e8030000000000000002000000763300"},
 		"mget":       {func(b []byte) error { _, err := decodeMGetAnswer(b); return err }, "0200010200000000000000010000007800000000000000000000000000010200"},
 		"incr":       {func(b []byte) error { _, err := decodeIncrAnswer(b); return err }, "010400000000000000012a00000000000000"},
 		"exists":     {func(b []byte) error { _, err := decodeExistsAnswer(b); return err }, "010500000000000000"},
@@ -153,6 +165,15 @@ func TestKVAnswersAreDecodedWhole(t *testing.T) {
 			t.Errorf("delete answer %s: %v", bad, err)
 		}
 	}
+	if _, err := decodeGetAnswer(hx(t, "040000000000000002000000686902")); !errors.Is(err, ErrIncompleteResponse) {
+		t.Errorf("get with expiry presence byte 2: %v", err)
+	}
+	if _, err := decodeHistoryAnswer(hx(t, "010300000000000000e8030000000000000202000000763300")); !errors.Is(err, ErrIncompleteResponse) {
+		t.Errorf("history with deleted byte 2: %v", err)
+	}
+	if _, err := decodeHistoryAnswer(hx(t, "00"+"02")); !errors.Is(err, ErrIncompleteResponse) {
+		t.Errorf("history with more byte 2: %v", err)
+	}
 	// Half an increment answer is malformed.
 	if _, err := decodeIncrAnswer(hx(t, "0104000000000000000000")); !errors.Is(err, ErrIncompleteResponse) {
 		t.Errorf("incr with a version and no value: %v", err)
@@ -162,6 +183,12 @@ func TestKVAnswersAreDecodedWhole(t *testing.T) {
 // tableServer answers each request with the status and data answer returns
 // for its op and payload.
 func tableServer(t *testing.T, answer func(op OpCode, payload []byte) (StatusCode, []byte)) *Client {
+	t.Helper()
+	return flaggedTableServer(t, 0, answer)
+}
+
+// flaggedTableServer is tableServer setting flags on every answer.
+func flaggedTableServer(t *testing.T, flags byte, answer func(op OpCode, payload []byte) (StatusCode, []byte)) *Client {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -190,9 +217,10 @@ func tableServer(t *testing.T, answer func(op OpCode, payload []byte) (StatusCod
 			copy(resp[8:16], header[8:16])
 			resp[20] = Version
 			resp[21] = byte(status)
+			resp[22] = flags
 			binary.LittleEndian.PutUint64(resp[24:32], TableHash)
 			copy(resp[HeaderSize:], data)
-			binary.LittleEndian.PutUint32(resp[16:20], computeCRC32(resp[:HeaderSize], data))
+			binary.LittleEndian.PutUint32(resp[16:20], computeCRC32C(resp[:HeaderSize], data))
 			if _, err := conn.Write(resp); err != nil {
 				return
 			}
@@ -326,7 +354,7 @@ func TestHistoryOfAMissingKeyIsEmpty(t *testing.T) {
 		return StatusNotFound, refusalBody(ReasonNotFound, RanNo, "no such key")
 	})
 	got, err := c.KV.History("gone", nil)
-	if err != nil || got == nil || len(got) != 0 {
+	if err != nil || got == nil || len(got.Versions) != 0 || got.More {
 		t.Errorf("History = %v, %v; want an empty list", got, err)
 	}
 }
@@ -372,7 +400,7 @@ func TestKVOpsSendTheirEnvelopeKey(t *testing.T) {
 			c.KV.Scan("user:", &ScanOptions{Limit: &limit, Cursor: []byte("c1")})
 		}},
 		{"scan defaults its limit", "", hx(t, "010004000000"), func(c *Client) { c.KV.Scan("", nil) }},
-		{"history defaults its limit", "k", hx(t, "010a00000000"), func(c *Client) { c.KV.History("k", nil) }},
+		{"history defaults its limit", "k", hx(t, "010a0000000000"), func(c *Client) { c.KV.History("k", nil) }},
 		{"incr defaults its delta", "k", cat([]byte{1}, u64le(1), []byte{0, 0}), func(c *Client) { c.KV.Incr("k", nil) }},
 		{"expire carries its cas", "k", cat(u64le(0), []byte{1}, u64le(4), []byte{0, 0}), func(c *Client) {
 			c.KV.Expire("k", 0, &KVExpireOptions{CASVersion: Uint64Ptr(4)})
@@ -443,5 +471,134 @@ func TestEveryKVOpIsATableOp(t *testing.T) {
 		if isTableOp(op) != want {
 			t.Errorf("isTableOp(0x%x) = %v", op, !want)
 		}
+	}
+}
+
+// kvReadAnswers answers each KV read with a found key or a page of one.
+func kvReadAnswers(op OpCode, _ []byte) (StatusCode, []byte) {
+	switch op {
+	case OpKVGet:
+		return StatusOK, vector("040000000000000002000000686900")
+	case OpKVMGet:
+		return StatusOK, cat([]byte{1, 0}, mgetEntry(true, 2, "x"), []byte{0})
+	case OpKVScan:
+		return StatusOK, vector("010001006100")
+	case OpKVHistory:
+		return StatusOK, vector("010300000000000000e8030000000000000002000000763300")
+	case OpKVExists:
+		return StatusOK, vector("010500000000000000")
+	case OpKVJsonGet:
+		return StatusOK, vector("0300000000000000020000007b7d")
+	}
+	return StatusBadRequest, refusalBody(ReasonUnknownOp, RanNo, "unexpected op")
+}
+
+// vector decodes a fixed hex vector.
+func vector(s string) []byte {
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// A halted shard's read is a successful read marked stale; every KV read
+// carries the flag, and an unmarked one doesn't.
+func TestKVReadsCarryTheStaleFlag(t *testing.T) {
+	for _, flags := range []byte{0, ResponseStale} {
+		c := flaggedTableServer(t, flags, kvReadAnswers)
+		want := flags == ResponseStale
+		stale := map[string]bool{}
+		errs := map[string]error{}
+		var g *GetResult
+		g, errs["get"] = c.KV.Get("k", nil)
+		if g != nil {
+			stale["get"] = g.Stale
+		}
+		var m []MGetEntry
+		m, errs["mget"] = c.KV.MGet([]string{"k"}, nil)
+		if len(m) == 1 {
+			stale["mget"] = m[0].Stale
+		}
+		var sc *ScanResult
+		sc, errs["scan"] = c.KV.Scan("", nil)
+		if sc != nil {
+			stale["scan"] = sc.Stale
+		}
+		var h *HistoryResult
+		h, errs["history"] = c.KV.History("k", nil)
+		if h != nil {
+			stale["history"] = h.Stale
+		}
+		var e ExistsResult
+		e, errs["exists"] = c.KV.Exists("k", nil)
+		stale["exists"] = e.Stale
+		var j *GetResult
+		j, errs["json_get"] = c.KV.JsonGet("k", "", nil)
+		if j != nil {
+			stale["json_get"] = j.Stale
+		}
+		for name, err := range errs {
+			if err != nil {
+				t.Errorf("flags %d %s: %v", flags, name, err)
+			} else if stale[name] != want {
+				t.Errorf("flags %d %s: stale %v, want %v", flags, name, stale[name], want)
+			}
+		}
+	}
+}
+
+// A flag this SDK doesn't know makes the answer unreadable: refused, and the
+// connection dropped.
+func TestAnUnknownAnswerFlagIsRefused(t *testing.T) {
+	c := flaggedTableServer(t, 0x02, kvReadAnswers)
+	if _, err := c.KV.Get("k", nil); !errors.Is(err, ErrIncompleteResponse) {
+		t.Fatalf("got %v, want ErrIncompleteResponse", err)
+	}
+	if c.IsConnected() {
+		t.Error("still connected after an unreadable answer")
+	}
+}
+
+// A missing key in a halted shard's answer is missing as of the halt, not
+// now: Get and JsonGet return ErrStaleNotFound, and the other reads keep the
+// mark on their empty answer. Unmarked, a missing key is plain absent.
+func TestAMissingKeyFromAHaltedShardIsStale(t *testing.T) {
+	missing := func(op OpCode, _ []byte) (StatusCode, []byte) {
+		switch op {
+		case OpKVMGet:
+			return StatusOK, cat([]byte{1, 0}, mgetEntry(false, 0, ""), []byte{0})
+		case OpKVExists:
+			return StatusOK, vector("000000000000000000")
+		}
+		return StatusNotFound, refusalBody(ReasonNotFound, RanNo, "key not found")
+	}
+	stale := flaggedTableServer(t, ResponseStale, missing)
+	for name, read := range map[string]func() (*GetResult, error){
+		"get":      func() (*GetResult, error) { return stale.KV.Get("k", nil) },
+		"json_get": func() (*GetResult, error) { return stale.KV.JsonGet("k", "", nil) },
+	} {
+		got, err := read()
+		var se *ServerError
+		if got != nil || !IsStale(err) || !IsNotFound(err) || !errors.As(err, &se) || se.Message != "key not found" {
+			t.Errorf("stale %s = %+v, %v; want ErrStaleNotFound with the refusal", name, got, err)
+		}
+	}
+	if m, err := stale.KV.MGet([]string{"k"}, nil); err != nil || len(m) != 1 || m[0].Found || !m[0].Stale {
+		t.Errorf("stale mget = %+v, %v", m, err)
+	}
+	if e, err := stale.KV.Exists("k", nil); err != nil || e.Exists || !e.Stale {
+		t.Errorf("stale exists = %+v, %v", e, err)
+	}
+	if h, err := stale.KV.History("k", nil); err != nil || len(h.Versions) != 0 || !h.Stale {
+		t.Errorf("stale history = %+v, %v", h, err)
+	}
+
+	plain := flaggedTableServer(t, 0, missing)
+	if got, err := plain.KV.Get("k", nil); got != nil || err != nil {
+		t.Errorf("get = %+v, %v; want nil, nil", got, err)
+	}
+	if got, err := plain.KV.JsonGet("k", "", nil); got != nil || err != nil {
+		t.Errorf("json_get = %+v, %v; want nil, nil", got, err)
 	}
 }

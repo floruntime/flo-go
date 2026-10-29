@@ -12,11 +12,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"os"
 	"os/exec"
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -110,6 +112,96 @@ func TestLiveKVPutGetAndMGet(t *testing.T) {
 		if e.Key != w.Key || e.Found != w.Found || !bytes.Equal(e.Value, w.Value) || (e.Found && e.Version == 0) {
 			t.Errorf("mget[%d] = %+v, want %+v (with a version when found)", i, e, w)
 		}
+	}
+}
+
+func TestLiveKVGetShowsTheExpiry(t *testing.T) {
+	c := liveClient(t)
+	ttl := uint64(60000)
+	before := time.Now().UnixMilli()
+	if _, err := c.KV.Put("ttl", []byte("v"), &PutOptions{TTLMs: &ttl}); err != nil {
+		t.Fatal(err)
+	}
+	after := time.Now().UnixMilli()
+	got, err := c.KV.Get("ttl", nil)
+	if err != nil || got == nil || got.ExpiresAtMs == nil {
+		t.Fatalf("get = %+v, %v; want an expiry", got, err)
+	}
+	if at := *got.ExpiresAtMs; at < before+int64(ttl) || at > after+int64(ttl) {
+		t.Errorf("expires at %d, want within [%d, %d]", at, before+int64(ttl), after+int64(ttl))
+	}
+	if _, err := c.KV.Put("plain", []byte("v"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.KV.Get("plain", nil); err != nil || got == nil || got.ExpiresAtMs != nil {
+		t.Errorf("get without a TTL = %+v, %v; want no expiry", got, err)
+	}
+}
+
+func TestLiveKVHistoryMarksTheDelete(t *testing.T) {
+	c := liveClient(t)
+	if _, err := c.KV.Put("k", []byte("one"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.KV.Delete("k", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.KV.Put("k", []byte("two"), nil); err != nil {
+		t.Fatal(err)
+	}
+	page, err := c.KV.History("k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hist := page.Versions
+	if len(hist) != 3 || page.More || hist[0].Deleted || !hist[1].Deleted || hist[2].Deleted ||
+		string(hist[0].Value) != "two" || string(hist[2].Value) != "one" {
+		t.Fatalf("history = %+v; want two, a delete, one", hist)
+	}
+}
+
+// Five versions read two at a time: three pages, newest first, each seen
+// once; before the oldest there is nothing.
+func TestLiveKVHistoryPages(t *testing.T) {
+	c := liveClient(t)
+	var written []uint64
+	for i := 0; i < 5; i++ {
+		r, err := c.KV.Put("k", []byte(strconv.Itoa(i)), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		written = append([]uint64{r.Version}, written...)
+	}
+	limit := uint32(2)
+	var seen []uint64
+	var before *uint64
+	for pages := 1; ; pages++ {
+		page, err := c.KV.History("k", &HistoryOptions{Limit: &limit, BeforeVersion: before})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range page.Versions {
+			seen = append(seen, v.Version)
+		}
+		if !page.More {
+			if pages != 3 {
+				t.Errorf("%d pages, want 3", pages)
+			}
+			break
+		}
+		if pages == 5 || len(page.Versions) == 0 {
+			t.Fatalf("still paging at page %d: %+v", pages, page)
+		}
+		last := page.Versions[len(page.Versions)-1].Version
+		before = &last
+	}
+	if !slices.Equal(seen, written) {
+		t.Errorf("versions %v, want %v", seen, written)
+	}
+	oldest := written[len(written)-1]
+	page, err := c.KV.History("k", &HistoryOptions{BeforeVersion: &oldest})
+	if err != nil || len(page.Versions) != 0 || page.More {
+		t.Errorf("before the oldest: %+v, %v; want an empty last page", page, err)
 	}
 }
 
@@ -353,6 +445,102 @@ func TestLiveListWorkersPagesInIDOrder(t *testing.T) {
 		if w.Type != WorkerTypeStream || w.MaxConcurrency != 4 || w.MachineID != "host-"+w.ID || w.RegisteredAtMS == 0 {
 			t.Errorf("row %+v", w)
 		}
+	}
+}
+
+// WorkerInfo shows a worker's row, metadata and processes as registered; a
+// missing worker is not found.
+func TestLiveWorkerInfoShowsTheRegistration(t *testing.T) {
+	c := liveClient(t)
+	err := c.workerClient("w-info").Register(&WorkerRegisterOptions{
+		WorkerType:     WorkerTypeAction,
+		MaxConcurrency: 3,
+		Processes:      []ProcessEntry{{Name: "resize", Kind: ProcessKindAction}, {Name: "events/g", Kind: ProcessKindStreamConsumer}},
+		Metadata:       `{"zone":"a"}`,
+		MachineID:      "host-info",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.WorkerInfo("w-info", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := got.Worker
+	if w.ID != "w-info" || w.Type != WorkerTypeAction || w.MaxConcurrency != 3 || w.MachineID != "host-info" || w.RegisteredAtMS == 0 {
+		t.Errorf("row %+v", w)
+	}
+	if got.Metadata != `{"zone":"a"}` {
+		t.Errorf("metadata %q", got.Metadata)
+	}
+	want := []WorkerProcess{{Name: "resize", Kind: ProcessKindAction}, {Name: "events/g", Kind: ProcessKindStreamConsumer}}
+	if !slices.Equal(got.Processes, want) {
+		t.Errorf("processes %+v, want %+v", got.Processes, want)
+	}
+	if _, err := c.WorkerInfo("w-missing", nil); !IsNotFound(err) {
+		t.Errorf("missing worker: %v, want not found", err)
+	}
+}
+
+// The server refuses a registration with more processes than worker.info
+// lists; the refusal reaches the caller whole.
+func TestLiveRegisteringTooManyProcessesIsRefused(t *testing.T) {
+	c := liveClient(t)
+	processes := make([]ProcessEntry, 1025)
+	for i := range processes {
+		processes[i] = ProcessEntry{Name: "p" + strconv.Itoa(i), Kind: ProcessKindAction}
+	}
+	err := c.workerClient("w-many").Register(&WorkerRegisterOptions{Processes: processes})
+	var se *ServerError
+	if !errors.As(err, &se) || se.Status != StatusBadRequest || se.Reason != ReasonOutOfRange || se.Ran != RanNo || se.Message != "more than 1024 processes" {
+		t.Fatalf("got %#v (%v), want bad_request/out_of_range, ran no, \"more than 1024 processes\"", se, err)
+	}
+	if _, err := c.WorkerInfo("w-many", nil); !IsNotFound(err) {
+		t.Errorf("refused worker is registered: %v", err)
+	}
+}
+
+// A process name or machine id past the server's bound is refused
+// field_too_long.
+func TestLiveRegisteringTooLongAFieldIsRefused(t *testing.T) {
+	c := liveClient(t)
+	for _, tc := range []struct {
+		opts WorkerRegisterOptions
+		msg  string
+	}{
+		{WorkerRegisterOptions{Processes: []ProcessEntry{{Name: strings.Repeat("p", 4097), Kind: ProcessKindAction}}}, "process name longer than 4096 bytes"},
+		{WorkerRegisterOptions{MachineID: strings.Repeat("m", 256)}, "machine id longer than 255 bytes"},
+	} {
+		err := c.workerClient("w-long").Register(&tc.opts)
+		var se *ServerError
+		if !errors.As(err, &se) || se.Status != StatusBadRequest || se.Reason != ReasonFieldTooLong || se.Ran != RanNo || se.Message != tc.msg {
+			t.Errorf("got %#v (%v), want bad_request/field_too_long, ran no, %q", se, err, tc.msg)
+		}
+	}
+}
+
+// ListWorkers with an Action lists only the workers that run that action.
+func TestLiveListWorkersFiltersByAction(t *testing.T) {
+	c := liveClient(t)
+	for id, p := range map[string]ProcessEntry{
+		"w-resize": {Name: "resize", Kind: ProcessKindAction},
+		"w-thumb":  {Name: "thumb", Kind: ProcessKindAction},
+		"w-stream": {Name: "resize", Kind: ProcessKindStreamConsumer},
+	} {
+		if err := c.workerClient(id).Register(&WorkerRegisterOptions{Processes: []ProcessEntry{p}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := c.ListWorkers(&WorkerListOptions{Action: "resize"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Workers) != 1 || page.Workers[0].ID != "w-resize" {
+		t.Errorf("filtered %+v, want w-resize only", page.Workers)
+	}
+	all, err := c.ListWorkers(nil)
+	if err != nil || len(all.Workers) != 3 {
+		t.Errorf("unfiltered %+v, %v; want all three", all, err)
 	}
 }
 

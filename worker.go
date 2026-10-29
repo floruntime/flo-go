@@ -173,7 +173,7 @@ func (c *Client) ListWorkers(opts *WorkerListOptions) (*WorkerListResult, error)
 	if opts == nil {
 		opts = &WorkerListOptions{}
 	}
-	body, err := encodeWorkerListBody(opts.Limit, opts.Cursor)
+	body, err := encodeWorkerListBody(opts.Limit, opts.Cursor, opts.Action)
 	if err != nil {
 		return nil, err
 	}
@@ -184,8 +184,8 @@ func (c *Client) ListWorkers(opts *WorkerListOptions) (*WorkerListResult, error)
 	return decodeWorkerListAnswer(resp.Data)
 }
 
-// encodeWorkerListBody codes worker.list's request: limit, cursor.
-func encodeWorkerListBody(limit uint32, cursor []byte) ([]byte, error) {
+// encodeWorkerListBody codes worker.list's request: limit, cursor, action.
+func encodeWorkerListBody(limit uint32, cursor []byte, action string) ([]byte, error) {
 	if limit == 0 {
 		limit = MaxWorkerListLimit
 	}
@@ -195,10 +195,14 @@ func encodeWorkerListBody(limit uint32, cursor []byte) ([]byte, error) {
 	if len(cursor) > maxWorkerID {
 		return nil, fmt.Errorf("flo: worker list cursor is %d bytes, at most %d", len(cursor), maxWorkerID)
 	}
-	w := bodyWriter{buf: make([]byte, 0, 7+len(cursor))}
+	if len(action) > maxWorkerID {
+		return nil, fmt.Errorf("flo: worker list action is %d bytes, at most %d", len(action), maxWorkerID)
+	}
+	w := bodyWriter{buf: make([]byte, 0, 9+len(cursor)+len(action))}
 	w.u8(1)
 	w.u32(limit)
 	w.bytes16(cursor)
+	w.bytes16([]byte(action))
 	return w.buf, nil
 }
 
@@ -212,27 +216,83 @@ func decodeWorkerListAnswer(data []byte) (*WorkerListResult, error) {
 	}
 	got := &WorkerListResult{Workers: make([]WorkerInfo, 0, n)}
 	for i := 0; i < n && !r.bad; i++ {
-		wi := WorkerInfo{
-			ID:              string(r.bytes16()),
-			Type:            WorkerType(r.u8()),
-			Status:          WorkerStatus(r.u8()),
-			CurrentLoad:     r.u32(),
-			MaxConcurrency:  r.u32(),
-			TasksCompleted:  r.u64(),
-			TasksFailed:     r.u64(),
-			RegisteredAtMS:  int64(r.u64()),
-			LastHeartbeatMS: int64(r.u64()),
-		}
-		if r.present() {
-			wi.MachineID = string(r.bytes8())
-		}
-		if wi.Type > WorkerTypeStream || wi.Status > WorkerStatusUnhealthy {
-			r.bad = true
-		}
-		got.Workers = append(got.Workers, wi)
+		got.Workers = append(got.Workers, decodeWorkerRow(&r))
 	}
 	if r.present() {
 		got.Cursor = r.bytes16()
+	}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
+}
+
+// decodeWorkerRow reads one worker's row, as worker.list and worker.info
+// both answer it.
+func decodeWorkerRow(r *bodyReader) WorkerInfo {
+	wi := WorkerInfo{
+		ID:              string(r.bytes16()),
+		Type:            WorkerType(r.u8()),
+		Status:          WorkerStatus(r.u8()),
+		CurrentLoad:     r.u32(),
+		MaxConcurrency:  r.u32(),
+		TasksCompleted:  r.u64(),
+		TasksFailed:     r.u64(),
+		RegisteredAtMS:  int64(r.u64()),
+		LastHeartbeatMS: int64(r.u64()),
+	}
+	if r.present() {
+		wi.MachineID = string(r.bytes8())
+	}
+	if wi.Type > WorkerTypeStream || wi.Status > WorkerStatusUnhealthy {
+		r.bad = true
+	}
+	return wi
+}
+
+// maxWorkerProcesses is the most processes a worker registers, and so the
+// most worker.info lists.
+const maxWorkerProcesses = 1024
+
+// WorkerInfo returns one worker's record: its row, the metadata it
+// registered with, and its processes with their counts. A worker the server
+// doesn't hold is an error that IsNotFound reports.
+func (c *Client) WorkerInfo(workerID string, opts *WorkerInfoOptions) (*WorkerDetails, error) {
+	if opts == nil {
+		opts = &WorkerInfoOptions{}
+	}
+	resp, err := c.sendAndCheck(OpWorkerInfo, c.getNamespace(opts.Namespace), []byte(workerID), nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeWorkerInfoAnswer(resp.Data)
+}
+
+// decodeWorkerInfoAnswer reads worker.info's answer: the worker's row,
+// metadata, processes.
+func decodeWorkerInfoAnswer(data []byte) (*WorkerDetails, error) {
+	r := bodyReader{buf: data}
+	got := &WorkerDetails{Worker: decodeWorkerRow(&r)}
+	if r.present() {
+		got.Metadata = string(r.bytes16())
+	}
+	n := int(r.u16())
+	if n > maxWorkerProcesses {
+		return nil, ErrIncompleteResponse
+	}
+	got.Processes = make([]WorkerProcess, 0, n)
+	for i := 0; i < n && !r.bad; i++ {
+		p := WorkerProcess{
+			Name:        string(r.bytes16()),
+			Kind:        ProcessKind(r.u8()),
+			RunCount:    r.u64(),
+			FailCount:   r.u64(),
+			LastRunAtMS: int64(r.u64()),
+		}
+		if p.Kind > ProcessKindStreamConsumer {
+			r.bad = true
+		}
+		got.Processes = append(got.Processes, p)
 	}
 	if err := r.done(); err != nil {
 		return nil, err

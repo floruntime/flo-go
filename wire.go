@@ -148,9 +148,11 @@ func extractBlockMS(options []byte) uint32 {
 	return 0
 }
 
-// computeCRC32 computes CRC32 for header (excluding crc32 field) + payload.
-func computeCRC32(header, payload []byte) uint32 {
-	h := crc32.NewIEEE()
+var castagnoli = crc32.MakeTable(crc32.Castagnoli)
+
+// computeCRC32C computes CRC32C for header (excluding its checksum field) + payload.
+func computeCRC32C(header, payload []byte) uint32 {
+	h := crc32.New(castagnoli)
 	h.Write(header[0:16])  // magic, payload_length, request_id
 	h.Write(header[20:32]) // op_code/version/status, flags, table hash
 	h.Write(payload)
@@ -189,11 +191,11 @@ func serializeRequest(requestID uint64, opCode OpCode, namespace, key, value, op
 	// Allocate buffer for header + payload
 	buf := make([]byte, HeaderSize+payloadLen)
 
-	// Build header (without CRC32)
+	// Build header (without CRC32C)
 	binary.LittleEndian.PutUint32(buf[0:4], Magic)
 	binary.LittleEndian.PutUint32(buf[4:8], uint32(payloadLen))
 	binary.LittleEndian.PutUint64(buf[8:16], requestID)
-	// CRC32 at [16:20] - filled later
+	// CRC32C at [16:20] - filled later
 	binary.LittleEndian.PutUint16(buf[20:22], uint16(opCode))
 	buf[22] = Version
 	buf[23] = 0 // flags
@@ -229,8 +231,8 @@ func serializeRequest(requestID uint64, opCode OpCode, namespace, key, value, op
 		copy(buf[offset:], options)
 	}
 
-	// Compute and fill CRC32
-	crc := computeCRC32(buf[:HeaderSize], buf[HeaderSize:])
+	// Compute and fill CRC32C
+	crc := computeCRC32C(buf[:HeaderSize], buf[HeaderSize:])
 	binary.LittleEndian.PutUint32(buf[16:20], crc)
 
 	return buf, nil
@@ -241,6 +243,8 @@ type rawResponse struct {
 	Status    StatusCode
 	Data      []byte
 	RequestID uint64
+	// Stale is the answer's ResponseStale flag.
+	Stale bool
 }
 
 // parseResponseHeader parses a response header.

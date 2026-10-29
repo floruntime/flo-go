@@ -85,6 +85,9 @@ value, err := client.KV.Get("key", nil)
 if value == nil {
     // Key not found
 }
+if value != nil && value.ExpiresAtMs != nil {
+    // The key's TTL runs out at *value.ExpiresAtMs, Unix milliseconds
+}
 
 // Get with namespace override
 value, err := client.KV.Get("key", &flo.GetOptions{
@@ -183,13 +186,32 @@ for {
 
 ```go
 // Versions newest first (default 10, at most 65); a missing key has none
-entries, err := client.KV.History("key", nil)
-for _, entry := range entries {
+page, err := client.KV.History("key", nil)
+for _, entry := range page.Versions {
+    if entry.Deleted {
+        fmt.Printf("v%d at %d ms: deleted\n", entry.Version, entry.AtMs)
+        continue
+    }
     fmt.Printf("v%d at %d ms: %s\n", entry.Version, entry.AtMs, entry.Value)
 }
 
+// More says older versions follow: page back from the last one seen
 limit := uint32(5)
-entries, err := client.KV.History("key", &flo.HistoryOptions{Limit: &limit})
+opts := &flo.HistoryOptions{Limit: &limit}
+for {
+    page, err := client.KV.History("key", opts)
+    if err != nil {
+        return err
+    }
+    for _, entry := range page.Versions {
+        process(entry)
+    }
+    if !page.More || len(page.Versions) == 0 {
+        break
+    }
+    last := page.Versions[len(page.Versions)-1].Version
+    opts.BeforeVersion = &last
+}
 ```
 
 #### Incr
@@ -211,7 +233,7 @@ err := client.KV.Expire("session:abc", 0, nil)
 // Renew a lease only if you still own it
 err := client.KV.Expire("lease", 30_000, &flo.KVExpireOptions{CASVersion: &version})
 
-ok, err := client.KV.Exists("session:abc", nil)
+res, err := client.KV.Exists("session:abc", nil) // res.Exists
 ```
 
 #### JSON documents
@@ -323,9 +345,14 @@ if err != nil {
         // Authentication failed
     } else if flo.IsOverloaded(err) {
         // Server is overloaded, and the client's retries ran out
+    } else if flo.IsOutcomePending(err) {
+        // The write committed but hasn't applied: its shard halted. Never
+        // resend it unchanged; the message says whether it applies when
+        // the shard resumes
     } else if flo.IsUnavailable(err) {
         // No leader or the shard isn't taking writes, and the client's
-        // retries ran out (the message says whether an operator must act first)
+        // retries ran out (the message says whether an operator must act
+        // first); flo.IsShardHalted(err) when the shard halted
     } else if flo.IsInternal(err) {
         // Internal server error
     }
@@ -347,6 +374,28 @@ didn't run it (`ServerError.Ran == flo.RanNo`), the client sends it again
 itself, as a new request, after a jittered wait. Because the server never ran
 it, this is safe for writes too. Any other refusal, or one that may have run,
 comes straight back.
+
+The client never retries two refusals from a halted shard on your
+requests. `unavailable` with reason `shard_halted` (`flo.IsShardHalted`)
+didn't run, but the shard takes no writes until an operator repairs it, so a
+retry can't succeed. `outcome_pending` (`flo.IsOutcomePending`) is a write that
+committed and hasn't applied: sending it again would write it twice, or halt
+the shard again.
+
+The workers are different: their registration, group join and polls are
+theirs to retry. On `shard_halted` they wait, from 100 ms up to 30 s, logging
+a warning with the server's message each time, and carry on by themselves once
+the shard is repaired; a stop or drain ends the wait. A worker started during a
+halt comes up once it's over.
+
+A halted shard still answers reads, from its state just before the entry it
+halted at. Such a read succeeds with `Stale` set on its result (`GetResult`,
+`MGetEntry`, `ScanResult`, `HistoryResult`, `ExistsResult`): it is not an
+error, but it doesn't hold anything written since. A key missing from such an
+answer is missing as of the halt, so `Get` and `JsonGet` return
+`flo.ErrStaleNotFound` (`flo.IsStale` and `flo.IsNotFound` both hold) rather
+than nil. Only the KV reads carry the flag for now: other reads (streams,
+queues, actions, workers) drop it.
 
 | `RetryPolicy` field | Default | |
 |---|---|---|
@@ -419,11 +468,24 @@ cancels the handlers' contexts, also during a drain, and `Start` returns once
 they have. Both workers have them, and a worker can be started again after
 either.
 
+A drain doesn't wait out a held poll. `Drain` closes the worker's own poll
+connection, so either worker stops polling at once. When an operator drains
+the worker on the server instead, the server answers an action worker's held
+poll at once, refused with `ReasonWorkerDraining`. It doesn't wake a stream
+worker's held read, which it keeps by consumer name, not worker id: the
+stream worker learns of the drain from its next heartbeat, then closes its
+poll connection the same way.
+
 Each worker heartbeats every 30 s with the number of handlers running. One
 the server hasn't heard from for long enough is refused work, and later
 removed; the worker then registers again with the same options, telling the
 server again if it is draining. `client.ListWorkers` pages through a
-namespace's workers.
+namespace's workers (`WorkerListOptions.Action` lists only those that run one
+action), and `client.WorkerInfo` returns one worker's row with the
+metadata it registered and its processes, each with its kind and run counts.
+The server refuses a registration of more than 1024 processes
+(`ReasonOutOfRange`), or a process name, machine id or process list past its
+bound (`ReasonFieldTooLong`); the SDK checks none of these itself.
 
 Registering an action replaces its settings, so workers that register one
 action with different options leave it with whichever registered last.

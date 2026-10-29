@@ -12,7 +12,9 @@ import (
 // it is sent again. Only a refusal whose status is overloaded or
 // unavailable and whose Ran is RanNo is retried: the server says it never
 // ran, so resending is safe for any operation, writes included. Each retry
-// is a new request with a new id; the server routes it afresh.
+// is a new request with a new id; the server routes it afresh. An
+// unavailable with ReasonShardHalted is not retried: the shard stays halted
+// until an operator repairs it.
 type RetryPolicy struct {
 	// MaxAttempts counts the first try; 1 (or less) turns retrying off.
 	MaxAttempts int
@@ -63,7 +65,7 @@ func isRefusedUnrun(err error) bool {
 	if !errors.As(err, &se) {
 		return false
 	}
-	return (se.Status == StatusOverloaded || se.Status == StatusUnavailable) && se.Ran == RanNo
+	return (se.Status == StatusOverloaded || se.Status == StatusUnavailable) && se.Ran == RanNo && se.Reason != ReasonShardHalted
 }
 
 // backoff is a capped, doubling, fully jittered wait.
@@ -104,6 +106,29 @@ const (
 
 func newWorkerBackoff() backoff {
 	return backoff{initial: workerInitialBackoff, max: workerMaxBackoff}
+}
+
+// haltedMaxBackoff caps a worker's wait on a halted shard, which takes no
+// writes until an operator repairs it.
+const haltedMaxBackoff = 30 * time.Second
+
+func newHaltedBackoff() backoff {
+	return backoff{initial: workerInitialBackoff, max: haltedMaxBackoff}
+}
+
+// waitIfHalted reports whether err is a halted shard's refusal, and if so
+// warns and waits the next backoff, or until ctx ends. A worker's
+// registration, group join and polls are retried this way until the shard
+// is repaired, unlike a client's own requests, which return the refusal.
+func waitIfHalted(ctx context.Context, logger Logger, what string, err error, b *backoff) bool {
+	var se *ServerError
+	if !errors.As(err, &se) || se.Reason != ReasonShardHalted {
+		return false
+	}
+	d := b.next()
+	logger.Printf("Warning: %s refused, shard halted: %s; retrying in %v", what, se.Message, d)
+	sleepCtx(ctx, d)
+	return true
 }
 
 // sleepCtx waits d, or until ctx is done.

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"testing"
 )
 
@@ -190,7 +191,7 @@ func TestParseResponseHeader(t *testing.T) {
 			table   uint64
 			want    string
 		}{
-			{1, 0, "flo: server protocol 1, client protocol 2: upgrade the client"},
+			{1, 0, "flo: server protocol 1, client protocol 3: upgrade the client"},
 			{Version, TableHash + 1, fmt.Sprintf("flo: server table 0x%016x, client table 0x%016x: upgrade the client", TableHash+1, TableHash)},
 		} {
 			header := make([]byte, HeaderSize)
@@ -303,29 +304,14 @@ func TestSerializeSeqs(t *testing.T) {
 	}
 }
 
-func TestComputeCRC32(t *testing.T) {
-	header := make([]byte, HeaderSize)
-	binary.LittleEndian.PutUint32(header[0:4], Magic)
-	binary.LittleEndian.PutUint32(header[4:8], 5)
-	binary.LittleEndian.PutUint64(header[8:16], 1)
-	binary.LittleEndian.PutUint16(header[20:22], uint16(OpKVGet))
-	header[22] = Version
-
-	payload := []byte("hello")
-
-	crc1 := computeCRC32(header, payload)
-	crc2 := computeCRC32(header, payload)
-
-	if crc1 != crc2 {
-		t.Errorf("CRC32 should be deterministic: %d != %d", crc1, crc2)
+// The same frame flo's own checksum test uses.
+func TestFrameChecksumIsCRC32C(t *testing.T) {
+	header := hx(t, "464c4f00"+"05000000"+"0700000000000000"+"00000000"+"0101"+"03"+"00"+"0807060504030201")
+	if got := computeCRC32C(header, []byte("hello")); got != 0xa2996e56 {
+		t.Errorf("frame checksum 0x%08x, want 0xa2996e56", got)
 	}
-
-	// Modify payload and verify CRC changes
-	payload2 := []byte("world")
-	crc3 := computeCRC32(header, payload2)
-
-	if crc1 == crc3 {
-		t.Error("CRC32 should change with different payload")
+	if got := crc32.Checksum([]byte("123456789"), castagnoli); got != 0xe3069283 {
+		t.Errorf("CRC32C check value 0x%08x, want 0xe3069283", got)
 	}
 }
 

@@ -20,7 +20,7 @@ func isTableOp(op OpCode) bool {
 	case OpKVPut, OpKVGet, OpKVMGet, OpKVDelete, OpKVScan, OpKVHistory,
 		OpKVIncr, OpKVJsonGet, OpKVJsonSet, OpKVJsonDel,
 		OpKVBeginTxn, OpKVCommitTxn, OpKVRollbackTxn, OpKVExpire, OpKVExists,
-		OpActionStatus, OpWorkerList:
+		OpActionStatus, OpWorkerList, OpWorkerInfo:
 		return true
 	}
 	return false
@@ -193,6 +193,17 @@ func absent(resp *rawResponse) (bool, error) {
 	return true, nil
 }
 
+// absentNow is absent for a read that reports a missing key as nil: a
+// halted shard's not-found is ErrStaleNotFound instead, so it isn't read as
+// the key being absent now.
+func absentNow(resp *rawResponse) (bool, error) {
+	gone, err := absent(resp)
+	if gone && resp.Stale {
+		return true, fmt.Errorf("%w: %w", ErrStaleNotFound, newServerError(resp.Status, resp.Data))
+	}
+	return gone, err
+}
+
 // encodeGetBody codes kv.get's request: wait_ms, wait_for, routing_key, txn.
 func encodeGetBody(opts *GetOptions, txn *uint64) ([]byte, error) {
 	if opts.WaitMs > MaxWaitMS {
@@ -246,10 +257,14 @@ func encodeSetBody(value []byte, opts *PutOptions, txn *uint64) ([]byte, error) 
 	return w.buf, nil
 }
 
-// decodeGetAnswer reads kv.get's answer: version, value.
+// decodeGetAnswer reads kv.get's answer: version, value, expiry.
 func decodeGetAnswer(data []byte) (*GetResult, error) {
 	r := bodyReader{buf: data}
 	got := &GetResult{Version: r.u64(), Value: r.bytes32()}
+	if r.present() {
+		at := int64(r.u64())
+		got.ExpiresAtMs = &at
+	}
 	if err := r.done(); err != nil {
 		return nil, err
 	}
@@ -334,31 +349,34 @@ func decodeScanAnswer(data []byte) (*ScanResult, error) {
 }
 
 // encodeHistoryBody codes kv.history's request: limit, routing_key.
-func encodeHistoryBody(limit uint32, routingKey string) ([]byte, error) {
+func encodeHistoryBody(limit uint32, before *uint64, routingKey string) ([]byte, error) {
 	if limit < 1 || limit > MaxHistoryLimit {
 		return nil, fmt.Errorf("flo: history limit %d, want 1..%d", limit, MaxHistoryLimit)
 	}
 	if err := checkRoutingKey(routingKey); err != nil {
 		return nil, err
 	}
-	w := bodyWriter{buf: make([]byte, 0, 8+len(routingKey))}
+	w := bodyWriter{buf: make([]byte, 0, 17+len(routingKey))}
 	w.u8(1)
 	w.u32(limit)
+	w.optU64(before)
 	w.routingKey(routingKey)
 	return w.buf, nil
 }
 
-// decodeHistoryAnswer reads kv.history's answer: versions, newest first.
-func decodeHistoryAnswer(data []byte) ([]VersionEntry, error) {
+// decodeHistoryAnswer reads kv.history's answer: versions, newest first,
+// and whether older ones follow.
+func decodeHistoryAnswer(data []byte) (*HistoryResult, error) {
 	r := bodyReader{buf: data}
 	n := int(r.u8())
 	if n > MaxHistoryLimit {
 		return nil, ErrIncompleteResponse
 	}
-	out := make([]VersionEntry, 0, n)
+	out := &HistoryResult{Versions: make([]VersionEntry, 0, n)}
 	for i := 0; i < n && !r.bad; i++ {
-		out = append(out, VersionEntry{Version: r.u64(), AtMs: int64(r.u64()), Value: r.bytes32()})
+		out.Versions = append(out.Versions, VersionEntry{Version: r.u64(), AtMs: int64(r.u64()), Deleted: r.bool(), Value: r.bytes32()})
 	}
+	out.More = r.bool()
 	if err := r.done(); err != nil {
 		return nil, err
 	}
@@ -514,11 +532,11 @@ func encodeExistsBody(routingKey string, txn *uint64) ([]byte, error) {
 }
 
 // decodeExistsAnswer reads kv.exists's answer: exists, version.
-func decodeExistsAnswer(data []byte) (bool, error) {
+func decodeExistsAnswer(data []byte) (ExistsResult, error) {
 	r := bodyReader{buf: data}
 	exists := r.bool()
 	r.u64()
-	return exists, r.done()
+	return ExistsResult{Exists: exists}, r.done()
 }
 
 func jsonPath(path string) (string, error) {
@@ -574,7 +592,12 @@ func encodeJSONSetBody(path string, document []byte, routingKey string) ([]byte,
 
 // decodeJSONGetAnswer reads kv.json_get's answer: version, document.
 func decodeJSONGetAnswer(data []byte) (*GetResult, error) {
-	return decodeGetAnswer(data)
+	r := bodyReader{buf: data}
+	got := &GetResult{Version: r.u64(), Value: r.bytes32()}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
 }
 
 // decodeJSONSetAnswer reads kv.json_set's answer: version.
