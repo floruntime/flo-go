@@ -53,21 +53,21 @@ func workerListAnswer(cursor *string, rows ...[]byte) []byte {
 }
 
 func TestWorkerListEncodesLimitAndCursor(t *testing.T) {
-	body, err := encodeWorkerListBody(25, []byte("w-07"))
+	body, err := encodeWorkerListBody(25, []byte("w-07"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []byte{1, 25, 0, 0, 0, 4, 0, 'w', '-', '0', '7'}; !bytes.Equal(body, want) {
+	if want := []byte{1, 25, 0, 0, 0, 4, 0, 'w', '-', '0', '7', 0, 0}; !bytes.Equal(body, want) {
 		t.Errorf("body % x, want % x", body, want)
 	}
-	body, _ = encodeWorkerListBody(0, nil)
-	if want := []byte{1, 0, 4, 0, 0, 0, 0}; !bytes.Equal(body, want) {
-		t.Errorf("default body % x, want % x", body, want)
+	body, _ = encodeWorkerListBody(0, nil, "resize")
+	if want := []byte{1, 0, 4, 0, 0, 0, 0, 6, 0, 'r', 'e', 's', 'i', 'z', 'e'}; !bytes.Equal(body, want) {
+		t.Errorf("filtered default body % x, want % x", body, want)
 	}
-	if _, err := encodeWorkerListBody(MaxWorkerListLimit+1, nil); err == nil {
+	if _, err := encodeWorkerListBody(MaxWorkerListLimit+1, nil, ""); err == nil {
 		t.Error("limit past the most was sent")
 	}
-	if _, err := encodeWorkerListBody(1, make([]byte, maxWorkerID+1)); err == nil {
+	if _, err := encodeWorkerListBody(1, make([]byte, maxWorkerID+1), ""); err == nil {
 		t.Error("cursor past the longest id was sent")
 	}
 	if !isTableOp(OpWorkerList) {
@@ -132,7 +132,7 @@ func TestListWorkersSendsATableRequest(t *testing.T) {
 	if len(frames) != 1 {
 		t.Fatalf("sent %d worker.list requests", len(frames))
 	}
-	want := []byte{2, 0, 'n', 's', 0, 0, 1, 2, 0, 0, 0, 3, 0, 'w', '-', '0'}
+	want := []byte{2, 0, 'n', 's', 0, 0, 1, 2, 0, 0, 0, 3, 0, 'w', '-', '0', 0, 0}
 	if got := frames[0][HeaderSize:]; !bytes.Equal(got, want) {
 		t.Errorf("payload % x, want % x", got, want)
 	}

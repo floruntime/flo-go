@@ -186,8 +186,8 @@ for {
 
 ```go
 // Versions newest first (default 10, at most 65); a missing key has none
-entries, err := client.KV.History("key", nil)
-for _, entry := range entries {
+page, err := client.KV.History("key", nil)
+for _, entry := range page.Versions {
     if entry.Deleted {
         fmt.Printf("v%d at %d ms: deleted\n", entry.Version, entry.AtMs)
         continue
@@ -195,8 +195,13 @@ for _, entry := range entries {
     fmt.Printf("v%d at %d ms: %s\n", entry.Version, entry.AtMs, entry.Value)
 }
 
+// More says older versions follow: page back from the last one seen
 limit := uint32(5)
-entries, err := client.KV.History("key", &flo.HistoryOptions{Limit: &limit})
+page, err = client.KV.History("key", &flo.HistoryOptions{Limit: &limit})
+for err == nil && page.More {
+    last := page.Versions[len(page.Versions)-1].Version
+    page, err = client.KV.History("key", &flo.HistoryOptions{Limit: &limit, BeforeVersion: &last})
+}
 ```
 
 #### Incr
@@ -218,7 +223,7 @@ err := client.KV.Expire("session:abc", 0, nil)
 // Renew a lease only if you still own it
 err := client.KV.Expire("lease", 30_000, &flo.KVExpireOptions{CASVersion: &version})
 
-ok, err := client.KV.Exists("session:abc", nil)
+res, err := client.KV.Exists("session:abc", nil) // res.Exists
 ```
 
 #### JSON documents
@@ -330,9 +335,14 @@ if err != nil {
         // Authentication failed
     } else if flo.IsOverloaded(err) {
         // Server is overloaded, and the client's retries ran out
+    } else if flo.IsOutcomePending(err) {
+        // The write committed but hasn't applied: its shard halted. Never
+        // resend it unchanged; the message says whether it applies when
+        // the shard resumes
     } else if flo.IsUnavailable(err) {
         // No leader or the shard isn't taking writes, and the client's
-        // retries ran out (the message says whether an operator must act first)
+        // retries ran out (the message says whether an operator must act
+        // first); flo.IsShardHalted(err) when the shard halted
     } else if flo.IsInternal(err) {
         // Internal server error
     }
@@ -354,6 +364,17 @@ didn't run it (`ServerError.Ran == flo.RanNo`), the client sends it again
 itself, as a new request, after a jittered wait. Because the server never ran
 it, this is safe for writes too. Any other refusal, or one that may have run,
 comes straight back.
+
+Two refusals from a halted shard are never retried. `unavailable` with reason
+`shard_halted` (`flo.IsShardHalted`) didn't run, but the shard takes no writes
+until an operator repairs it, so a retry can't succeed. `outcome_pending`
+(`flo.IsOutcomePending`) is a write that committed and hasn't applied:
+sending it again would write it twice, or halt the shard again.
+
+A halted shard still answers reads, from its state just before the entry it
+halted at. Such a read succeeds with `Stale` set on its result (`GetResult`,
+`MGetEntry`, `ScanResult`, `HistoryResult`, `ExistsResult`): it is not an
+error, but it doesn't hold anything written since.
 
 | `RetryPolicy` field | Default | |
 |---|---|---|
@@ -438,10 +459,12 @@ Each worker heartbeats every 30 s with the number of handlers running. One
 the server hasn't heard from for long enough is refused work, and later
 removed; the worker then registers again with the same options, telling the
 server again if it is draining. `client.ListWorkers` pages through a
-namespace's workers, and `client.WorkerInfo` returns one worker's row with the
+namespace's workers (`WorkerListOptions.Action` lists only those that run one
+action), and `client.WorkerInfo` returns one worker's row with the
 metadata it registered and its processes, each with its kind and run counts.
-The server refuses a registration of more than 1024 processes, or one whose
-processes wouldn't fit one answer.
+The server refuses a registration of more than 1024 processes
+(`ReasonOutOfRange`), or a process name, machine id or process list past its
+bound (`ReasonFieldTooLong`); the SDK checks none of these itself.
 
 Registering an action replaces its settings, so workers that register one
 action with different options leave it with whichever registered last.

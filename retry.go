@@ -12,7 +12,9 @@ import (
 // it is sent again. Only a refusal whose status is overloaded or
 // unavailable and whose Ran is RanNo is retried: the server says it never
 // ran, so resending is safe for any operation, writes included. Each retry
-// is a new request with a new id; the server routes it afresh.
+// is a new request with a new id; the server routes it afresh. An
+// unavailable with ReasonShardHalted is not retried: the shard stays halted
+// until an operator repairs it.
 type RetryPolicy struct {
 	// MaxAttempts counts the first try; 1 (or less) turns retrying off.
 	MaxAttempts int
@@ -63,7 +65,7 @@ func isRefusedUnrun(err error) bool {
 	if !errors.As(err, &se) {
 		return false
 	}
-	return (se.Status == StatusOverloaded || se.Status == StatusUnavailable) && se.Ran == RanNo
+	return (se.Status == StatusOverloaded || se.Status == StatusUnavailable) && se.Ran == RanNo && se.Reason != ReasonShardHalted
 }
 
 // backoff is a capped, doubling, fully jittered wait.

@@ -173,7 +173,7 @@ func (c *Client) ListWorkers(opts *WorkerListOptions) (*WorkerListResult, error)
 	if opts == nil {
 		opts = &WorkerListOptions{}
 	}
-	body, err := encodeWorkerListBody(opts.Limit, opts.Cursor)
+	body, err := encodeWorkerListBody(opts.Limit, opts.Cursor, opts.Action)
 	if err != nil {
 		return nil, err
 	}
@@ -184,8 +184,8 @@ func (c *Client) ListWorkers(opts *WorkerListOptions) (*WorkerListResult, error)
 	return decodeWorkerListAnswer(resp.Data)
 }
 
-// encodeWorkerListBody codes worker.list's request: limit, cursor.
-func encodeWorkerListBody(limit uint32, cursor []byte) ([]byte, error) {
+// encodeWorkerListBody codes worker.list's request: limit, cursor, action.
+func encodeWorkerListBody(limit uint32, cursor []byte, action string) ([]byte, error) {
 	if limit == 0 {
 		limit = MaxWorkerListLimit
 	}
@@ -195,10 +195,14 @@ func encodeWorkerListBody(limit uint32, cursor []byte) ([]byte, error) {
 	if len(cursor) > maxWorkerID {
 		return nil, fmt.Errorf("flo: worker list cursor is %d bytes, at most %d", len(cursor), maxWorkerID)
 	}
-	w := bodyWriter{buf: make([]byte, 0, 7+len(cursor))}
+	if len(action) > maxWorkerID {
+		return nil, fmt.Errorf("flo: worker list action is %d bytes, at most %d", len(action), maxWorkerID)
+	}
+	w := bodyWriter{buf: make([]byte, 0, 9+len(cursor)+len(action))}
 	w.u8(1)
 	w.u32(limit)
 	w.bytes16(cursor)
+	w.bytes16([]byte(action))
 	return w.buf, nil
 }
 

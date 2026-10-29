@@ -243,6 +243,8 @@ type rawResponse struct {
 	Status    StatusCode
 	Data      []byte
 	RequestID uint64
+	// Stale is the answer's ResponseStale flag.
+	Stale bool
 }
 
 // parseResponseHeader parses a response header.

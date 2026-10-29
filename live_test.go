@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -148,13 +149,59 @@ func TestLiveKVHistoryMarksTheDelete(t *testing.T) {
 	if _, err := c.KV.Put("k", []byte("two"), nil); err != nil {
 		t.Fatal(err)
 	}
-	hist, err := c.KV.History("k", nil)
+	page, err := c.KV.History("k", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hist) != 3 || hist[0].Deleted || !hist[1].Deleted || hist[2].Deleted ||
+	hist := page.Versions
+	if len(hist) != 3 || page.More || hist[0].Deleted || !hist[1].Deleted || hist[2].Deleted ||
 		string(hist[0].Value) != "two" || string(hist[2].Value) != "one" {
 		t.Fatalf("history = %+v; want two, a delete, one", hist)
+	}
+}
+
+// Five versions read two at a time: three pages, newest first, each seen
+// once; before the oldest there is nothing.
+func TestLiveKVHistoryPages(t *testing.T) {
+	c := liveClient(t)
+	var written []uint64
+	for i := 0; i < 5; i++ {
+		r, err := c.KV.Put("k", []byte(strconv.Itoa(i)), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		written = append([]uint64{r.Version}, written...)
+	}
+	limit := uint32(2)
+	var seen []uint64
+	var before *uint64
+	for pages := 1; ; pages++ {
+		page, err := c.KV.History("k", &HistoryOptions{Limit: &limit, BeforeVersion: before})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range page.Versions {
+			seen = append(seen, v.Version)
+		}
+		if !page.More {
+			if pages != 3 {
+				t.Errorf("%d pages, want 3", pages)
+			}
+			break
+		}
+		if pages == 5 || len(page.Versions) == 0 {
+			t.Fatalf("still paging at page %d: %+v", pages, page)
+		}
+		last := page.Versions[len(page.Versions)-1].Version
+		before = &last
+	}
+	if !slices.Equal(seen, written) {
+		t.Errorf("versions %v, want %v", seen, written)
+	}
+	oldest := written[len(written)-1]
+	page, err := c.KV.History("k", &HistoryOptions{BeforeVersion: &oldest})
+	if err != nil || len(page.Versions) != 0 || page.More {
+		t.Errorf("before the oldest: %+v, %v; want an empty last page", page, err)
 	}
 }
 
@@ -445,11 +492,55 @@ func TestLiveRegisteringTooManyProcessesIsRefused(t *testing.T) {
 	}
 	err := c.workerClient("w-many").Register(&WorkerRegisterOptions{Processes: processes})
 	var se *ServerError
-	if !errors.As(err, &se) || se.Status != StatusBadRequest || se.Reason != ReasonUnclassified || se.Ran != RanNo || se.Message != "more than 1024 processes" {
-		t.Fatalf("got %#v (%v), want bad_request/unclassified, ran no, \"more than 1024 processes\"", se, err)
+	if !errors.As(err, &se) || se.Status != StatusBadRequest || se.Reason != ReasonOutOfRange || se.Ran != RanNo || se.Message != "more than 1024 processes" {
+		t.Fatalf("got %#v (%v), want bad_request/out_of_range, ran no, \"more than 1024 processes\"", se, err)
 	}
 	if _, err := c.WorkerInfo("w-many", nil); !IsNotFound(err) {
 		t.Errorf("refused worker is registered: %v", err)
+	}
+}
+
+// A process name or machine id past the server's bound is refused
+// field_too_long.
+func TestLiveRegisteringTooLongAFieldIsRefused(t *testing.T) {
+	c := liveClient(t)
+	for _, tc := range []struct {
+		opts WorkerRegisterOptions
+		msg  string
+	}{
+		{WorkerRegisterOptions{Processes: []ProcessEntry{{Name: strings.Repeat("p", 4097), Kind: ProcessKindAction}}}, "process name longer than 4096 bytes"},
+		{WorkerRegisterOptions{MachineID: strings.Repeat("m", 256)}, "machine id longer than 255 bytes"},
+	} {
+		err := c.workerClient("w-long").Register(&tc.opts)
+		var se *ServerError
+		if !errors.As(err, &se) || se.Status != StatusBadRequest || se.Reason != ReasonFieldTooLong || se.Ran != RanNo || se.Message != tc.msg {
+			t.Errorf("got %#v (%v), want bad_request/field_too_long, ran no, %q", se, err, tc.msg)
+		}
+	}
+}
+
+// ListWorkers with an Action lists only the workers that run that action.
+func TestLiveListWorkersFiltersByAction(t *testing.T) {
+	c := liveClient(t)
+	for id, p := range map[string]ProcessEntry{
+		"w-resize": {Name: "resize", Kind: ProcessKindAction},
+		"w-thumb":  {Name: "thumb", Kind: ProcessKindAction},
+		"w-stream": {Name: "resize", Kind: ProcessKindStreamConsumer},
+	} {
+		if err := c.workerClient(id).Register(&WorkerRegisterOptions{Processes: []ProcessEntry{p}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := c.ListWorkers(&WorkerListOptions{Action: "resize"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Workers) != 1 || page.Workers[0].ID != "w-resize" {
+		t.Errorf("filtered %+v, want w-resize only", page.Workers)
+	}
+	all, err := c.ListWorkers(nil)
+	if err != nil || len(all.Workers) != 3 {
+		t.Errorf("unfiltered %+v, %v; want all three", all, err)
 	}
 }
 

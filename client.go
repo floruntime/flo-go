@@ -403,6 +403,13 @@ func (c *Client) exchange(request []byte, waitMs uint64) (*rawResponse, error) {
 		return nil, fmt.Errorf("%w: 0x%08X != 0x%08X", ErrInvalidChecksum, computedCRC, expectedCRC)
 	}
 
+	// The table hash pins both sides, so a flag this SDK doesn't know is
+	// an answer it can't read.
+	flags := header[22]
+	if flags&^ResponseStale != 0 {
+		return nil, fmt.Errorf("%w: unknown answer flags 0x%02x", ErrIncompleteResponse, flags)
+	}
+
 	if c.debug {
 		log.Printf("[flo] <- %s %d bytes", status, len(data))
 	}
@@ -411,6 +418,7 @@ func (c *Client) exchange(request []byte, waitMs uint64) (*rawResponse, error) {
 		Status:    status,
 		Data:      data,
 		RequestID: respRequestID,
+		Stale:     flags&ResponseStale != 0,
 	}, nil
 }
 

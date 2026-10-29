@@ -218,3 +218,36 @@ func TestWorkerConnectionsKeepTheClientsRetryPolicy(t *testing.T) {
 		}
 	}
 }
+
+// A halted shard's refusals are never retried: unavailable with
+// shard_halted waits on an operator, and outcome_pending is a committed
+// write that resending would write twice.
+func TestHaltedShardRefusalsAreSentOnce(t *testing.T) {
+	cases := []struct {
+		name   string
+		status StatusCode
+		ran    Ran
+		is     func(error) bool
+	}{
+		{"unavailable, shard halted", StatusUnavailable, RanNo, IsUnavailable},
+		{"outcome pending", StatusOutcomePending, RanUnknown, IsOutcomePending},
+	}
+	for _, tc := range cases {
+		var s scripted
+		addr := s.serve(t, func(_ int, id uint64) []byte {
+			return statusFrame(id, tc.status, refusalBody(ReasonShardHalted, tc.ran, "halted"))
+		})
+		c := connectTo(t, addr, fastRetry)
+		_, err := c.KV.Put("k", []byte("v"), nil)
+		var se *ServerError
+		if !tc.is(err) || !IsShardHalted(err) || !errors.As(err, &se) || se.Ran != tc.ran || se.Message != "halted" {
+			t.Fatalf("%s: got %v", tc.name, err)
+		}
+		if n := len(s.seen()); n != 1 {
+			t.Fatalf("%s: sent %d times, want once", tc.name, n)
+		}
+	}
+	if IsOutcomePending(&ServerError{Status: StatusUnavailable, Reason: ReasonShardHalted}) {
+		t.Error("an unavailable refusal reads as outcome pending")
+	}
+}
