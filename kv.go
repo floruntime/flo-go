@@ -10,7 +10,8 @@ type KVClient struct {
 }
 
 // Get retrieves the value and version for a key. It returns nil if the
-// key is not found, also when a wait (WaitMs) ends without it.
+// key is not found, also when a wait (WaitMs) ends without it; from a halted
+// shard, a missing key is ErrStaleNotFound instead.
 func (kv *KVClient) Get(key string, opts *GetOptions) (*GetResult, error) {
 	if opts == nil {
 		opts = &GetOptions{}
@@ -27,7 +28,7 @@ func (c *Client) kvGet(namespace, key string, opts *GetOptions, txn *uint64) (*G
 	if err != nil {
 		return nil, err
 	}
-	if gone, err := absent(resp); gone || err != nil {
+	if gone, err := absentNow(resp); gone || err != nil {
 		return nil, err
 	}
 	got, err := decodeGetAnswer(resp.Data)
@@ -311,7 +312,8 @@ type KVJsonOptions struct {
 
 // JsonGet reads the value at a JSONPath ("" means the root, "$") inside
 // the JSON document stored at key. It returns nil if the key or path is not
-// found. The result carries the document's version, for a CAS Put.
+// found, or ErrStaleNotFound when a halted shard answered. The result
+// carries the document's version, for a CAS Put.
 func (kv *KVClient) JsonGet(key, path string, opts *KVJsonOptions) (*GetResult, error) {
 	if opts == nil {
 		opts = &KVJsonOptions{}
@@ -324,7 +326,7 @@ func (kv *KVClient) JsonGet(key, path string, opts *KVJsonOptions) (*GetResult, 
 	if err != nil {
 		return nil, err
 	}
-	if gone, err := absent(resp); gone || err != nil {
+	if gone, err := absentNow(resp); gone || err != nil {
 		return nil, err
 	}
 	got, err := decodeJSONGetAnswer(resp.Data)

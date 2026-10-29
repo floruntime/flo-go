@@ -193,6 +193,17 @@ func absent(resp *rawResponse) (bool, error) {
 	return true, nil
 }
 
+// absentNow is absent for a read that reports a missing key as nil: a
+// halted shard's not-found is ErrStaleNotFound instead, so it isn't read as
+// the key being absent now.
+func absentNow(resp *rawResponse) (bool, error) {
+	gone, err := absent(resp)
+	if gone && resp.Stale {
+		return true, fmt.Errorf("%w: %w", ErrStaleNotFound, newServerError(resp.Status, resp.Data))
+	}
+	return gone, err
+}
+
 // encodeGetBody codes kv.get's request: wait_ms, wait_for, routing_key, txn.
 func encodeGetBody(opts *GetOptions, txn *uint64) ([]byte, error) {
 	if opts.WaitMs > MaxWaitMS {

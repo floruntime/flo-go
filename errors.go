@@ -41,6 +41,12 @@ var (
 	// ErrValueTooLarge indicates the value exceeds maximum size.
 	ErrValueTooLarge = errors.New("flo: value too large (max 16 MB)")
 
+	// ErrStaleNotFound: a halted shard answered that the key doesn't exist
+	// as of the entry it halted at; it may exist since. Get and JsonGet
+	// return it wrapped with the server's not-found refusal, so IsNotFound
+	// and IsStale both report it.
+	ErrStaleNotFound = errors.New("flo: not found as of a halted shard's state")
+
 	// ErrBlockTooLong indicates a BlockMS over MaxBlockMS. The server refuses
 	// it with bad_request, so the SDK refuses it first.
 	ErrBlockTooLong = fmt.Errorf("flo: a blocking wait (BlockMS) is at most %d ms (5 minutes)", MaxBlockMS)
@@ -230,6 +236,11 @@ func IsOverloaded(err error) bool {
 // IsShardHalted.
 func IsUnavailable(err error) bool {
 	return errors.Is(err, ErrUnavailable)
+}
+
+// IsStale reports a not-found answer from a halted shard (ErrStaleNotFound).
+func IsStale(err error) bool {
+	return errors.Is(err, ErrStaleNotFound)
 }
 
 // IsOutcomePending reports a write that committed but hasn't applied

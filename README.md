@@ -197,10 +197,20 @@ for _, entry := range page.Versions {
 
 // More says older versions follow: page back from the last one seen
 limit := uint32(5)
-page, err = client.KV.History("key", &flo.HistoryOptions{Limit: &limit})
-for err == nil && page.More {
+opts := &flo.HistoryOptions{Limit: &limit}
+for {
+    page, err := client.KV.History("key", opts)
+    if err != nil {
+        return err
+    }
+    for _, entry := range page.Versions {
+        process(entry)
+    }
+    if !page.More || len(page.Versions) == 0 {
+        break
+    }
     last := page.Versions[len(page.Versions)-1].Version
-    page, err = client.KV.History("key", &flo.HistoryOptions{Limit: &limit, BeforeVersion: &last})
+    opts.BeforeVersion = &last
 }
 ```
 
@@ -365,16 +375,27 @@ itself, as a new request, after a jittered wait. Because the server never ran
 it, this is safe for writes too. Any other refusal, or one that may have run,
 comes straight back.
 
-Two refusals from a halted shard are never retried. `unavailable` with reason
-`shard_halted` (`flo.IsShardHalted`) didn't run, but the shard takes no writes
-until an operator repairs it, so a retry can't succeed. `outcome_pending`
-(`flo.IsOutcomePending`) is a write that committed and hasn't applied:
-sending it again would write it twice, or halt the shard again.
+The client never retries two refusals from a halted shard on your
+requests. `unavailable` with reason `shard_halted` (`flo.IsShardHalted`)
+didn't run, but the shard takes no writes until an operator repairs it, so a
+retry can't succeed. `outcome_pending` (`flo.IsOutcomePending`) is a write that
+committed and hasn't applied: sending it again would write it twice, or halt
+the shard again.
+
+The workers are different: their registration, group join and polls are
+theirs to retry. On `shard_halted` they wait, from 100 ms up to 30 s, logging
+a warning with the server's message each time, and carry on by themselves once
+the shard is repaired; a stop or drain ends the wait. A worker started during a
+halt comes up once it's over.
 
 A halted shard still answers reads, from its state just before the entry it
 halted at. Such a read succeeds with `Stale` set on its result (`GetResult`,
 `MGetEntry`, `ScanResult`, `HistoryResult`, `ExistsResult`): it is not an
-error, but it doesn't hold anything written since.
+error, but it doesn't hold anything written since. A key missing from such an
+answer is missing as of the halt, so `Get` and `JsonGet` return
+`flo.ErrStaleNotFound` (`flo.IsStale` and `flo.IsNotFound` both hold) rather
+than nil. Only the KV reads carry the flag for now: other reads (streams,
+queues, actions, workers) drop it.
 
 | `RetryPolicy` field | Default | |
 |---|---|---|

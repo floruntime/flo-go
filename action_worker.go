@@ -269,12 +269,24 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 	workerClient := w.client.workerClient(w.config.WorkerID)
 	// Before registering: a registration whose answer was lost still counts.
 	defer sendOnPoll(w.client, w.closeCtx, func() error { return workerClient.Deregister(nil) })
-	if err := workerClient.Register(regOpts); err != nil {
+	halted := newHaltedBackoff()
+	for {
+		err := workerClient.Register(regOpts)
+		if err == nil {
+			break
+		}
+		if waitIfHalted(pollCtx, w.logger, "worker registration", err, &halted) && pollCtx.Err() == nil {
+			continue
+		}
 		if w.drain.active() {
 			return nil // drained before it took any work
 		}
+		if pollCtx.Err() != nil {
+			return w.ctx.Err()
+		}
 		return fmt.Errorf("failed to register worker: %w", err)
 	}
+	halted.reset()
 
 	// Result worker client uses the separate connection for Complete/Fail
 	resultWorkerClient := w.resultClient.workerClient(w.config.WorkerID)
@@ -365,6 +377,9 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 						// next poll take work.
 						beats.beat(runCtx.Done())
 					}
+					if waitIfHalted(pollCtx, w.logger, "await", err, &halted) {
+						continue
+					}
 					d := failed.next()
 					w.logger.Printf("Await error: %v, retrying in %v...", err, d)
 					sleepCtx(pollCtx, d)
@@ -372,6 +387,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 				continue
 			}
 			failed.reset()
+			halted.reset()
 
 			if task == nil {
 				<-sem // Release slot - no task available

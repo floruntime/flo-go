@@ -559,3 +559,46 @@ func TestAnUnknownAnswerFlagIsRefused(t *testing.T) {
 		t.Error("still connected after an unreadable answer")
 	}
 }
+
+// A missing key in a halted shard's answer is missing as of the halt, not
+// now: Get and JsonGet return ErrStaleNotFound, and the other reads keep the
+// mark on their empty answer. Unmarked, a missing key is plain absent.
+func TestAMissingKeyFromAHaltedShardIsStale(t *testing.T) {
+	missing := func(op OpCode, _ []byte) (StatusCode, []byte) {
+		switch op {
+		case OpKVMGet:
+			return StatusOK, cat([]byte{1, 0}, mgetEntry(false, 0, ""), []byte{0})
+		case OpKVExists:
+			return StatusOK, vector("000000000000000000")
+		}
+		return StatusNotFound, refusalBody(ReasonNotFound, RanNo, "key not found")
+	}
+	stale := flaggedTableServer(t, ResponseStale, missing)
+	for name, read := range map[string]func() (*GetResult, error){
+		"get":      func() (*GetResult, error) { return stale.KV.Get("k", nil) },
+		"json_get": func() (*GetResult, error) { return stale.KV.JsonGet("k", "", nil) },
+	} {
+		got, err := read()
+		var se *ServerError
+		if got != nil || !IsStale(err) || !IsNotFound(err) || !errors.As(err, &se) || se.Message != "key not found" {
+			t.Errorf("stale %s = %+v, %v; want ErrStaleNotFound with the refusal", name, got, err)
+		}
+	}
+	if m, err := stale.KV.MGet([]string{"k"}, nil); err != nil || len(m) != 1 || m[0].Found || !m[0].Stale {
+		t.Errorf("stale mget = %+v, %v", m, err)
+	}
+	if e, err := stale.KV.Exists("k", nil); err != nil || e.Exists || !e.Stale {
+		t.Errorf("stale exists = %+v, %v", e, err)
+	}
+	if h, err := stale.KV.History("k", nil); err != nil || len(h.Versions) != 0 || !h.Stale {
+		t.Errorf("stale history = %+v, %v", h, err)
+	}
+
+	plain := flaggedTableServer(t, 0, missing)
+	if got, err := plain.KV.Get("k", nil); got != nil || err != nil {
+		t.Errorf("get = %+v, %v; want nil, nil", got, err)
+	}
+	if got, err := plain.KV.JsonGet("k", "", nil); got != nil || err != nil {
+		t.Errorf("json_get = %+v, %v; want nil, nil", got, err)
+	}
+}

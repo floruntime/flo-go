@@ -108,6 +108,29 @@ func newWorkerBackoff() backoff {
 	return backoff{initial: workerInitialBackoff, max: workerMaxBackoff}
 }
 
+// haltedMaxBackoff caps a worker's wait on a halted shard, which takes no
+// writes until an operator repairs it.
+const haltedMaxBackoff = 30 * time.Second
+
+func newHaltedBackoff() backoff {
+	return backoff{initial: workerInitialBackoff, max: haltedMaxBackoff}
+}
+
+// waitIfHalted reports whether err is a halted shard's refusal, and if so
+// warns and waits the next backoff, or until ctx ends. A worker's
+// registration, group join and polls are retried this way until the shard
+// is repaired, unlike a client's own requests, which return the refusal.
+func waitIfHalted(ctx context.Context, logger Logger, what string, err error, b *backoff) bool {
+	var se *ServerError
+	if !errors.As(err, &se) || se.Reason != ReasonShardHalted {
+		return false
+	}
+	d := b.next()
+	logger.Printf("Warning: %s refused, shard halted: %s; retrying in %v", what, se.Message, d)
+	sleepCtx(ctx, d)
+	return true
+}
+
 // sleepCtx waits d, or until ctx is done.
 func sleepCtx(ctx context.Context, d time.Duration) {
 	t := time.NewTimer(d)
