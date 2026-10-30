@@ -355,9 +355,9 @@ func (w *WorkflowClient) ListRuns(name string, opts *WorkflowListRunsOptions) ([
 	return resp.Data, nil
 }
 
-// ListDefinitions lists all workflow definitions.
-// Returns the raw response bytes (binary format from server).
-func (w *WorkflowClient) ListDefinitions(opts *WorkflowListDefinitionsOptions) ([]byte, error) {
+// ListDefinitions returns one page of the namespace's workflow definitions.
+// Pass the result's Cursor in the next call's options to read the next page.
+func (w *WorkflowClient) ListDefinitions(opts *WorkflowListDefinitionsOptions) (*WorkflowDefinitionListResult, error) {
 	if opts == nil {
 		opts = &WorkflowListDefinitionsOptions{}
 	}
@@ -380,7 +380,32 @@ func (w *WorkflowClient) ListDefinitions(opts *WorkflowListDefinitionsOptions) (
 		return nil, err
 	}
 
-	return resp.Data, nil
+	return parseWorkflowDefinitionList(resp.Data)
+}
+
+// parseWorkflowDefinitionList reads workflow.list_definitions' answer:
+// [count:u32]([name_len:u16][name][version_len:u16][version][created_at:i64])*
+// [has_more:u8][cursor_len:u16][cursor].
+func parseWorkflowDefinitionList(data []byte) (*WorkflowDefinitionListResult, error) {
+	r := bodyReader{buf: data}
+	n := r.u32()
+	// Each definition takes at least twelve bytes, so a count past that is a lie.
+	if uint64(n)*12 > uint64(len(data)) {
+		return nil, ErrIncompleteResponse
+	}
+	got := &WorkflowDefinitionListResult{Definitions: make([]*WorkflowDefinitionEntry, 0, n)}
+	for i := uint32(0); i < n && !r.bad; i++ {
+		got.Definitions = append(got.Definitions, &WorkflowDefinitionEntry{
+			Name:      string(r.bytes16()),
+			Version:   string(r.bytes16()),
+			CreatedAt: int64(r.u64()),
+		})
+	}
+	got.HasMore, got.Cursor = r.pageTrailer()
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
 }
 
 // Disable disables a workflow definition (prevents new runs from starting).

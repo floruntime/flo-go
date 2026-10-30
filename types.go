@@ -1014,8 +1014,28 @@ type WorkflowListRunsOptions struct {
 // WorkflowListDefinitionsOptions contains options for listing workflow definitions.
 type WorkflowListDefinitionsOptions struct {
 	Namespace string
-	Limit     uint32
-	Cursor    []byte
+	// Limit is the most definitions on the page; 0 means 100.
+	Limit uint32
+	// Cursor is the previous page's Cursor; nil reads the first page.
+	Cursor []byte
+}
+
+// WorkflowDefinitionEntry is one workflow definition in a list page.
+type WorkflowDefinitionEntry struct {
+	Name      string
+	Version   string
+	CreatedAt int64
+}
+
+// WorkflowDefinitionListResult is one page of a namespace's workflow
+// definitions. A page can hold fewer than Limit while HasMore is set: keep
+// reading until HasMore is false.
+type WorkflowDefinitionListResult struct {
+	Definitions []*WorkflowDefinitionEntry
+	// HasMore says another page follows; Cursor reads it.
+	HasMore bool
+	// Cursor is where the next page starts; nil on the last page.
+	Cursor []byte
 }
 
 // =============================================================================
@@ -1035,8 +1055,21 @@ type ProcessingStatusOptions struct {
 // ProcessingListOptions contains options for listing processing jobs.
 type ProcessingListOptions struct {
 	Namespace string
-	Limit     uint32
-	Cursor    []byte
+	// Limit is the most jobs on the page; 0 means 100.
+	Limit uint32
+	// Cursor is the previous page's Cursor; nil reads the first page.
+	Cursor []byte
+}
+
+// ProcessingListResult is one page of a namespace's processing jobs. A page
+// can hold fewer than Limit while HasMore is set: keep reading until HasMore
+// is false.
+type ProcessingListResult struct {
+	Jobs []*ProcessingListEntry
+	// HasMore says another page follows; Cursor reads it.
+	HasMore bool
+	// Cursor is where the next page starts; nil on the last page.
+	Cursor []byte
 }
 
 // ProcessingStopOptions contains options for stopping a processing job.

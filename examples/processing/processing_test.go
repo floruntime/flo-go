@@ -619,7 +619,7 @@ func TestJobLifecycle(t *testing.T) {
 
 	// --- List ---
 	t.Run("List", func(t *testing.T) {
-		entries, err := client.Processing.List(nil)
+		entries, err := listAllJobs()
 		if err != nil {
 			t.Fatalf("List failed: %v", err)
 		}
@@ -754,7 +754,7 @@ func TestMultiplePipelines(t *testing.T) {
 	}
 
 	// List should show all of them
-	entries, err := client.Processing.List(nil)
+	entries, err := listAllJobs()
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
 	}
@@ -784,7 +784,7 @@ func readPipeline(t *testing.T, filename string) []byte {
 // "not found" even for jobs that List can see). Use this until the server
 // is fixed.
 func findJobInList(jobID string) *flo.ProcessingListEntry {
-	entries, err := client.Processing.List(nil)
+	entries, err := listAllJobs()
 	if err != nil {
 		return nil
 	}
@@ -794,6 +794,24 @@ func findJobInList(jobID string) *flo.ProcessingListEntry {
 		}
 	}
 	return nil
+}
+
+// listAllJobs reads every page of the job list; a page can be short while
+// more follow.
+func listAllJobs() ([]*flo.ProcessingListEntry, error) {
+	var all []*flo.ProcessingListEntry
+	opts := &flo.ProcessingListOptions{}
+	for {
+		page, err := client.Processing.List(opts)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page.Jobs...)
+		if !page.HasMore {
+			return all, nil
+		}
+		opts.Cursor = page.Cursor
+	}
 }
 
 func getEnv(key, fallback string) string {

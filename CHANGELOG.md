@@ -18,6 +18,11 @@ this SDK still pins the previous server.
   (0x033) and `OpClusterRepairSkip` (0x034). `OpClusterJoin`,
   `OpClusterLeave`, `OpClusterTransferLeader`, `OpClusterAddNode` and
   `OpClusterRemoveNode` are gone: the server has no such ops
+- `WorkflowClient.ListDefinitions` returns a `*WorkflowDefinitionListResult`
+  (parsed `Definitions`, `HasMore`, `Cursor`) instead of raw bytes, and
+  `ProcessingClient.List` a `*ProcessingListResult` (`Jobs`, `HasMore`,
+  `Cursor`) instead of a slice: both read one page, and a short page can
+  still have more behind it
 
 ### Added
 

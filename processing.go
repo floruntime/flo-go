@@ -48,8 +48,9 @@ func (p *ProcessingClient) Status(jobID string, opts *ProcessingStatusOptions) (
 	return parseProcessingStatus(resp.Data)
 }
 
-// List lists processing jobs.
-func (p *ProcessingClient) List(opts *ProcessingListOptions) ([]*ProcessingListEntry, error) {
+// List returns one page of the namespace's processing jobs. Pass the
+// result's Cursor in the next call's options to read the next page.
+func (p *ProcessingClient) List(opts *ProcessingListOptions) (*ProcessingListResult, error) {
 	if opts == nil {
 		opts = &ProcessingListOptions{}
 	}
@@ -260,71 +261,28 @@ func parseProcessingStatus(data []byte) (*ProcessingStatusResult, error) {
 	}, nil
 }
 
-// parseProcessingList parses the binary wire format for processing job list.
-//
-// Wire format: [count:u32]([name_len:u16][name][job_id_len:u16][job_id]
-//
-//	[status_len:u16][status][created_at:i64])*
-//	[has_more:u8][cursor_len:u16]
-func parseProcessingList(data []byte) ([]*ProcessingListEntry, error) {
-	if len(data) < 4 {
-		return nil, fmt.Errorf("processing list data too short")
+// parseProcessingList reads processing.list's answer:
+// [count:u32]([name_len:u16][name][job_id_len:u16][job_id]
+// [status_len:u16][status][created_at:i64])*[has_more:u8][cursor_len:u16][cursor].
+func parseProcessingList(data []byte) (*ProcessingListResult, error) {
+	r := bodyReader{buf: data}
+	n := r.u32()
+	// Each job takes at least fourteen bytes, so a count past that is a lie.
+	if uint64(n)*14 > uint64(len(data)) {
+		return nil, ErrIncompleteResponse
 	}
-
-	count := binary.LittleEndian.Uint32(data[0:4])
-	pos := 4
-	results := make([]*ProcessingListEntry, 0, count)
-
-	readU16 := func() (int, error) {
-		if pos+2 > len(data) {
-			return 0, fmt.Errorf("unexpected end of processing list data")
-		}
-		v := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		pos += 2
-		return v, nil
-	}
-	readStr := func() (string, error) {
-		n, err := readU16()
-		if err != nil {
-			return "", err
-		}
-		if pos+n > len(data) {
-			return "", fmt.Errorf("unexpected end of processing list data")
-		}
-		s := string(data[pos : pos+n])
-		pos += n
-		return s, nil
-	}
-
-	for i := uint32(0); i < count; i++ {
-		name, err := readStr()
-		if err != nil {
-			return nil, fmt.Errorf("parse processing list entry %d name: %w", i, err)
-		}
-
-		jobID, err := readStr()
-		if err != nil {
-			return nil, fmt.Errorf("parse processing list entry %d job_id: %w", i, err)
-		}
-
-		status, err := readStr()
-		if err != nil {
-			return nil, fmt.Errorf("parse processing list entry %d status: %w", i, err)
-		}
-
-		if pos+8 > len(data) {
-			return nil, fmt.Errorf("unexpected end of processing list data at created_at for entry %d", i)
-		}
-		createdAt := int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
-		pos += 8
-
-		results = append(results, &ProcessingListEntry{
-			Name:      name,
-			JobID:     jobID,
-			Status:    status,
-			CreatedAt: createdAt,
+	got := &ProcessingListResult{Jobs: make([]*ProcessingListEntry, 0, n)}
+	for i := uint32(0); i < n && !r.bad; i++ {
+		got.Jobs = append(got.Jobs, &ProcessingListEntry{
+			Name:      string(r.bytes16()),
+			JobID:     string(r.bytes16()),
+			Status:    string(r.bytes16()),
+			CreatedAt: int64(r.u64()),
 		})
 	}
-
-	return results, nil
+	got.HasMore, got.Cursor = r.pageTrailer()
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
 }

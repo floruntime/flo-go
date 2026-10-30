@@ -164,10 +164,7 @@ func decodeActionListAnswer(data []byte) (*ActionListResult, error) {
 		got.Actions = append(got.Actions, string(r.bytes16()))
 		r.bytes32()
 	}
-	got.HasMore = r.bool()
-	if cursor := r.bytes16(); got.HasMore {
-		got.Cursor = cursor
-	}
+	got.HasMore, got.Cursor = r.pageTrailer()
 	if err := r.done(); err != nil {
 		return nil, err
 	}
