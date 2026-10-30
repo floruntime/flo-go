@@ -54,7 +54,12 @@ func capturePayload(t *testing.T, call func(c *Client)) []byte {
 // request's value and options fields.
 func captureRequest(t *testing.T, call func(c *Client)) (value, options []byte) {
 	t.Helper()
-	p := capturePayload(t, call)
+	return splitValueAndOptions(capturePayload(t, call))
+}
+
+// splitValueAndOptions reads a hand-coded op's payload:
+// [namespace][key][value:u32 length][options:u16 length].
+func splitValueAndOptions(p []byte) (value, options []byte) {
 	off := 2 + int(binary.LittleEndian.Uint16(p)) // namespace
 	off += 2 + int(binary.LittleEndian.Uint16(p[off:]))
 	vlen := int(binary.LittleEndian.Uint32(p[off:]))

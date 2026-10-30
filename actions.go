@@ -101,6 +101,25 @@ func (a *ActionClient) Status(runID string, opts *ActionStatusOptions) (*ActionR
 	return st, nil
 }
 
+// List returns one page of the namespace's action names. Pass the result's
+// Cursor in the next call's options to read the next page.
+func (a *ActionClient) List(opts *ActionListOptions) (*ActionListResult, error) {
+	if opts == nil {
+		opts = &ActionListOptions{}
+	}
+	namespace := a.client.getNamespace(opts.Namespace)
+
+	// Value: [limit:u32][cursor...]
+	value := binary.LittleEndian.AppendUint32(make([]byte, 0, 4+len(opts.Cursor)), opts.Limit)
+	value = append(value, opts.Cursor...)
+
+	resp, err := a.client.sendAndCheck(OpActionList, namespace, []byte(opts.Prefix), value, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeActionListAnswer(resp.Data)
+}
+
 // Delete deletes an action.
 func (a *ActionClient) Delete(name string, opts *ActionStatusOptions) error {
 	if opts == nil {
@@ -128,6 +147,31 @@ func parseActionInvokeResult(data []byte) (*ActionInvokeResult, error) {
 		return nil, fmt.Errorf("malformed action invoke response: run_id length %d in %d bytes", runIDLen, len(data))
 	}
 	return &ActionInvokeResult{RunID: string(data[2 : 2+runIDLen])}, nil
+}
+
+// decodeActionListAnswer reads action.list's answer:
+// [count:u32]([name_len:u16][name][value_len:u32][value])*[has_more:u8][cursor_len:u16][cursor].
+// The server sends each value empty.
+func decodeActionListAnswer(data []byte) (*ActionListResult, error) {
+	r := bodyReader{buf: data}
+	n := r.u32()
+	// Each name takes at least six bytes, so a count past that is a lie.
+	if uint64(n)*6 > uint64(len(data)) {
+		return nil, ErrIncompleteResponse
+	}
+	got := &ActionListResult{Actions: make([]string, 0, n)}
+	for i := uint32(0); i < n && !r.bad; i++ {
+		got.Actions = append(got.Actions, string(r.bytes16()))
+		r.bytes32()
+	}
+	got.HasMore = r.bool()
+	if cursor := r.bytes16(); got.HasMore {
+		got.Cursor = cursor
+	}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
 }
 
 // decodeActionStatusAnswer reads action.status's answer:

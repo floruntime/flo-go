@@ -114,6 +114,11 @@ var (
 	// the shard resumes. It is never retried: resending it would write it
 	// twice, or halt again.
 	ErrOutcomePending = &ServerError{Status: StatusOutcomePending}
+
+	// ErrNoNamespace indicates the namespace the request names doesn't
+	// exist. ErrNotFound doesn't match it: that is a missing key, action or
+	// other thing inside a namespace.
+	ErrNoNamespace = &ServerError{Status: StatusNoNamespace}
 )
 
 // newServerError reads a refusal's body: [reason:u16][ran:u8][message].
@@ -169,6 +174,11 @@ func checkStatus(status StatusCode, data []byte, allowNotFound bool) error {
 // IsNotFound returns true if the error is a not found error.
 func IsNotFound(err error) bool {
 	return errors.Is(err, ErrNotFound)
+}
+
+// IsNoNamespace reports a request naming a namespace that doesn't exist.
+func IsNoNamespace(err error) bool {
+	return errors.Is(err, ErrNoNamespace)
 }
 
 // IsConflict returns true if the error is a conflict error.

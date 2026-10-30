@@ -168,3 +168,28 @@ func TestRefusalCarriesReasonAndRan(t *testing.T) {
 		}
 	}
 }
+
+// The server answers no_namespace with reason not_found. Reads that take a
+// missing key as an answer must still fail on it, and IsNotFound must not
+// match it.
+func TestNoNamespaceIsNotAMissingKey(t *testing.T) {
+	c := tableServer(t, func(OpCode, []byte) (StatusCode, []byte) {
+		return StatusNoNamespace, refusalBody(ReasonNotFound, RanNo, "namespace not found")
+	})
+	errs := map[string]error{}
+	_, errs["get"] = c.KV.Get("k", &GetOptions{Namespace: "nope"})
+	_, errs["delete"] = c.KV.Delete("k", &DeleteOptions{Namespace: "nope"})
+	errs["action register"] = c.Action.Register("a", ActionTypeUser, &ActionRegisterOptions{Namespace: "nope"})
+	for name, err := range errs {
+		var se *ServerError
+		if !IsNoNamespace(err) || !errors.Is(err, ErrNoNamespace) || !errors.As(err, &se) || se.Message != "namespace not found" {
+			t.Errorf("%s: got %v, want ErrNoNamespace with the server's message", name, err)
+		}
+		if IsNotFound(err) {
+			t.Errorf("%s: no_namespace matched IsNotFound", name)
+		}
+	}
+	if IsNoNamespace(checkStatus(StatusNotFound, refusalBody(ReasonNotFound, RanNo, "no such key"), false)) {
+		t.Error("not_found matched IsNoNamespace")
+	}
+}

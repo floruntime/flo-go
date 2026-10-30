@@ -48,8 +48,9 @@ const (
 	// length and bytes, not the count) may total: the request frame less
 	// the count and the longest routing key.
 	maxMGetKeyBytes = 253848
-	// maxScanCursor is the longest scan cursor; its length prefix is a u8.
-	maxScanCursor = 64
+	// maxScanCursor is the longest scan cursor: a shard id (u16), then the
+	// last key read. Its length prefix is a u16.
+	maxScanCursor = 2 + 4096
 	// defaultHistoryLimit is the version count when the caller gives none.
 	defaultHistoryLimit = 10
 )
@@ -314,11 +315,10 @@ func encodeScanBody(limit uint32, cursor []byte) ([]byte, error) {
 	if len(cursor) > maxScanCursor {
 		return nil, fmt.Errorf("flo: scan cursor is %d bytes, at most %d", len(cursor), maxScanCursor)
 	}
-	w := bodyWriter{buf: make([]byte, 0, 6+len(cursor))}
+	w := bodyWriter{buf: make([]byte, 0, 7+len(cursor))}
 	w.u8(1)
 	w.u32(limit)
-	w.u8(uint8(len(cursor)))
-	w.buf = append(w.buf, cursor...)
+	w.bytes16(cursor)
 	return w.buf, nil
 }
 
@@ -340,7 +340,10 @@ func decodeScanAnswer(data []byte) (*ScanResult, error) {
 	}
 	got := &ScanResult{Keys: keys}
 	if r.present() {
-		got.Cursor = r.bytes8()
+		got.Cursor = r.bytes16()
+		if len(got.Cursor) > maxScanCursor {
+			return nil, ErrIncompleteResponse
+		}
 	}
 	if err := r.done(); err != nil {
 		return nil, err
