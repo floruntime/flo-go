@@ -191,6 +191,25 @@ func (s *StreamClient) Trim(stream string, opts *StreamTrimOptions) (*StreamTrim
 	}, nil
 }
 
+// Delete removes a stream's records and metadata. The server refuses a
+// non-empty stream with ErrConflict unless Force is set. Deleting a stream
+// that doesn't exist succeeds.
+func (s *StreamClient) Delete(stream string, opts *StreamDeleteOptions) error {
+	if opts == nil {
+		opts = &StreamDeleteOptions{}
+	}
+
+	namespace := s.client.getNamespace(opts.Namespace)
+
+	builder := NewOptionsBuilder()
+	if opts.Force {
+		builder.AddFlag(OptForce)
+	}
+
+	_, err := s.client.sendAndCheck(OpStreamDelete, namespace, []byte(stream), nil, builder.Build(), false)
+	return err
+}
+
 // GroupJoin joins a consumer group.
 func (s *StreamClient) GroupJoin(stream, group, consumer string, opts *StreamGroupJoinOptions) error {
 	if opts == nil {

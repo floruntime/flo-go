@@ -28,6 +28,10 @@ this SDK still pins the previous server.
 - `ReasonAdminOnly`: the op is served only on a node's admin socket
 - `ActionClient.List`, paged: `ActionListOptions.Limit`, `Cursor` and
   `Prefix` in, `ActionListResult.Actions`, `HasMore` and `Cursor` out
+- `StreamClient.Delete` (`OpStreamDelete`, 0x140) removes a stream's records
+  and metadata. A non-empty stream is refused with `ErrConflict` unless
+  `StreamDeleteOptions.Force` is set (`OptForce`, 0x2C); deleting a missing
+  stream succeeds
 - `OpNamespaceEnsure` (0x016), so the op table matches the server's; no
   client call sends it, nor `OpClusterRepairSkip`
 

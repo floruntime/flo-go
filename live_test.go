@@ -225,6 +225,26 @@ func TestLiveStreamAppendAndRead(t *testing.T) {
 	}
 }
 
+func TestLiveStreamDeleteNeedsForceWhenNotEmpty(t *testing.T) {
+	c := liveClient(t)
+	if _, err := c.Stream.Append("doomed", []byte("x"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Stream.Delete("doomed", nil); !IsConflict(err) {
+		t.Fatalf("delete without force: %v, want ErrConflict", err)
+	}
+	if err := c.Stream.Delete("doomed", &StreamDeleteOptions{Force: true}); err != nil {
+		t.Fatalf("delete with force: %v", err)
+	}
+	res, err := c.Stream.Read("doomed", nil)
+	if err != nil || len(res.Records) != 0 {
+		t.Fatalf("read after delete: %+v, %v; want no records", res, err)
+	}
+	if err := c.Stream.Delete("doomed", nil); err != nil {
+		t.Fatalf("deleting a missing stream: %v, want success", err)
+	}
+}
+
 func TestLiveQueueEnqueueDequeueAck(t *testing.T) {
 	c := liveClient(t)
 	if _, err := c.Queue.Enqueue("jobs", []byte("job-1"), nil); err != nil {

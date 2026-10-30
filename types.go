@@ -100,6 +100,7 @@ const (
 	OpStreamList   OpCode = 0x13B
 	OpStreamCreate OpCode = 0x13D
 	OpStreamAlter  OpCode = 0x13F
+	OpStreamDelete OpCode = 0x140
 
 	// ── Stream Consumer Groups (0x150 – 0x16F) ──
 	OpStreamGroupCreate           OpCode = 0x150
@@ -267,6 +268,7 @@ const (
 	OptPartitionKey  OptionTag = 0x25 // string: Key for partition routing
 	OptMaxAgeSeconds OptionTag = 0x26 // u64: Maximum age in seconds for retention
 	OptDryRun        OptionTag = 0x28 // void: Flag to preview what would be deleted
+	OptForce         OptionTag = 0x2C // void: Allow a destructive op, e.g. deleting a non-empty stream
 
 	// Consumer Group Options (0x30 - 0x3F)
 	OptAckTimeoutMS OptionTag = 0x30 // u32: Time before unacked message auto-redelivers
@@ -642,6 +644,12 @@ type StreamTrimOptions struct {
 type StreamTrimResult struct {
 	Removed  uint64 // Records removed
 	FirstSeq uint64 // Sequence of the first record left; meaningful only when records remain
+}
+
+// StreamDeleteOptions contains options for stream delete operations.
+type StreamDeleteOptions struct {
+	Namespace string
+	Force     bool // Delete the stream even if it still holds records
 }
 
 // StreamInfoOptions contains options for stream info operations.
