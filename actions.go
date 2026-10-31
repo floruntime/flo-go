@@ -159,9 +159,9 @@ func decodeActionListAnswer(data []byte) (*ActionListResult, error) {
 	if uint64(n)*6 > uint64(len(data)) {
 		return nil, ErrIncompleteResponse
 	}
-	got := &ActionListResult{Actions: make([]string, 0, n)}
+	got := &ActionListResult{Names: make([]string, 0, n)}
 	for i := uint32(0); i < n && !r.bad; i++ {
-		got.Actions = append(got.Actions, string(r.bytes16()))
+		got.Names = append(got.Names, string(r.bytes16()))
 		r.bytes32()
 	}
 	got.HasMore, got.Cursor = r.pageTrailer()

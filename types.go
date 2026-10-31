@@ -784,7 +784,7 @@ type ActionListOptions struct {
 
 // ActionListResult is one page of a namespace's action names.
 type ActionListResult struct {
-	Actions []string
+	Names []string
 	// HasMore says another page follows; Cursor reads it.
 	HasMore bool
 	// Cursor is where the next page starts; nil on the last page.

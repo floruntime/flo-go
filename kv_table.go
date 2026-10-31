@@ -161,11 +161,16 @@ func (r *bodyReader) bytes16() []byte { return r.bytesN(int(r.u16())) }
 func (r *bodyReader) bytes32() []byte { return r.bytesN(int(r.u32())) }
 
 // pageTrailer reads a cross-shard list page's [has_more:u8][cursor_len:u16]
-// [cursor] tail. The cursor is kept only when another page follows, so the
-// last page's is nil.
+// [cursor] tail. A cursor comes exactly when another page follows: one
+// without the other would end a listing early or loop on it, so either
+// marks the answer bad. The last page's cursor is nil.
 func (r *bodyReader) pageTrailer() (hasMore bool, cursor []byte) {
 	hasMore = r.bool()
-	if c := r.bytes16(); hasMore {
+	c := r.bytes16()
+	if hasMore != (len(c) > 0) {
+		r.bad = true
+	}
+	if hasMore {
 		cursor = c
 	}
 	return hasMore, cursor

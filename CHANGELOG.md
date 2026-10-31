@@ -23,16 +23,21 @@ live tests run against; this SDK no longer talks to an older server.
   `ProcessingClient.List` a `*ProcessingListResult` (`Jobs`, `HasMore`,
   `Cursor`) instead of a slice: both read one page, and a short page can
   still have more behind it
+- `ActionListOptions.Limit` is a `uint32` instead of a `*uint32` (0 lets the
+  server choose)
+- `OpNamespaceConfigSet` (0x014) and `OpNamespaceConfigGet` (0x015) are gone:
+  the server retired them
 
 ### Added
 
-- `StatusNoNamespace`, `ErrNoNamespace` and `IsNoNamespace`: the namespace a
-  request names doesn't exist. `ErrNotFound` no longer matches it, so a read
-  that takes a missing key as an answer (`Get`, `Delete`) fails on a missing
-  namespace instead of reporting the key absent
+- `StatusNoNamespace` (14), `ErrNoNamespace` and `IsNoNamespace`: the
+  namespace a request names doesn't exist. It is its own error, which
+  `ErrNotFound` doesn't match. Reads in a namespace that was never created
+  return it from the server version that adds it; flo `bdb66a0` still answers
+  them as absent (`Get` reports not found, lists come back empty)
 - `ReasonAdminOnly`: the op is served only on a node's admin socket
 - `ActionClient.List`, paged: `ActionListOptions.Limit`, `Cursor` and
-  `Prefix` in, `ActionListResult.Actions`, `HasMore` and `Cursor` out
+  `Prefix` in, `ActionListResult.Names`, `HasMore` and `Cursor` out
 - `StreamClient.Delete` (`OpStreamDelete`, 0x140) removes a stream's records
   and metadata. A non-empty stream is refused with `ErrConflict` unless
   `StreamDeleteOptions.Force` is set (`OptForce`, 0x2C); deleting a missing
@@ -44,9 +49,4 @@ live tests run against; this SDK no longer talks to an older server.
 
 - A `kv.scan` cursor is up to 4098 bytes (a shard id and the last key read),
   up from 64, and its length prefix is a u16
-- `ActionListOptions.Limit` is a `uint32` (0 lets the server choose)
 
-### Removed
-
-- `OpNamespaceConfigSet` (0x014) and `OpNamespaceConfigGet` (0x015): the
-  server retired them

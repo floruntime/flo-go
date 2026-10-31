@@ -106,7 +106,7 @@ func TestLiveActionListPagesEveryActionOnce(t *testing.T) {
 		if err != nil {
 			return nil, false, nil, err
 		}
-		return r.Actions, r.HasMore, r.Cursor, nil
+		return r.Names, r.HasMore, r.Cursor, nil
 	})
 }
 

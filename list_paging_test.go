@@ -85,7 +85,7 @@ func TestActionListPagesByCursor(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		names = append(names, page.Actions...)
+		names = append(names, page.Names...)
 		if !page.HasMore {
 			if page.Cursor != nil {
 				t.Errorf("last page carries cursor % x", page.Cursor)
@@ -285,5 +285,44 @@ func TestParseWorkflowDefinitionList(t *testing.T) {
 	}
 	if _, err := parseWorkflowDefinitionList(append(b, 0)); !errors.Is(err, ErrIncompleteResponse) {
 		t.Errorf("trailing byte: %v", err)
+	}
+}
+
+// A trailer whose has_more and cursor disagree is refused by every paged
+// decoder: has_more without a cursor would loop on the first page, a cursor
+// without has_more would end the listing early.
+func TestListTrailerMismatchIsRefused(t *testing.T) {
+	decoders := map[string]struct {
+		page   []byte // one entry and a last-page trailer (00 00 00)
+		decode func([]byte) error
+	}{
+		"action.list": {actionListPage(nil, "a"), func(b []byte) error {
+			_, err := decodeActionListAnswer(b)
+			return err
+		}},
+		"processing.list": {processingListPage(nil, ProcessingListEntry{Name: "j", JobID: "1", Status: "running"}), func(b []byte) error {
+			_, err := parseProcessingList(b)
+			return err
+		}},
+		"workflow.list_definitions": {definitionListPage(nil, WorkflowDefinitionEntry{Name: "w", Version: "1"}), func(b []byte) error {
+			_, err := parseWorkflowDefinitionList(b)
+			return err
+		}},
+	}
+	trailers := map[string][]byte{
+		"has_more=0 with a cursor":    {0, 2, 0, 7, 7},
+		"has_more=1 without a cursor": {1, 0, 0},
+	}
+	for op, d := range decoders {
+		body := d.page[:len(d.page)-3]
+		if err := d.decode(d.page); err != nil {
+			t.Fatalf("%s: last page: %v", op, err)
+		}
+		for name, tr := range trailers {
+			b := append(append([]byte{}, body...), tr...)
+			if err := d.decode(b); !errors.Is(err, ErrIncompleteResponse) {
+				t.Errorf("%s, %s: err = %v, want ErrIncompleteResponse", op, name, err)
+			}
+		}
 	}
 }
