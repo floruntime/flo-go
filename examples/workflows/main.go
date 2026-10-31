@@ -162,12 +162,20 @@ func main() {
 
 	fmt.Println("\n--- List Definitions ---")
 
-	defsData, err := client.Workflow.ListDefinitions(nil)
-	if err != nil {
-		log.Fatalf("ListDefinitions failed: %v", err)
-	}
-	for _, d := range parseListDefinitions(defsData) {
-		fmt.Printf("  %s v%s\n", d.Name, d.Version)
+	// A page can be short while more follow; read until HasMore is false.
+	defsOpts := &flo.WorkflowListDefinitionsOptions{}
+	for {
+		page, err := client.Workflow.ListDefinitions(defsOpts)
+		if err != nil {
+			log.Fatalf("ListDefinitions failed: %v", err)
+		}
+		for _, d := range page.Definitions {
+			fmt.Printf("  %s v%s\n", d.Name, d.Version)
+		}
+		if !page.HasMore {
+			break
+		}
+		defsOpts.Cursor = page.Cursor
 	}
 
 	fmt.Println("\nDone.")
@@ -263,11 +271,6 @@ type RunEntry struct {
 	CreatedAt               int64
 }
 
-type DefinitionEntry struct {
-	Name, Version string
-	CreatedAt     int64
-}
-
 func parseHistory(data []byte) []HistoryEvent {
 	if len(data) < 4 {
 		return nil
@@ -316,27 +319,4 @@ func parseListRuns(data []byte) []RunEntry {
 		runs = append(runs, RunEntry{RunID: rid, Workflow: wf, Status: st, CreatedAt: ts})
 	}
 	return runs
-}
-
-func parseListDefinitions(data []byte) []DefinitionEntry {
-	if len(data) < 4 {
-		return nil
-	}
-	count := binary.LittleEndian.Uint32(data[0:4])
-	pos := 4
-	defs := make([]DefinitionEntry, 0, count)
-	for i := uint32(0); i < count; i++ {
-		nameLen := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		pos += 2
-		name := string(data[pos : pos+nameLen])
-		pos += nameLen
-		verLen := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		pos += 2
-		ver := string(data[pos : pos+verLen])
-		pos += verLen
-		ts := int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
-		pos += 8
-		defs = append(defs, DefinitionEntry{Name: name, Version: ver, CreatedAt: ts})
-	}
-	return defs
 }

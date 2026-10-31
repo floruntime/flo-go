@@ -1,6 +1,7 @@
 package flo
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"strings"
@@ -71,21 +72,27 @@ func TestParseProcessingStatusRefusesAReasonCutShort(t *testing.T) {
 }
 
 func TestParseProcessingList(t *testing.T) {
-	b := binary.LittleEndian.AppendUint32(nil, 2)
-	for _, e := range []ProcessingListEntry{{"a", "j1", "running", 7}, {"b", "j2", "failed", 8}} {
-		b = appendStr(b, e.Name)
-		b = appendStr(b, e.JobID)
-		b = appendStr(b, e.Status)
-		b = binary.LittleEndian.AppendUint64(b, uint64(e.CreatedAt))
-	}
-	b = append(b, 0)    // has_more
-	b = append(b, 0, 0) // cursor_len
+	cursor := []byte{0x05, 0x00, 'j', '2'}
+	b := processingListPage(cursor,
+		ProcessingListEntry{"a", "j1", "running", 7},
+		ProcessingListEntry{"b", "j2", "failed", 8})
 
 	got, err := parseProcessingList(b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || *got[0] != (ProcessingListEntry{"a", "j1", "running", 7}) || *got[1] != (ProcessingListEntry{"b", "j2", "failed", 8}) {
-		t.Errorf("got %+v %+v", got[0], got[1])
+	if len(got.Jobs) != 2 || *got.Jobs[0] != (ProcessingListEntry{"a", "j1", "running", 7}) || *got.Jobs[1] != (ProcessingListEntry{"b", "j2", "failed", 8}) {
+		t.Errorf("jobs = %+v", got.Jobs)
+	}
+	if !got.HasMore || !bytes.Equal(got.Cursor, cursor) {
+		t.Errorf("has_more %v cursor % x, want true % x", got.HasMore, got.Cursor, cursor)
+	}
+	for n := range b {
+		if _, err := parseProcessingList(b[:n]); !errors.Is(err, ErrIncompleteResponse) {
+			t.Errorf("cut at %d: %v", n, err)
+		}
+	}
+	if _, err := parseProcessingList(append(b, 0)); !errors.Is(err, ErrIncompleteResponse) {
+		t.Errorf("trailing byte: %v", err)
 	}
 }

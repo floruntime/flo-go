@@ -41,7 +41,7 @@ func TestKVRequestBodiesMatchTheServer(t *testing.T) {
 		want string
 	}{
 		{"delete", enc(encodeDeleteBody(&cas, "rk", nil)), "010700000000000000010200726b00"},
-		{"scan", enc(encodeScanBody(2, []byte("c1"))), "0102000000026331"},
+		{"scan", enc(encodeScanBody(2, []byte("c1"))), "010200000002006331"},
 		{"history", enc(encodeHistoryBody(2, nil, "")), "01020000000000"},
 		{"history before a version", enc(encodeHistoryBody(2, Uint64Ptr(5), "")), "0102000000010500000000000000" + "00"},
 		{"history with routing key", enc(encodeHistoryBody(2, nil, "rk")), "010200000000010200726b"},
@@ -78,7 +78,7 @@ func TestKVAnswersMatchTheServer(t *testing.T) {
 	existed, err = decodeDeleteAnswer(hx(t, "00"))
 	check("delete in txn", existed, (*bool)(nil), err)
 
-	scan, err := decodeScanAnswer(hx(t, "02000100610200626201026332"))
+	scan, err := decodeScanAnswer(hx(t, "0200010061020062620102006332"))
 	check("scan", scan, &ScanResult{Keys: []string{"a", "bb"}, Cursor: []byte("c2")}, err)
 	scan, err = decodeScanAnswer(hx(t, "000000"))
 	check("last scan", scan, &ScanResult{Keys: []string{}}, err)
@@ -133,7 +133,7 @@ func TestKVAnswersAreDecodedWhole(t *testing.T) {
 		"get":        {func(b []byte) error { _, err := decodeGetAnswer(b); return err }, "040000000000000002000000686900"},
 		"get expiry": {func(b []byte) error { _, err := decodeGetAnswer(b); return err }, "040000000000000002000000686901" + "0068e5cf8b010000"},
 		"delete":     {func(b []byte) error { _, err := decodeDeleteAnswer(b); return err }, "0101"},
-		"scan":       {func(b []byte) error { _, err := decodeScanAnswer(b); return err }, "02000100610200626201026332"},
+		"scan":       {func(b []byte) error { _, err := decodeScanAnswer(b); return err }, "0200010061020062620102006332"},
 		"history":    {func(b []byte) error { _, err := decodeHistoryAnswer(b); return err }, "010300000000000000e8030000000000000002000000763300"},
 		"mget":       {func(b []byte) error { _, err := decodeMGetAnswer(b); return err }, "0200010200000000000000010000007800000000000000000000000000010200"},
 		"incr":       {func(b []byte) error { _, err := decodeIncrAnswer(b); return err }, "010400000000000000012a00000000000000"},
@@ -396,10 +396,10 @@ func TestKVOpsSendTheirEnvelopeKey(t *testing.T) {
 		body      []byte
 		call      func(c *Client)
 	}{
-		{"scan names the prefix", "user:", hx(t, "0102000000026331"), func(c *Client) {
+		{"scan names the prefix", "user:", hx(t, "010200000002006331"), func(c *Client) {
 			c.KV.Scan("user:", &ScanOptions{Limit: &limit, Cursor: []byte("c1")})
 		}},
-		{"scan defaults its limit", "", hx(t, "010004000000"), func(c *Client) { c.KV.Scan("", nil) }},
+		{"scan defaults its limit", "", hx(t, "01000400000000"), func(c *Client) { c.KV.Scan("", nil) }},
 		{"history defaults its limit", "k", hx(t, "010a0000000000"), func(c *Client) { c.KV.History("k", nil) }},
 		{"incr defaults its delta", "k", cat([]byte{1}, u64le(1), []byte{0, 0}), func(c *Client) { c.KV.Incr("k", nil) }},
 		{"expire carries its cas", "k", cat(u64le(0), []byte{1}, u64le(4), []byte{0, 0}), func(c *Client) {
@@ -602,5 +602,45 @@ func TestAMissingKeyFromAHaltedShardIsStale(t *testing.T) {
 	}
 	if got, err := plain.KV.JsonGet("k", "", nil); got != nil || err != nil {
 		t.Errorf("json_get = %+v, %v; want nil, nil", got, err)
+	}
+}
+
+// A scan cursor is a shard id and the last key read, so it runs to the
+// longest key plus two bytes: one past 255 must go out and come back whole.
+func TestLongScanCursorRoundTrips(t *testing.T) {
+	long := append([]byte{3, 0}, bytes.Repeat([]byte("k"), maxScanCursor-2)...)
+	var sent [][]byte
+	c := tableServer(t, func(op OpCode, payload []byte) (StatusCode, []byte) {
+		_, _, body := tableBody(t, payload)
+		sent = append(sent, body)
+		if len(sent) == 1 {
+			w := bodyWriter{}
+			w.u16(1)
+			w.bytes16([]byte("a"))
+			w.u8(1)
+			w.bytes16(long)
+			return StatusOK, w.buf
+		}
+		return StatusOK, []byte{0, 0, 0}
+	})
+	first, err := c.KV.Scan("", nil)
+	if err != nil || !bytes.Equal(first.Cursor, long) {
+		t.Fatalf("first page: cursor of %d bytes, %v; want %d", len(first.Cursor), err, len(long))
+	}
+	last, err := c.KV.Scan("", &ScanOptions{Cursor: first.Cursor})
+	if err != nil || last.Cursor != nil {
+		t.Fatalf("last page: %+v, %v", last, err)
+	}
+	want := cat([]byte{1, 0, 4, 0, 0}, binary.LittleEndian.AppendUint16(nil, uint16(len(long))), long)
+	if !bytes.Equal(sent[1], want) {
+		t.Errorf("second request body is %d bytes, want the cursor sent back whole (%d)", len(sent[1]), len(want))
+	}
+	// A cursor longer than any the server writes is refused.
+	over := bodyWriter{}
+	over.u16(0)
+	over.u8(1)
+	over.bytes16(make([]byte, maxScanCursor+1))
+	if _, err := decodeScanAnswer(over.buf); !errors.Is(err, ErrIncompleteResponse) {
+		t.Errorf("cursor over the bound: %v", err)
 	}
 }

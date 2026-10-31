@@ -87,7 +87,7 @@ jobs:
           chmod +x flo-bin/flo
           echo "FLO_BINARY=$RUNNER_TEMP/flo-bin/flo" >> "$GITHUB_ENV"
           mkdir -p flo-data
-          ./flo-bin/flo server start --port 4453 --data-dir "$RUNNER_TEMP/flo-data" > flo-server.log 2>&1 &
+          ./flo-bin/flo server start --port 4453 --shards 12 --data-dir "$RUNNER_TEMP/flo-data" > flo-server.log 2>&1 &
           for _ in $(seq 1 50); do
             if (exec 3<>/dev/tcp/127.0.0.1/4453) 2>/dev/null; then exit 0; fi
             sleep 0.2

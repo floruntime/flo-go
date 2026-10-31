@@ -394,3 +394,31 @@ func TestParseActionInvokeResult(t *testing.T) {
 		}
 	}
 }
+
+// The op codes follow the server's table: 0x014 and 0x015 are retired, and
+// 0x016 and 0x034 are known though no client call sends them.
+func TestOpCodesFollowTheServerTable(t *testing.T) {
+	ops := constsOfType(t, "types.go", "OpCode")["OpCode"]
+	for _, retired := range []uint64{0x014, 0x015} {
+		if name, ok := ops[retired]; ok {
+			t.Errorf("retired op 0x%03x is still %s", retired, name)
+		}
+	}
+	for code, want := range map[uint64]string{
+		0x016: "OpNamespaceEnsure",
+		0x030: "OpClusterStatus",
+		0x031: "OpClusterMembers",
+		0x032: "OpClusterPromote",
+		0x033: "OpClusterRemove",
+		0x034: "OpClusterRepairSkip",
+	} {
+		if ops[code] != want {
+			t.Errorf("op 0x%03x is %q, want %s", code, ops[code], want)
+		}
+	}
+	for code := uint64(0x035); code < 0x050; code++ {
+		if name, ok := ops[code]; ok {
+			t.Errorf("op 0x%03x is %s; the server has none there", code, name)
+		}
+	}
+}

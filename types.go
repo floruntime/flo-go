@@ -31,7 +31,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0x05fe53f432e943c4
+	TableHash uint64 = 0xa8de7758afa69427
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -57,21 +57,20 @@ const (
 	OpPing OpCode = 0x000
 
 	// ── Namespace (0x010 – 0x02F) ──
-	OpNamespaceCreate    OpCode = 0x010
-	OpNamespaceDelete    OpCode = 0x011
-	OpNamespaceList      OpCode = 0x012
-	OpNamespaceInfo      OpCode = 0x013
-	OpNamespaceConfigSet OpCode = 0x014
-	OpNamespaceConfigGet OpCode = 0x015
+	OpNamespaceCreate OpCode = 0x010
+	OpNamespaceDelete OpCode = 0x011
+	OpNamespaceList   OpCode = 0x012
+	OpNamespaceInfo   OpCode = 0x013
+	// OpNamespaceEnsure is sent shard to shard, never by a client.
+	OpNamespaceEnsure OpCode = 0x016
 
 	// ── Cluster (0x030 – 0x04F) ──
-	OpClusterStatus         OpCode = 0x030
-	OpClusterMembers        OpCode = 0x031
-	OpClusterJoin           OpCode = 0x032
-	OpClusterLeave          OpCode = 0x033
-	OpClusterTransferLeader OpCode = 0x034
-	OpClusterAddNode        OpCode = 0x035
-	OpClusterRemoveNode     OpCode = 0x036
+	OpClusterStatus  OpCode = 0x030
+	OpClusterMembers OpCode = 0x031
+	OpClusterPromote OpCode = 0x032
+	OpClusterRemove  OpCode = 0x033
+	// OpClusterRepairSkip is served only on a node's admin socket.
+	OpClusterRepairSkip OpCode = 0x034
 
 	// ── KV (0x100 – 0x12F) ──
 	OpKVPut     OpCode = 0x100
@@ -101,6 +100,7 @@ const (
 	OpStreamList   OpCode = 0x13B
 	OpStreamCreate OpCode = 0x13D
 	OpStreamAlter  OpCode = 0x13F
+	OpStreamDelete OpCode = 0x140
 
 	// ── Stream Consumer Groups (0x150 – 0x16F) ──
 	OpStreamGroupCreate           OpCode = 0x150
@@ -199,6 +199,9 @@ const (
 	// StatusOutcomePending: the write committed but hasn't applied, because
 	// its shard halted at or before it. Never resend it unchanged.
 	StatusOutcomePending StatusCode = 13
+	// StatusNoNamespace: the namespace the request names doesn't exist.
+	// Not StatusNotFound, which is a missing key.
+	StatusNoNamespace StatusCode = 14
 )
 
 // ResponseStale is the answer flag a halted shard sets on a read it serves
@@ -236,6 +239,8 @@ func (s StatusCode) String() string {
 		return "Unavailable: no leader or the shard isn't taking writes; retry"
 	case StatusOutcomePending:
 		return "Committed, not applied: its shard halted; don't resend it unchanged"
+	case StatusNoNamespace:
+		return "No such namespace"
 	default:
 		return fmt.Sprintf("Unknown status %d", uint8(s))
 	}
@@ -263,6 +268,7 @@ const (
 	OptPartitionKey  OptionTag = 0x25 // string: Key for partition routing
 	OptMaxAgeSeconds OptionTag = 0x26 // u64: Maximum age in seconds for retention
 	OptDryRun        OptionTag = 0x28 // void: Flag to preview what would be deleted
+	OptForce         OptionTag = 0x2C // void: Allow a destructive op, e.g. deleting a non-empty stream
 
 	// Consumer Group Options (0x30 - 0x3F)
 	OptAckTimeoutMS OptionTag = 0x30 // u32: Time before unacked message auto-redelivers
@@ -640,6 +646,12 @@ type StreamTrimResult struct {
 	FirstSeq uint64 // Sequence of the first record left; meaningful only when records remain
 }
 
+// StreamDeleteOptions contains options for stream delete operations.
+type StreamDeleteOptions struct {
+	Namespace string
+	Force     bool // Delete the stream even if it still holds records
+}
+
 // StreamInfoOptions contains options for stream info operations.
 type StreamInfoOptions struct {
 	Namespace string
@@ -762,8 +774,21 @@ type ActionStatusOptions struct {
 // ActionListOptions contains options for listing actions.
 type ActionListOptions struct {
 	Namespace string
-	Limit     *uint32
-	Prefix    string
+	// Limit is the most names on the page; 0 lets the server choose.
+	Limit uint32
+	// Cursor is the previous page's Cursor; nil reads the first page.
+	Cursor []byte
+	// Prefix, when set, lists only the actions whose names start with it.
+	Prefix string
+}
+
+// ActionListResult is one page of a namespace's action names.
+type ActionListResult struct {
+	Names []string
+	// HasMore says another page follows; Cursor reads it.
+	HasMore bool
+	// Cursor is where the next page starts; nil on the last page.
+	Cursor []byte
 }
 
 // WorkerRegisterOptions contains options for registering a worker in the worker registry.
@@ -989,8 +1014,28 @@ type WorkflowListRunsOptions struct {
 // WorkflowListDefinitionsOptions contains options for listing workflow definitions.
 type WorkflowListDefinitionsOptions struct {
 	Namespace string
-	Limit     uint32
-	Cursor    []byte
+	// Limit is the most definitions on the page; 0 means 100.
+	Limit uint32
+	// Cursor is the previous page's Cursor; nil reads the first page.
+	Cursor []byte
+}
+
+// WorkflowDefinitionEntry is one workflow definition in a list page.
+type WorkflowDefinitionEntry struct {
+	Name      string
+	Version   string
+	CreatedAt int64
+}
+
+// WorkflowDefinitionListResult is one page of a namespace's workflow
+// definitions. A page can hold fewer than Limit while HasMore is set: keep
+// reading until HasMore is false.
+type WorkflowDefinitionListResult struct {
+	Definitions []*WorkflowDefinitionEntry
+	// HasMore says another page follows; Cursor reads it.
+	HasMore bool
+	// Cursor is where the next page starts; nil on the last page.
+	Cursor []byte
 }
 
 // =============================================================================
@@ -1010,8 +1055,21 @@ type ProcessingStatusOptions struct {
 // ProcessingListOptions contains options for listing processing jobs.
 type ProcessingListOptions struct {
 	Namespace string
-	Limit     uint32
-	Cursor    []byte
+	// Limit is the most jobs on the page; 0 means 100.
+	Limit uint32
+	// Cursor is the previous page's Cursor; nil reads the first page.
+	Cursor []byte
+}
+
+// ProcessingListResult is one page of a namespace's processing jobs. A page
+// can hold fewer than Limit while HasMore is set: keep reading until HasMore
+// is false.
+type ProcessingListResult struct {
+	Jobs []*ProcessingListEntry
+	// HasMore says another page follows; Cursor reads it.
+	HasMore bool
+	// Cursor is where the next page starts; nil on the last page.
+	Cursor []byte
 }
 
 // ProcessingStopOptions contains options for stopping a processing job.
@@ -1111,6 +1169,8 @@ const (
 	// until an operator repairs it. With StatusUnavailable the write didn't
 	// run; with StatusOutcomePending it committed and waits on the repair.
 	ReasonShardHalted Reason = 29
+	// ReasonAdminOnly: the op is served only on the node's admin socket.
+	ReasonAdminOnly Reason = 30
 )
 
 var reasonNames = map[Reason]string{
@@ -1124,7 +1184,7 @@ var reasonNames = map[Reason]string{
 	ReasonConflictingFields: "conflicting_fields", ReasonWritesStopped: "writes_stopped", ReasonTooManyProposals: "too_many_proposals",
 	ReasonWrongType: "wrong_type", ReasonTooManyTransactions: "too_many_transactions",
 	ReasonStaleReport: "stale_report", ReasonWorkerUnhealthy: "worker_unhealthy", ReasonWorkerDraining: "worker_draining",
-	ReasonShardHalted: "shard_halted",
+	ReasonShardHalted: "shard_halted", ReasonAdminOnly: "admin_only",
 }
 
 func (r Reason) String() string {

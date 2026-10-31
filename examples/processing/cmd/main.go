@@ -98,9 +98,19 @@ func main() {
 	// -------------------------------------------------------------------------
 	fmt.Println("\n--- List Jobs ---")
 
-	entries, err := client.Processing.List(nil)
-	if err != nil {
-		log.Fatalf("List failed: %v", err)
+	// A page can be short while more follow; read until HasMore is false.
+	var entries []*flo.ProcessingListEntry
+	listOpts := &flo.ProcessingListOptions{}
+	for {
+		page, err := client.Processing.List(listOpts)
+		if err != nil {
+			log.Fatalf("List failed: %v", err)
+		}
+		entries = append(entries, page.Jobs...)
+		if !page.HasMore {
+			break
+		}
+		listOpts.Cursor = page.Cursor
 	}
 	fmt.Printf("  %d jobs:\n", len(entries))
 	for _, e := range entries {
