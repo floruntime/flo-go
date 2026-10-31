@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 These follow the server's wire. The server's op table changed with them, so
-`TableHash` is now `0xa8de7758afa69427`, the hash of flo `bdb66a0`, which CI's
+`TableHash` is now `0xc751512225a42d04`, the hash of flo `3614d95`, which CI's
 live tests run against; this SDK no longer talks to an older server.
 
 ### Breaking
@@ -25,6 +25,23 @@ live tests run against; this SDK no longer talks to an older server.
   still have more behind it
 - `ActionListOptions.Limit` is a `uint32` instead of a `*uint32` (0 lets the
   server choose)
+- A run id chosen at start (`WorkflowStartOptions.RunID`) is found by status,
+  history, signal and cancel on any shard, and a later start of the same id
+  on another workflow is refused with `ErrConflict`. Two starts of one id sent
+  at once can both run; a lookup by the id then refuses it with `ErrConflict`.
+- `WorkflowClient.ListRuns` returns a `*WorkflowRunListResult` (`Runs`, each
+  with `RunID`, `Workflow`, `Status` and `CreatedAt`, newest first; `HasMore`;
+  `Cursor`) instead of raw bytes. It reads one page, of one workflow's runs
+  or, with an empty name, every workflow's; a short page can still have more
+  behind it. `WorkflowListRunsOptions.Cursor` is the opaque `[]byte` a page
+  returns instead of a string, and a `Limit` of 0 lets the server choose
+- `StreamClient.Info` on a stream that doesn't exist returns `ErrNotFound`
+  (the server now answers not_found); it used to return an all-zero
+  `StreamInfo`
+- Reads, lists and scans in a namespace that was never created return
+  `ErrNoNamespace` (status 14) instead of answering as if it were empty:
+  `KV.Get` no longer reports a plain not found there, and lists no longer
+  come back empty. A write still creates the namespace
 - `OpNamespaceConfigSet` (0x014) and `OpNamespaceConfigGet` (0x015) are gone:
   the server retired them
 
@@ -32,9 +49,7 @@ live tests run against; this SDK no longer talks to an older server.
 
 - `StatusNoNamespace` (14), `ErrNoNamespace` and `IsNoNamespace`: the
   namespace a request names doesn't exist. It is its own error, which
-  `ErrNotFound` doesn't match. Reads in a namespace that was never created
-  return it from the server version that adds it; flo `bdb66a0` still answers
-  them as absent (`Get` reports not found, lists come back empty)
+  `ErrNotFound` doesn't match
 - `ReasonAdminOnly`: the op is served only on a node's admin socket
 - `ActionClient.List`, paged: `ActionListOptions.Limit`, `Cursor` and
   `Prefix` in, `ActionListResult.Names`, `HasMore` and `Cursor` out

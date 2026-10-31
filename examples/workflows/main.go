@@ -152,11 +152,12 @@ func main() {
 	// -------------------------------------------------------------------------
 	fmt.Println("\n--- List Runs ---")
 
-	runsData, err := client.Workflow.ListRuns("order-processing", &flo.WorkflowListRunsOptions{Limit: 5})
+	// The newest page only; pass page.Cursor back to read further.
+	runs, err := client.Workflow.ListRuns("order-processing", &flo.WorkflowListRunsOptions{Limit: 5})
 	if err != nil {
 		log.Fatalf("ListRuns failed: %v", err)
 	}
-	for _, run := range parseListRuns(runsData) {
+	for _, run := range runs.Runs {
 		fmt.Printf("  %s — %s — %s\n", run.RunID, run.Workflow, run.Status)
 	}
 
@@ -266,11 +267,6 @@ type HistoryEvent struct {
 	Timestamp    int64
 }
 
-type RunEntry struct {
-	RunID, Workflow, Status string
-	CreatedAt               int64
-}
-
 func parseHistory(data []byte) []HistoryEvent {
 	if len(data) < 4 {
 		return nil
@@ -292,31 +288,4 @@ func parseHistory(data []byte) []HistoryEvent {
 		events = append(events, HistoryEvent{Type: typ, Detail: detail, Timestamp: ts})
 	}
 	return events
-}
-
-func parseListRuns(data []byte) []RunEntry {
-	if len(data) < 4 {
-		return nil
-	}
-	count := binary.LittleEndian.Uint32(data[0:4])
-	pos := 4
-	runs := make([]RunEntry, 0, count)
-	for i := uint32(0); i < count; i++ {
-		ridLen := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		pos += 2
-		rid := string(data[pos : pos+ridLen])
-		pos += ridLen
-		wfLen := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		pos += 2
-		wf := string(data[pos : pos+wfLen])
-		pos += wfLen
-		stLen := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		pos += 2
-		st := string(data[pos : pos+stLen])
-		pos += stLen
-		ts := int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
-		pos += 8
-		runs = append(runs, RunEntry{RunID: rid, Workflow: wf, Status: st, CreatedAt: ts})
-	}
-	return runs
 }

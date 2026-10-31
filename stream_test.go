@@ -2,6 +2,7 @@ package flo
 
 import (
 	"encoding/binary"
+	"errors"
 	"testing"
 )
 
@@ -108,5 +109,21 @@ func TestBuildStreamBatchValue(t *testing.T) {
 	}
 	if got := binary.LittleEndian.Uint16(value[13:15]); got != 1 {
 		t.Fatalf("header_count: got %d want 1", got)
+	}
+}
+
+// The server answers info on a stream that doesn't exist with not_found;
+// Info reports it as ErrNotFound with the server's message.
+func TestStreamInfoOfAnUnknownStreamIsNotFound(t *testing.T) {
+	c := tableServer(t, func(op OpCode, _ []byte) (StatusCode, []byte) {
+		if op != OpStreamInfo {
+			return StatusBadRequest, refusalBody(ReasonUnknownOp, RanNo, "unexpected op")
+		}
+		return StatusNotFound, refusalBody(ReasonNotFound, RanNo, "stream not found")
+	})
+	info, err := c.Stream.Info("nope", nil)
+	var se *ServerError
+	if info != nil || !IsNotFound(err) || !errors.As(err, &se) || se.Message != "stream not found" {
+		t.Fatalf("info = %+v, err = %v; want ErrNotFound with the server's message", info, err)
 	}
 }

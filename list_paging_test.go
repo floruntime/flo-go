@@ -308,6 +308,10 @@ func TestListTrailerMismatchIsRefused(t *testing.T) {
 			_, err := parseWorkflowDefinitionList(b)
 			return err
 		}},
+		"workflow.list_runs": {runListPage(nil, WorkflowRunEntry{RunID: "r", Workflow: "w", Status: "running"}), func(b []byte) error {
+			_, err := parseWorkflowRunList(b)
+			return err
+		}},
 	}
 	trailers := map[string][]byte{
 		"has_more=0 with a cursor":    {0, 2, 0, 7, 7},
@@ -324,5 +328,120 @@ func TestListTrailerMismatchIsRefused(t *testing.T) {
 				t.Errorf("%s, %s: err = %v, want ErrIncompleteResponse", op, name, err)
 			}
 		}
+	}
+}
+
+// runListPage codes a workflow.list_runs answer.
+func runListPage(cursor []byte, runs ...WorkflowRunEntry) []byte {
+	w := bodyWriter{}
+	w.u32(uint32(len(runs)))
+	for _, r := range runs {
+		w.bytes16([]byte(r.RunID))
+		w.bytes16([]byte(r.Workflow))
+		w.bytes16([]byte(r.Status))
+		w.u64(uint64(r.CreatedAt))
+	}
+	pageTrailer(&w, cursor)
+	return w.buf
+}
+
+// A list-runs request carries every field, an empty one as length 0: the
+// server refuses a value that stops early.
+func TestWorkflowListRunsSendsEveryField(t *testing.T) {
+	cases := []struct {
+		name string
+		opts *WorkflowListRunsOptions
+		want []byte
+	}{
+		{"defaults", nil, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+		{"all set", &WorkflowListRunsOptions{Limit: 7, Status: "running", Cursor: []byte{1, 2, 3}, Search: "Ord"}, []byte{
+			7, 0, 0, 0,
+			7, 0, 'r', 'u', 'n', 'n', 'i', 'n', 'g',
+			3, 0, 1, 2, 3,
+			3, 0, 'O', 'r', 'd',
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := capturePayload(t, func(c *Client) { c.Workflow.ListRuns("orders", tc.opts) })
+			value, opts := splitValueAndOptions(payload)
+			if !bytes.Equal(value, tc.want) {
+				t.Errorf("value = % x, want % x", value, tc.want)
+			}
+			if len(opts) != 0 {
+				t.Errorf("options = % x, want none", opts)
+			}
+			ns := int(binary.LittleEndian.Uint16(payload))
+			key := payload[2+ns+2 : 2+ns+2+int(binary.LittleEndian.Uint16(payload[2+ns:]))]
+			if string(key) != "orders" {
+				t.Errorf("key = %q, want the workflow name", key)
+			}
+		})
+	}
+}
+
+func TestWorkflowListRunsPagesByCursor(t *testing.T) {
+	cursor := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 'r', '2'}
+	c, values := twoPageServer(t, OpWorkflowListRuns,
+		runListPage(cursor, WorkflowRunEntry{"r1", "orders", "running", 30}),
+		runListPage(nil, WorkflowRunEntry{"r2", "orders", "completed", 20}, WorkflowRunEntry{"r3", "refunds", "failed", 10}))
+
+	var ids []string
+	opts := &WorkflowListRunsOptions{Limit: 10}
+	for {
+		page, err := c.Workflow.ListRuns("", opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range page.Runs {
+			ids = append(ids, r.RunID)
+		}
+		if !page.HasMore {
+			if page.Cursor != nil {
+				t.Errorf("last page carries cursor % x", page.Cursor)
+			}
+			break
+		}
+		opts.Cursor = page.Cursor
+	}
+	if strings.Join(ids, ",") != "r1,r2,r3" {
+		t.Errorf("run ids = %v", ids)
+	}
+	first := []byte{10, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	second := append([]byte{10, 0, 0, 0, 0, 0, byte(len(cursor)), 0}, cursor...)
+	second = append(second, 0, 0)
+	if len(*values) != 2 || !bytes.Equal((*values)[0], first) || !bytes.Equal((*values)[1], second) {
+		t.Errorf("request values = % x, want % x and % x", *values, first, second)
+	}
+}
+
+// One runs page, laid out byte by byte as the server sends it.
+func TestParseWorkflowRunList(t *testing.T) {
+	b := []byte{
+		2, 0, 0, 0, // count
+		5, 0, 'r', 'u', 'n', '-', '1', 6, 0, 'o', 'r', 'd', 'e', 'r', 's', 7, 0, 'r', 'u', 'n', 'n', 'i', 'n', 'g', 0x10, 0, 0, 0, 0, 0, 0, 0,
+		1, 0, 'x', 1, 0, 'w', 6, 0, 'f', 'a', 'i', 'l', 'e', 'd', 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		1,                  // has_more
+		4, 0, 9, 0, 0, 'x', // cursor
+	}
+	got, err := parseWorkflowRunList(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Runs) != 2 ||
+		*got.Runs[0] != (WorkflowRunEntry{"run-1", "orders", "running", 0x10}) ||
+		*got.Runs[1] != (WorkflowRunEntry{"x", "w", "failed", -1}) {
+		t.Errorf("runs = %+v %+v", got.Runs[0], got.Runs[1])
+	}
+	if !got.HasMore || !bytes.Equal(got.Cursor, []byte{9, 0, 0, 'x'}) {
+		t.Errorf("has_more %v cursor % x", got.HasMore, got.Cursor)
+	}
+	for n := range b {
+		if _, err := parseWorkflowRunList(b[:n]); !errors.Is(err, ErrIncompleteResponse) {
+			t.Errorf("cut at %d: %v", n, err)
+		}
+	}
+	if _, err := parseWorkflowRunList(append(b, 0)); !errors.Is(err, ErrIncompleteResponse) {
+		t.Errorf("trailing byte: %v", err)
 	}
 }

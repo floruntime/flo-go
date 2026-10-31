@@ -317,42 +317,64 @@ func (w *WorkflowClient) History(runID string, opts *WorkflowHistoryOptions) ([]
 	return resp.Data, nil
 }
 
-// ListRuns lists workflow runs, optionally filtered by workflow name.
-// If name is empty, lists all runs across all workflows.
-// Returns the raw response bytes (binary format from server).
-func (w *WorkflowClient) ListRuns(name string, opts *WorkflowListRunsOptions) ([]byte, error) {
+// ListRuns returns one page of runs, newest first: name's runs, or every
+// workflow's when name is empty. Pass the result's Cursor in the next call's
+// options to read the next page; a page can be short while more follow.
+func (w *WorkflowClient) ListRuns(name string, opts *WorkflowListRunsOptions) (*WorkflowRunListResult, error) {
 	if opts == nil {
 		opts = &WorkflowListRunsOptions{}
 	}
 	namespace := w.client.getNamespace(opts.Namespace)
-
-	// Build value: [limit:u32][status_len:u16][status][cursor_len:u16][cursor][search_len:u16][search]
-	limit := opts.Limit
-	if limit == 0 {
-		limit = 100
+	for _, f := range []struct {
+		what string
+		n    int
+	}{{"status", len(opts.Status)}, {"cursor", len(opts.Cursor)}, {"search", len(opts.Search)}} {
+		if f.n > 0xFFFF {
+			return nil, fmt.Errorf("flo: list runs %s is %d bytes, at most 65535", f.what, f.n)
+		}
 	}
-	valueLen := 4 + 2 + len(opts.Status) + 2 + len(opts.Cursor) + 2 + len(opts.Search)
-	value := make([]byte, valueLen)
-	binary.LittleEndian.PutUint32(value[0:4], limit)
-	off := 4
-	binary.LittleEndian.PutUint16(value[off:off+2], uint16(len(opts.Status)))
-	off += 2
-	copy(value[off:], opts.Status)
-	off += len(opts.Status)
-	binary.LittleEndian.PutUint16(value[off:off+2], uint16(len(opts.Cursor)))
-	off += 2
-	copy(value[off:], opts.Cursor)
-	off += len(opts.Cursor)
-	binary.LittleEndian.PutUint16(value[off:off+2], uint16(len(opts.Search)))
-	off += 2
-	copy(value[off:], opts.Search)
+
+	// [limit:u32][status_len:u16][status][cursor_len:u16][cursor][search_len:u16][search],
+	// every field always sent.
+	value := make([]byte, 0, 4+2+len(opts.Status)+2+len(opts.Cursor)+2+len(opts.Search))
+	value = binary.LittleEndian.AppendUint32(value, opts.Limit)
+	for _, f := range [][]byte{[]byte(opts.Status), opts.Cursor, []byte(opts.Search)} {
+		value = binary.LittleEndian.AppendUint16(value, uint16(len(f)))
+		value = append(value, f...)
+	}
 
 	resp, err := w.client.sendAndCheck(OpWorkflowListRuns, namespace, []byte(name), value, nil, false)
 	if err != nil {
 		return nil, err
 	}
+	return parseWorkflowRunList(resp.Data)
+}
 
-	return resp.Data, nil
+// parseWorkflowRunList reads workflow.list_runs' answer:
+// [count:u32]([run_id_len:u16][run_id][workflow_len:u16][workflow]
+// [status_len:u16][status][created_at:i64])*[has_more:u8][cursor_len:u16][cursor].
+func parseWorkflowRunList(data []byte) (*WorkflowRunListResult, error) {
+	r := bodyReader{buf: data}
+	n := r.u32()
+	// Each run takes at least fourteen bytes after the count, so a count
+	// past that is a lie.
+	if uint64(n)*14 > uint64(len(data)-4) {
+		return nil, ErrIncompleteResponse
+	}
+	got := &WorkflowRunListResult{Runs: make([]*WorkflowRunEntry, 0, n)}
+	for i := uint32(0); i < n && !r.bad; i++ {
+		got.Runs = append(got.Runs, &WorkflowRunEntry{
+			RunID:     string(r.bytes16()),
+			Workflow:  string(r.bytes16()),
+			Status:    string(r.bytes16()),
+			CreatedAt: int64(r.u64()),
+		})
+	}
+	got.HasMore, got.Cursor = r.pageTrailer()
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
 }
 
 // ListDefinitions returns one page of the namespace's workflow definitions.

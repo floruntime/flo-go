@@ -116,7 +116,8 @@ func (s *StreamClient) Read(stream string, opts *StreamReadOptions) (*StreamRead
 	return parseStreamReadResponse(resp.Data)
 }
 
-// Info gets stream metadata.
+// Info gets stream metadata. A stream that doesn't exist is ErrNotFound,
+// not an empty stream's zeros.
 func (s *StreamClient) Info(stream string, opts *StreamInfoOptions) (*StreamInfo, error) {
 	if opts == nil {
 		opts = &StreamInfoOptions{}
@@ -124,12 +125,12 @@ func (s *StreamClient) Info(stream string, opts *StreamInfoOptions) (*StreamInfo
 
 	namespace := s.client.getNamespace(opts.Namespace)
 
-	resp, err := s.client.sendAndCheck(OpStreamInfo, namespace, []byte(stream), nil, nil, true)
+	resp, err := s.client.sendAndCheck(OpStreamInfo, namespace, []byte(stream), nil, nil, false)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse response: [first_ts:u64][first_seq:u64][last_ts:u64][last_seq:u64][count:u64][bytes:u64][partition_count:u32]
+	// Parse response: [first_ts:u64][first_seq:u64][last_ts:u64][last_seq:u64][count:u64][bytes:u64][partition_count:u32][retention_age_s:u64][retention_count:u64][retention_bytes:u64]; the retention fields are not read yet
 	if len(resp.Data) < 52 {
 		return nil, fmt.Errorf("incomplete stream info response")
 	}
