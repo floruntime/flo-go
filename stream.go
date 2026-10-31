@@ -130,7 +130,7 @@ func (s *StreamClient) Info(stream string, opts *StreamInfoOptions) (*StreamInfo
 		return nil, err
 	}
 
-	// Parse response: [first_ts:u64][first_seq:u64][last_ts:u64][last_seq:u64][count:u64][bytes:u64][partition_count:u32]
+	// Parse response: [first_ts:u64][first_seq:u64][last_ts:u64][last_seq:u64][count:u64][bytes:u64][partition_count:u32][retention_age_s:u64][retention_count:u64][retention_bytes:u64]; the retention fields are not read yet
 	if len(resp.Data) < 52 {
 		return nil, fmt.Errorf("incomplete stream info response")
 	}

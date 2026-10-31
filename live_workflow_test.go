@@ -114,6 +114,8 @@ func TestLiveWorkflowListRunsPagesEveryRunOnceNewestFirst(t *testing.T) {
 	}
 }
 
+// A run started with a chosen id is found by it, and a start after it of the
+// same id on another workflow is refused (two sent at once can both run).
 func TestLiveWorkflowRunIDChosenByTheClient(t *testing.T) {
 	c := liveClient(t)
 	liveWaitingWorkflow(t, c, "rid-a")
@@ -145,7 +147,7 @@ func TestLiveWorkflowRunIDChosenByTheClient(t *testing.T) {
 			t.Errorf("signal %q: %v", id, err)
 		}
 		if _, err := c.Workflow.Start("rid-b", []byte("{}"), &WorkflowStartOptions{RunID: id}); !IsConflict(err) {
-			t.Errorf("second start of %q on another workflow: %v, want ErrConflict", id, err)
+			t.Errorf("a later start of %q on another workflow: %v, want ErrConflict", id, err)
 		}
 		if err := c.Workflow.Cancel(id, nil); err != nil {
 			t.Fatalf("cancel %q: %v", id, err)

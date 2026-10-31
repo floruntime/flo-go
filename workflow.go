@@ -356,8 +356,9 @@ func (w *WorkflowClient) ListRuns(name string, opts *WorkflowListRunsOptions) (*
 func parseWorkflowRunList(data []byte) (*WorkflowRunListResult, error) {
 	r := bodyReader{buf: data}
 	n := r.u32()
-	// Each run takes at least fourteen bytes, so a count past that is a lie.
-	if uint64(n)*14 > uint64(len(data)) {
+	// Each run takes at least fourteen bytes after the count, so a count
+	// past that is a lie.
+	if uint64(n)*14 > uint64(len(data)-4) {
 		return nil, ErrIncompleteResponse
 	}
 	got := &WorkflowRunListResult{Runs: make([]*WorkflowRunEntry, 0, n)}

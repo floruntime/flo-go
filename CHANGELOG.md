@@ -25,6 +25,10 @@ live tests run against; this SDK no longer talks to an older server.
   still have more behind it
 - `ActionListOptions.Limit` is a `uint32` instead of a `*uint32` (0 lets the
   server choose)
+- A run id chosen at start (`WorkflowStartOptions.RunID`) is found by status,
+  history, signal and cancel on any shard, and a later start of the same id
+  on another workflow is refused with `ErrConflict`. Two starts of one id sent
+  at once can both run; a lookup by the id then refuses it with `ErrConflict`.
 - `WorkflowClient.ListRuns` returns a `*WorkflowRunListResult` (`Runs`, each
   with `RunID`, `Workflow`, `Status` and `CreatedAt`, newest first; `HasMore`;
   `Cursor`) instead of raw bytes. It reads one page, of one workflow's runs
