@@ -8,8 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 These follow the server's wire. The server's op table changed with them, so
-`TableHash` moves to the server's new hash in the same release; until then
-this SDK still pins the previous server.
+`TableHash` is now `0xa8de7758afa69427`, the hash of flo `bdb66a0`, which CI's
+live tests run against; this SDK no longer talks to an older server.
 
 ### Breaking
 
