@@ -25,6 +25,12 @@ live tests run against; this SDK no longer talks to an older server.
   still have more behind it
 - `ActionListOptions.Limit` is a `uint32` instead of a `*uint32` (0 lets the
   server choose)
+- `WorkflowClient.ListRuns` returns a `*WorkflowRunListResult` (`Runs`, each
+  with `RunID`, `Workflow`, `Status` and `CreatedAt`, newest first; `HasMore`;
+  `Cursor`) instead of raw bytes. It reads one page, of one workflow's runs
+  or, with an empty name, every workflow's; a short page can still have more
+  behind it. `WorkflowListRunsOptions.Cursor` is the opaque `[]byte` a page
+  returns instead of a string, and a `Limit` of 0 lets the server choose
 - `OpNamespaceConfigSet` (0x014) and `OpNamespaceConfigGet` (0x015) are gone:
   the server retired them
 

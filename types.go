@@ -1005,10 +1005,35 @@ type WorkflowHistoryOptions struct {
 // WorkflowListRunsOptions contains options for listing workflow runs.
 type WorkflowListRunsOptions struct {
 	Namespace string
-	Limit     uint32
-	Status    string // Filter by run status (e.g. "running", "completed", "failed")
-	Cursor    string // Cursor for pagination (last run_id from previous page)
-	Search    string // Case-insensitive search across run fields
+	// Limit is the most runs on the page; 0 lets the server choose (100),
+	// and it holds at most 1024.
+	Limit uint32
+	// Status keeps only runs in that status (e.g. "running", "completed",
+	// "failed"); empty for any.
+	Status string
+	// Cursor is the previous page's Cursor; nil reads the first page.
+	Cursor []byte
+	// Search keeps only runs that match it, ignoring case; empty for all.
+	Search string
+}
+
+// WorkflowRunEntry is one run in a list page.
+type WorkflowRunEntry struct {
+	RunID     string
+	Workflow  string
+	Status    string
+	CreatedAt int64
+}
+
+// WorkflowRunListResult is one page of runs, newest first. A page can hold
+// fewer than Limit while HasMore is set: keep reading until HasMore is false.
+type WorkflowRunListResult struct {
+	Runs []*WorkflowRunEntry
+	// HasMore says another page follows; Cursor reads it.
+	HasMore bool
+	// Cursor is where the next page starts, opaque bytes to pass back; nil
+	// on the last page.
+	Cursor []byte
 }
 
 // WorkflowListDefinitionsOptions contains options for listing workflow definitions.
