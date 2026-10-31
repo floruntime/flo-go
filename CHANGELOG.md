@@ -31,6 +31,13 @@ live tests run against; this SDK no longer talks to an older server.
   or, with an empty name, every workflow's; a short page can still have more
   behind it. `WorkflowListRunsOptions.Cursor` is the opaque `[]byte` a page
   returns instead of a string, and a `Limit` of 0 lets the server choose
+- `StreamClient.Info` on a stream that doesn't exist returns `ErrNotFound`
+  (the server now answers not_found); it used to return an all-zero
+  `StreamInfo`
+- Reads, lists and scans in a namespace that was never created return
+  `ErrNoNamespace` (status 14) instead of answering as if it were empty:
+  `KV.Get` no longer reports a plain not found there, and lists no longer
+  come back empty. A write still creates the namespace
 - `OpNamespaceConfigSet` (0x014) and `OpNamespaceConfigGet` (0x015) are gone:
   the server retired them
 
@@ -38,9 +45,7 @@ live tests run against; this SDK no longer talks to an older server.
 
 - `StatusNoNamespace` (14), `ErrNoNamespace` and `IsNoNamespace`: the
   namespace a request names doesn't exist. It is its own error, which
-  `ErrNotFound` doesn't match. Reads in a namespace that was never created
-  return it from the server version that adds it; flo `bdb66a0` still answers
-  them as absent (`Get` reports not found, lists come back empty)
+  `ErrNotFound` doesn't match
 - `ReasonAdminOnly`: the op is served only on a node's admin socket
 - `ActionClient.List`, paged: `ActionListOptions.Limit`, `Cursor` and
   `Prefix` in, `ActionListResult.Names`, `HasMore` and `Cursor` out

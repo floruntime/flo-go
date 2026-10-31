@@ -116,7 +116,8 @@ func (s *StreamClient) Read(stream string, opts *StreamReadOptions) (*StreamRead
 	return parseStreamReadResponse(resp.Data)
 }
 
-// Info gets stream metadata.
+// Info gets stream metadata. A stream that doesn't exist is ErrNotFound,
+// not an empty stream's zeros.
 func (s *StreamClient) Info(stream string, opts *StreamInfoOptions) (*StreamInfo, error) {
 	if opts == nil {
 		opts = &StreamInfoOptions{}
@@ -124,7 +125,7 @@ func (s *StreamClient) Info(stream string, opts *StreamInfoOptions) (*StreamInfo
 
 	namespace := s.client.getNamespace(opts.Namespace)
 
-	resp, err := s.client.sendAndCheck(OpStreamInfo, namespace, []byte(stream), nil, nil, true)
+	resp, err := s.client.sendAndCheck(OpStreamInfo, namespace, []byte(stream), nil, nil, false)
 	if err != nil {
 		return nil, err
 	}

@@ -117,9 +117,8 @@ var (
 
 	// ErrNoNamespace indicates the namespace the request names doesn't
 	// exist. ErrNotFound doesn't match it: that is a missing key, action or
-	// other thing inside a namespace. Reads in a namespace that was never
-	// created return it from the server version that adds it; until then
-	// they answer as if it were empty.
+	// other thing inside a namespace. Reads, lists and scans in a namespace
+	// that was never created return it; a write creates the namespace.
 	ErrNoNamespace = &ServerError{Status: StatusNoNamespace}
 )
 

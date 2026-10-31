@@ -245,6 +245,41 @@ func TestLiveStreamDeleteNeedsForceWhenNotEmpty(t *testing.T) {
 	}
 }
 
+func TestLiveStreamInfoOfAnUnknownStreamIsNotFound(t *testing.T) {
+	c := liveClient(t)
+	// The namespace exists, so the answer is about the stream alone.
+	if _, err := c.Stream.Append("known", []byte("x"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := c.Stream.Info("known", nil); err != nil || info.Count != 1 {
+		t.Fatalf("info of a stream with a record: %+v, %v", info, err)
+	}
+	if info, err := c.Stream.Info("never-appended", nil); !IsNotFound(err) || IsNoNamespace(err) {
+		t.Fatalf("info of an unknown stream: %+v, %v; want ErrNotFound", info, err)
+	}
+}
+
+func TestLiveReadInANamespaceNeverCreatedIsNoNamespace(t *testing.T) {
+	c := liveClient(t)
+	// liveClient's namespace is fresh and nothing has written to it.
+	if _, err := c.KV.Get("absent", nil); !IsNoNamespace(err) || IsNotFound(err) {
+		t.Fatalf("kv get: %v, want ErrNoNamespace", err)
+	}
+	if _, err := c.Stream.Read("absent", nil); !IsNoNamespace(err) {
+		t.Fatalf("stream read: %v, want ErrNoNamespace", err)
+	}
+	if _, err := c.KV.Scan("", nil); !IsNoNamespace(err) {
+		t.Fatalf("kv scan: %v, want ErrNoNamespace", err)
+	}
+	// A write creates it, and then a read of a missing key is not found.
+	if _, err := c.KV.Put("k", []byte("v"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.KV.Get("absent", nil); IsNoNamespace(err) {
+		t.Fatalf("kv get after a write: %v", err)
+	}
+}
+
 func TestLiveQueueEnqueueDequeueAck(t *testing.T) {
 	c := liveClient(t)
 	if _, err := c.Queue.Enqueue("jobs", []byte("job-1"), nil); err != nil {
