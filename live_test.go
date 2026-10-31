@@ -307,6 +307,11 @@ func TestLiveQueueEnqueueDequeueAck(t *testing.T) {
 // A run id the server never minted is not found.
 func TestLiveActionStatusOfAnUnknownRunIsNotFound(t *testing.T) {
 	c := liveClient(t)
+	// A write creates the namespace: in one never created, the answer is
+	// ErrNoNamespace, not about the run.
+	if err := c.Action.Register("known", ActionTypeUser, nil); err != nil {
+		t.Fatal(err)
+	}
 	st, err := c.Action.Status("act-0-0", nil)
 	if !IsNotFound(err) {
 		t.Fatalf("status = %+v, %v; want not found", st, err)
