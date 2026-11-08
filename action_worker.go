@@ -28,7 +28,8 @@ type ActionWorkerOptions struct {
 	// Concurrency is the maximum number of concurrent actions (default: 10)
 	Concurrency int
 
-	// ActionTimeout defines the maximum duration allowed for an action handler
+	// ActionTimeout is the longest a handler may run: its context is then
+	// cancelled and the run failed with retry, like a returned error.
 	ActionTimeout time.Duration
 
 	// BlockMS is the long-poll wait per await, at most MaxBlockMS.
@@ -562,7 +563,7 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *Task) {
 		switch {
 		case ctxErr && context.Cause(ctx) == errActionTimeout:
 			w.logger.Printf("Action timed out: %s (task=%s)", task.Action, taskID)
-			fail("action timed out", false)
+			fail("action timed out", true)
 		case ctxErr && w.ctx.Err() != nil:
 			// The worker is stopping, not the task failing: hand it back
 			// with no failure counted, to run again elsewhere.

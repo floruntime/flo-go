@@ -276,8 +276,9 @@ func TestStopDuringHandlerFailsWithRetry(t *testing.T) {
 	checkSends(t, s, 0, 1)
 }
 
-// A handler that hits ActionTimeout is still failed without retry.
-func TestActionTimeoutFailsWithoutRetry(t *testing.T) {
+// A handler that hits ActionTimeout fails its run with retry, so the
+// action's max attempts bounds it.
+func TestActionTimeoutFailsWithRetry(t *testing.T) {
 	s, addr := newFrameServer(t, func(OpCode, int) reply { return reply{} })
 	w, _ := resultTestWorker(t, addr, time.Second, 50*time.Millisecond, func(actx *ActionContext) (interface{}, error) {
 		<-actx.Ctx().Done()
@@ -288,7 +289,7 @@ func TestActionTimeoutFailsWithoutRetry(t *testing.T) {
 	if len(fails) != 1 {
 		t.Fatalf("server saw %d fails, want 1", len(fails))
 	}
-	if want := append(cat([]byte{1, 0, 1, 0, 1}, u64le(0), []byte{1, 16, 0}), "action timed out"...); !bytes.HasSuffix(fails[0], want) {
+	if want := append(cat([]byte{1, 1, 1, 0, 1}, u64le(0), []byte{1, 16, 0}), "action timed out"...); !bytes.HasSuffix(fails[0], want) {
 		t.Errorf("fail frame ends %q, want %q", fails[0][len(fails[0])-len(want):], want)
 	}
 }
