@@ -511,15 +511,17 @@ action with different options leave it with whichever registered last.
 
 A run whose handler goes past the action's `TimeoutMS`, its lease, without
 touching it is taken back and run again, by this worker or another.
-`AutoTouch` touches each run every sixth of its lease while the handler runs;
+`AutoTouch` touches each run every sixth of its lease, counted from when the
+task arrived, while the handler runs;
 it's off by default. Without it, call `actx.Touch()` from long handlers. A
 touch renews the lease once half of it is gone, and before that changes
 nothing; both answer when the lease runs out. However often it is touched,
 the server holds one delivery at most 12 hours (`flo.MaxHoldMS`) from when
 it was given; then the run is taken back.
 
-A handler that returns an error, panics or runs past `ActionTimeout` fails
-its run with retry, so the
+A handler that returns an error, panics or runs past `ActionTimeout`, a task
+with no handler, and a result that doesn't marshal to JSON each fail the run
+with retry, so the
 action's max attempts bounds a handler that keeps failing; return a
 `flo.NewNonRetryableError` to fail the run at once. `Stop` takes no more
 tasks and cancels every running handler's context: a handler that returns

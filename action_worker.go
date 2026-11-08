@@ -406,6 +406,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 				continue
 			}
 			backoff.reset()
+			arrived := time.Now()
 
 			// Execute task in background
 			w.wg.Add(1)
@@ -414,7 +415,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 				defer func() { <-sem }()
 				running.Add(1)
 				defer running.Add(-1)
-				w.executeTask(resultWorkerClient, t)
+				w.executeTask(resultWorkerClient, t, arrived)
 			}(task)
 		}
 	}
@@ -497,7 +498,7 @@ var errActionTimeout = errors.New("flo: action timed out")
 // executeTask runs a task's handler and reports its outcome. The handler's
 // outcome alone decides complete or fail: a complete that can't be sent is
 // never turned into a fail.
-func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *Task) {
+func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *Task, arrived time.Time) {
 	taskID := task.TaskID()
 	sendFail := func(msg string, opts *WorkerFailOptions) {
 		w.sendResult("fail", taskID, func() error {
@@ -532,7 +533,7 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *Task) {
 
 	if handler == nil {
 		w.logger.Printf("No handler registered for action: %s", task.Action)
-		fail(fmt.Sprintf("no handler for: %s", task.Action), false)
+		fail(fmt.Sprintf("no handler for: %s", task.Action), true)
 		return
 	}
 
@@ -553,7 +554,7 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *Task) {
 	}
 
 	// Deferred too, so a panicking handler stops touching before its fail.
-	stopTouching := w.startTouching(workerClient, task)
+	stopTouching := w.startTouching(workerClient, task, arrived)
 	defer stopTouching()
 	result, err := handler(actx)
 	stopTouching()
@@ -590,7 +591,7 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *Task) {
 		data, marshalErr := json.Marshal(v)
 		if marshalErr != nil {
 			w.logger.Printf("Failed to marshal result: %v", marshalErr)
-			fail(fmt.Sprintf("marshal error: %v", marshalErr), false)
+			fail(fmt.Sprintf("marshal error: %v", marshalErr), true)
 			return
 		}
 		complete(data, nil)
@@ -607,12 +608,14 @@ func touchInterval(leaseMS uint64) time.Duration {
 	return max(time.Duration(leaseMS)*time.Millisecond/6, minTouchInterval)
 }
 
-// startTouching touches task's run every touchInterval until the returned
-// stop is called, which waits for a touch in flight, so the outcome is sent
-// after it. Conflict (a stale delivery), not found or bad request means the
+// startTouching touches task's run every touchInterval from when it
+// arrived, until the returned stop is called, which waits for a touch in
+// flight, so the outcome is sent after it. The nth touch is due at arrived
+// plus n intervals, so a slow touch doesn't push the later ones back; a
+// slot that passed while one was in flight is skipped. Conflict (a stale delivery), not found or bad request means the
 // run moved on and touching stops; any other refusal, or a lost touch, is
 // tried again next interval, a lost connection reconnected first.
-func (w *ActionWorker) startTouching(wc *WorkerClient, task *Task) (stop func()) {
+func (w *ActionWorker) startTouching(wc *WorkerClient, task *Task, arrived time.Time) (stop func()) {
 	if !w.config.AutoTouch || task.LeaseMS == 0 {
 		return func() {}
 	}
@@ -622,7 +625,8 @@ func (w *ActionWorker) startTouching(wc *WorkerClient, task *Task) (stop func())
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
-		timer := time.NewTimer(interval)
+		next := arrived.Add(interval)
+		timer := time.NewTimer(time.Until(next))
 		defer timer.Stop()
 		for {
 			select {
@@ -643,7 +647,10 @@ func (w *ActionWorker) startTouching(wc *WorkerClient, task *Task) (stop func())
 			default:
 				w.logger.Printf("Touch for task %s failed: %v; trying again", taskID, err)
 			}
-			timer.Reset(interval)
+			for now := time.Now(); !next.After(now); {
+				next = next.Add(interval)
+			}
+			timer.Reset(time.Until(next))
 		}
 	}()
 	var once sync.Once
