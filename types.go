@@ -898,10 +898,12 @@ type ActionRegisterOptions struct {
 	Owner      string
 }
 
-// The lease an action's TimeoutMS may set.
+// The lease an action's TimeoutMS may set, and the longest the server holds
+// one delivery however often it is touched.
 const (
 	MinLeaseMS = 5000
 	MaxLeaseMS = 12 * 60 * 60 * 1000
+	MaxHoldMS  = 12 * 60 * 60 * 1000
 )
 
 // ActionInvokeOptions contains options for action invocation.

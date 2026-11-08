@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -394,6 +395,37 @@ func TestUnreadableCompleteAnswerIsResent(t *testing.T) {
 			w, _ := resultTestWorker(t, addr, time.Second, time.Minute, succeed)
 			runTask(w)
 			checkSends(t, s, 2, 0)
+		})
+	}
+}
+
+// A handler that panics or returns an error fails its run with retry, so the
+// action's max attempts bounds it; a NonRetryableError fails it at once.
+func TestAFailingHandlerFailsTheRunWithRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		h     ActionHandler
+		retry byte
+		msg   string
+	}{
+		{"panic", func(*ActionContext) (interface{}, error) { panic("boom") }, 1, "action panicked: boom"},
+		{"error", func(*ActionContext) (interface{}, error) { return nil, errors.New("boom") }, 1, "boom"},
+		{"non-retryable", func(*ActionContext) (interface{}, error) { return nil, NewNonRetryableErrorf("boom") }, 0, "boom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, addr := newFrameServer(t, func(OpCode, int) reply { return reply{} })
+			w, _ := resultTestWorker(t, addr, time.Second, time.Minute, tc.h)
+			runTask(w)
+			fails := s.got(OpActionFail)
+			if len(fails) != 1 {
+				t.Fatalf("server saw %d fails, want 1", len(fails))
+			}
+			// retry, abandoned (no), delay_ms 0, then the message, each present.
+			want := append(cat([]byte{1, tc.retry, 1, 0, 1}, u64le(0), []byte{1, byte(len(tc.msg)), 0}), tc.msg...)
+			if !bytes.HasSuffix(fails[0], want) {
+				t.Errorf("fail frame ends % x, want % x", fails[0][len(fails[0])-len(want):], want)
+			}
+			checkSends(t, s, 0, 1)
 		})
 	}
 }

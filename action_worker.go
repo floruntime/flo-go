@@ -38,7 +38,8 @@ type ActionWorkerOptions struct {
 	// AutoTouch touches each run every sixth of its lease while the handler
 	// runs; a touch renews the lease once half of it is gone. Off by
 	// default: a handler that runs past the lease without calling Touch is
-	// taken back and run again.
+	// taken back and run again. However often it is touched, the server
+	// holds a delivery at most MaxHoldMS (12 h) from when it was given.
 	AutoTouch bool
 
 	// Logger for worker output (optional, defaults to log.Printf)
@@ -451,7 +452,13 @@ func (w *ActionWorker) finishDrain(wc *WorkerClient, regOpts *WorkerRegisterOpti
 	return nil
 }
 
-// Stop gracefully stops the worker.
+// Stop stops the worker: it takes no more tasks and cancels the context of
+// every running handler. A handler that returns the context's error hands
+// its run back with no failure counted, to run again elsewhere; one that
+// returns anything else is reported as usual. Results may still be sent for
+// two seconds after Stop, then the result connection is cut, and a run
+// whose result was not sent goes back when its lease runs out. Start
+// returns once every handler has returned.
 func (w *ActionWorker) Stop() {
 	w.logger.Printf("Stopping worker...")
 	w.runMu.Lock()
@@ -507,8 +514,10 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *Task) {
 
 	defer func() {
 		if r := recover(); r != nil {
+			// Like a returned error: retried while attempts are left, so
+			// the action's max attempts bounds a handler that always panics.
 			w.logger.Printf("Action handler panicked: %v", r)
-			fail(fmt.Sprintf("action panicked: %v", r), false)
+			fail(fmt.Sprintf("action panicked: %v", r), true)
 		}
 	}()
 
@@ -790,7 +799,8 @@ func (a *ActionContext) Bytes(v interface{}) ([]byte, error) {
 // Touch keeps this task's lease, so a long handler isn't taken back, and
 // returns when the lease runs out, in Unix milliseconds. While more than
 // half of the lease is left it changes nothing; after that it renews the
-// lease in full. A run that has moved on is a *StaleReportError.
+// lease in full, though never past MaxHoldMS (12 h) from when the task was
+// given. A run that has moved on is a *StaleReportError.
 func (a *ActionContext) Touch() (int64, error) {
 	if a.workerClient == nil {
 		return 0, fmt.Errorf("worker client not available")

@@ -482,6 +482,7 @@ func (w *WorkerClient) Fail(d Delivery, errorMessage string, opts *WorkerFailOpt
 // Touch keeps a delivery's lease and returns when it runs out, in Unix
 // milliseconds. While more than half the lease is left it changes nothing
 // and answers the current expiry; after that it renews the lease in full.
+// No touch keeps a delivery past MaxHoldMS from when it was given.
 func (w *WorkerClient) Touch(d Delivery, opts *WorkerTouchOptions) (int64, error) {
 	if opts == nil {
 		opts = &WorkerTouchOptions{}

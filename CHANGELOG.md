@@ -74,7 +74,14 @@ live tests run against; this SDK no longer talks to an older server.
 - `OpNamespaceConfigSet` (0x014) and `OpNamespaceConfigGet` (0x015) are gone:
   the server retired them
 
+- An action handler that panics fails its run with retry, as one that
+  returns an error does, so the action's max attempts bounds it (it used to
+  fail the run at once)
+
 ### Added
+
+- `MaxHoldMS`: the longest the server holds one delivery, 12 h, however
+  often it is touched
 
 - `ActionClient.Info` (0x30F): an action's settings and run counts
 - `ActionRunStatus.Outcome`: the outcome a completed run's worker named
