@@ -45,13 +45,19 @@ func TestListRequestsEncodeLimitAndCursorInValue(t *testing.T) {
 }
 
 // actionListPage codes an action.list answer as the server's walk does:
-// each name with an empty value, then has_more and the cursor.
+// each name with its value, then has_more and the cursor.
 func actionListPage(cursor []byte, names ...string) []byte {
 	w := bodyWriter{}
 	w.u32(uint32(len(names)))
-	for _, n := range names {
+	for i, n := range names {
 		w.bytes16([]byte(n))
-		w.u32(0)
+		v := bodyWriter{}
+		v.u32(uint32(i + 1)) // version
+		v.bytes16([]byte("owner-" + n))
+		v.u64(300000)                 // timeout_ms
+		v.u32(3)                      // max_attempts
+		v.u64(uint64(1000 * (i + 1))) // created_at_ms
+		w.bytes32(v.buf)
 	}
 	if cursor != nil {
 		w.u8(1)
@@ -85,7 +91,9 @@ func TestActionListPagesByCursor(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		names = append(names, page.Names...)
+		for _, a := range page.Actions {
+			names = append(names, a.Name)
+		}
 		if !page.HasMore {
 			if page.Cursor != nil {
 				t.Errorf("last page carries cursor % x", page.Cursor)
@@ -105,8 +113,13 @@ func TestActionListPagesByCursor(t *testing.T) {
 
 func TestActionListAnswerIsDecodedWhole(t *testing.T) {
 	good := actionListPage([]byte{1, 0}, "a")
-	if _, err := decodeActionListAnswer(good); err != nil {
+	got, err := decodeActionListAnswer(good)
+	if err != nil {
 		t.Fatal(err)
+	}
+	want := ActionListEntry{Name: "a", Version: 1, Owner: "owner-a", TimeoutMS: 300000, MaxAttempts: 3, CreatedAtMS: 1000}
+	if len(got.Actions) != 1 || got.Actions[0] != want {
+		t.Errorf("actions = %+v, want %+v", got.Actions, want)
 	}
 	for n := range good {
 		if _, err := decodeActionListAnswer(good[:n]); !errors.Is(err, ErrIncompleteResponse) {
@@ -152,6 +165,8 @@ func processingListPage(cursor []byte, jobs ...ProcessingListEntry) []byte {
 		w.bytes16([]byte(j.JobID))
 		w.bytes16([]byte(j.Status))
 		w.u64(uint64(j.CreatedAt))
+		w.u32(j.BatchSize)
+		w.u64(j.RecordsProcessed)
 	}
 	pageTrailer(&w, cursor)
 	return w.buf
@@ -165,6 +180,7 @@ func definitionListPage(cursor []byte, defs ...WorkflowDefinitionEntry) []byte {
 		w.bytes16([]byte(d.Name))
 		w.bytes16([]byte(d.Version))
 		w.u64(uint64(d.CreatedAt))
+		w.u8(boolByte(d.Enabled))
 	}
 	pageTrailer(&w, cursor)
 	return w.buf
@@ -194,8 +210,8 @@ func twoPageServer(t *testing.T, want OpCode, first, last []byte) (*Client, *[][
 func TestProcessingListPagesByCursor(t *testing.T) {
 	cursor := []byte{0x03, 0x00, 'j', '1'}
 	c, values := twoPageServer(t, OpProcessingList,
-		processingListPage(cursor, ProcessingListEntry{"a", "j1", "running", 1}),
-		processingListPage(nil, ProcessingListEntry{"b", "j2", "stopped", 2}, ProcessingListEntry{"c", "j3", "failed", 3}))
+		processingListPage(cursor, ProcessingListEntry{Name: "a", JobID: "j1", Status: "RUNNING", CreatedAt: 1}),
+		processingListPage(nil, ProcessingListEntry{Name: "b", JobID: "j2", Status: "STOPPED", CreatedAt: 2}, ProcessingListEntry{Name: "c", JobID: "j3", Status: "FAILED", CreatedAt: 3}))
 
 	var ids []string
 	opts := &ProcessingListOptions{Limit: 10}
@@ -227,8 +243,8 @@ func TestProcessingListPagesByCursor(t *testing.T) {
 func TestWorkflowListDefinitionsPagesByCursor(t *testing.T) {
 	cursor := []byte{0x07, 0x00, 'o', 'r', 'd'}
 	c, values := twoPageServer(t, OpWorkflowListDefinitions,
-		definitionListPage(cursor, WorkflowDefinitionEntry{"orders", "1", 10}),
-		definitionListPage(nil, WorkflowDefinitionEntry{"refunds", "2", 20}, WorkflowDefinitionEntry{"ship", "3", 30}))
+		definitionListPage(cursor, WorkflowDefinitionEntry{"orders", "1", 10, true}),
+		definitionListPage(nil, WorkflowDefinitionEntry{"refunds", "2", 20, true}, WorkflowDefinitionEntry{"ship", "3", 30, false}))
 
 	var names []string
 	opts := &WorkflowListDefinitionsOptions{Limit: 10}
@@ -261,8 +277,8 @@ func TestWorkflowListDefinitionsPagesByCursor(t *testing.T) {
 func TestParseWorkflowDefinitionList(t *testing.T) {
 	b := []byte{
 		2, 0, 0, 0, // count
-		6, 0, 'o', 'r', 'd', 'e', 'r', 's', 1, 0, '1', 0x10, 0, 0, 0, 0, 0, 0, 0,
-		4, 0, 's', 'h', 'i', 'p', 3, 0, '2', '.', '1', 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		6, 0, 'o', 'r', 'd', 'e', 'r', 's', 1, 0, '1', 0x10, 0, 0, 0, 0, 0, 0, 0, 1,
+		4, 0, 's', 'h', 'i', 'p', 3, 0, '2', '.', '1', 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0,
 		1,               // has_more
 		3, 0, 9, 0, 'x', // cursor
 	}
@@ -271,8 +287,8 @@ func TestParseWorkflowDefinitionList(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(got.Definitions) != 2 ||
-		*got.Definitions[0] != (WorkflowDefinitionEntry{"orders", "1", 0x10}) ||
-		*got.Definitions[1] != (WorkflowDefinitionEntry{"ship", "2.1", -1}) {
+		*got.Definitions[0] != (WorkflowDefinitionEntry{"orders", "1", 0x10, true}) ||
+		*got.Definitions[1] != (WorkflowDefinitionEntry{"ship", "2.1", -1, false}) {
 		t.Errorf("definitions = %+v %+v", got.Definitions[0], got.Definitions[1])
 	}
 	if !got.HasMore || !bytes.Equal(got.Cursor, []byte{9, 0, 'x'}) {

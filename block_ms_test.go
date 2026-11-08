@@ -143,8 +143,10 @@ func TestAwaitSendsDefaultBlockMS(t *testing.T) {
 	defer c.Close()
 	c.workerClient("w").Await([]string{"t"}, nil) // the fake server never answers
 	req := <-got
-	i := bytes.Index(req, []byte{byte(OptBlockMS), 4})
-	if i < 0 || extractBlockMS(req[i:]) != 30000 {
-		t.Errorf("Await(nil) request carries no block_ms 30000: % x", req)
+	_, _, body := tableBody(t, req[HeaderSize:])
+	// actions ["t"], then block_ms present as 30000, then no request key.
+	want := cat([]byte{1, 1, 0, 't', 1}, u64le(30000), []byte{0})
+	if !bytes.Equal(body, want) {
+		t.Errorf("Await(nil) body % x, want % x", body, want)
 	}
 }

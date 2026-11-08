@@ -121,19 +121,33 @@ func (b *emptyPollBackoff) afterEmpty(ctx context.Context, started time.Time, bl
 	b.delay = min(2*b.delay, maxEmptyPollDelay)
 }
 
-// extractBlockMS scans TLV-encoded options for OptBlockMS (0x17) and returns
-// its value in milliseconds. Returns 0 if not found.
 // waitMS is how long a request asks the server to wait: a kv.get body's
-// wait_ms, its first field, or any other request's block_ms option.
+// wait_ms, its first field; an action.await body's block_ms, after its
+// actions; or any other request's block_ms option.
 func waitMS(op OpCode, value, options []byte) uint64 {
-	if op == OpKVGet {
+	switch op {
+	case OpKVGet:
 		if len(value) >= 9 && value[0] == 1 {
 			return binary.LittleEndian.Uint64(value[1:9])
+		}
+		return 0
+	case OpActionAwait:
+		r := bodyReader{buf: value}
+		for n := r.u8(); n > 0; n-- {
+			r.bytes16()
+		}
+		if r.present() {
+			if v := r.u64(); !r.bad {
+				return v
+			}
 		}
 		return 0
 	}
 	return uint64(extractBlockMS(options))
 }
+
+// extractBlockMS scans TLV-encoded options for OptBlockMS (0x17) and returns
+// its value in milliseconds. Returns 0 if not found.
 
 func extractBlockMS(options []byte) uint32 {
 	for i := 0; i+1 < len(options); {

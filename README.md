@@ -266,6 +266,12 @@ res, err := txn.Commit()
 ```
 
 Scan, MGet, History and the JSON ops are not available inside a transaction.
+The server holds a transaction to 64 ops and 256 KiB of keys and values
+unless its operator sets otherwise. A `Condition`, `CASVersion` or `Incr` is
+decided when the commit applies, not when its op is buffered: one that
+doesn't hold refuses the `Commit`, and none of the transaction applies.
+Outside a transaction too, a refused CAS or condition is decided as the write
+applies, so it still costs a replicated commit.
 
 ### Queue Operations
 
@@ -310,8 +316,11 @@ err := client.Queue.Nack("tasks", []uint64{msg.Seq}, nil)
 #### DLQ Operations
 
 ```go
-// List DLQ messages
-result, err := client.Queue.DLQList("tasks", nil)
+// One page of dead letters, oldest first, up to 100 at a time
+page, err := client.Queue.DLQList("tasks", &flo.DLQListOptions{Limit: 50})
+for page.HasMore {
+    page, err = client.Queue.DLQList("tasks", &flo.DLQListOptions{Limit: 50, After: &page.LastSeq})
+}
 
 // Requeue messages from DLQ back to main queue
 seqs := []uint64{msg1.Seq, msg2.Seq}
@@ -321,8 +330,8 @@ err := client.Queue.DLQRequeue("tasks", seqs, nil)
 #### Peek
 
 ```go
-// Peek at messages without creating leases (no visibility timeout)
-// Messages remain available for other consumers
+// The next ready messages, in the order a dequeue takes them, left in the
+// queue; each payload holds at most its first 4 KiB (Size is the whole)
 result, err := client.Queue.Peek("tasks", 10, nil)
 for _, msg := range result.Messages {
     fmt.Printf("Peeking: seq=%d payload=%s\n", msg.Seq, msg.Payload)
@@ -337,6 +346,8 @@ value, err := client.KV.Get("key", nil)
 if err != nil {
     if flo.IsNotFound(err) {
         // Key doesn't exist
+    } else if flo.IsStaleReport(err) {
+        // An action report for a delivery the run has moved on from
     } else if flo.IsConflict(err) {
         // CAS version mismatch
     } else if flo.IsBadRequest(err) {
@@ -373,7 +384,10 @@ When the server refuses a request as `overloaded` or `unavailable` and says it
 didn't run it (`ServerError.Ran == flo.RanNo`), the client sends it again
 itself, as a new request, after a jittered wait. Because the server never ran
 it, this is safe for writes too. Any other refusal, or one that may have run,
-comes straight back.
+comes straight back. A new leader still applying what earlier leaders
+committed, or a node catching up after a restart, refuses reads and writes
+this way (`unavailable` with reason `leader_unknown`), so those are retried
+too; a long catch-up can outlast the retries.
 
 The client never retries two refusals from a halted shard on your
 requests. `unavailable` with reason `shard_halted` (`flo.IsShardHalted`)
@@ -449,8 +463,9 @@ if err != nil {
 }
 defer w.Close()
 
-// Register action handlers, each with the action's options (nil sends a
-// 30 s timeout and 3 attempts, the server's defaults today).
+// Register action handlers, each with the action's options (nil takes the
+// server's defaults: a 300 s lease and 3 attempts). The timeout is the lease,
+// 5 s to 12 h.
 timeout := uint32(60000)
 w.MustRegisterAction("process-order", func(actx *flo.ActionContext) (interface{}, error) {
     var input map[string]interface{}
@@ -494,10 +509,23 @@ bound (`ReasonFieldTooLong`); the SDK checks none of these itself.
 Registering an action replaces its settings, so workers that register one
 action with different options leave it with whichever registered last.
 
-A run whose handler goes past the action's `TimeoutMS` without touching it is
-taken back and run again, by this worker or another. `AutoTouch` touches each
-run every third of its action's timeout while the handler runs; it's off by
-default. Without it, call `actx.Touch` from long handlers. The worker also
+A run whose handler goes past the action's `TimeoutMS`, its lease, without
+touching it is taken back and run again, by this worker or another.
+`AutoTouch` touches each run every sixth of its lease while the handler runs;
+it's off by default. Without it, call `actx.Touch()` from long handlers. A
+touch renews the lease once half of it is gone, and before that changes
+nothing; both answer when the lease runs out.
+
+Each task is one delivery of a run, named by its run id, delivery count,
+term and log index (`actx.TaskID()` prints them as the flo CLI does,
+`run:deliveries:term:index:action`). The worker's complete, fail and touch
+name that delivery back. One for a delivery the run has moved on from, say
+after its lease expired and another worker took it, is refused with a
+`*flo.StaleReportError` (`flo.IsStaleReport`), and a resent one that already
+applied answers ok. A worker that stops mid-run hands the run back with no
+failure counted. Each poll carries a request key, kept until a poll is
+answered, so a poll resent after a lost answer gets the task the first one
+got. The worker also
 stops any handler after its own `ActionTimeout` (5 minutes by default)
 whatever the action's timeout, so raise it for actions that run longer.
 

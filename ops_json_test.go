@@ -53,6 +53,40 @@ func TestStatusesAndReasonsMatchTheServer(t *testing.T) {
 	}
 }
 
+// Every op on the server's table has a constant here, and is sent as a
+// table op: its body coded by the schema, with no value or options.
+func TestTableOpsMatchTheServer(t *testing.T) {
+	path := os.Getenv("FLO_OPS_JSON")
+	if path == "" {
+		if os.Getenv("CI") == "1" {
+			t.Fatal("CI=1 but FLO_OPS_JSON is not set")
+		}
+		t.Skip("FLO_OPS_JSON is not set")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var table struct {
+		Ops []codeName `json:"ops"`
+	}
+	if err := json.Unmarshal(raw, &table); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	if len(table.Ops) == 0 {
+		t.Fatalf("%s lists no ops", path)
+	}
+	sdk := constsOfType(t, "types.go", "OpCode")["OpCode"]
+	for _, op := range table.Ops {
+		if _, ok := sdk[op.Code]; !ok {
+			t.Errorf("server op 0x%03x %s: no SDK constant", op.Code, op.Name)
+		}
+		if !isTableOp(OpCode(op.Code)) {
+			t.Errorf("server op 0x%03x %s is a table op; isTableOp says not", op.Code, op.Name)
+		}
+	}
+}
+
 func compare(t *testing.T, what, prefix string, server []codeName, sdk map[uint64]string) {
 	t.Helper()
 	seen := map[uint64]bool{}

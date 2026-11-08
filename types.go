@@ -18,6 +18,8 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // Protocol constants
@@ -31,7 +33,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0xc751512225a42d04
+	TableHash uint64 = 0x7eb599c24442118b
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -115,6 +117,8 @@ const (
 	OpStreamGroupTouch            OpCode = 0x15A
 	OpStreamGroupInfo             OpCode = 0x15B
 	OpStreamGroupDelete           OpCode = 0x15C
+	OpStreamGroupList             OpCode = 0x15D
+	OpStreamGroupMembers          OpCode = 0x15E
 
 	// ── Queues (0x170 – 0x19F) ──
 	OpQueueEnqueue    OpCode = 0x170
@@ -125,8 +129,8 @@ const (
 	OpQueueDLQDelete  OpCode = 0x177
 	OpQueueDLQRequeue OpCode = 0x178
 	OpQueueStats      OpCode = 0x17B
-	OpQueuePeek       OpCode = 0x17C
 	OpQueuePurge      OpCode = 0x17F
+	OpQueuePeek       OpCode = 0x180
 	OpQueueList       OpCode = 0x198
 
 	// ── Time-Series (0x1A0 – 0x1BF) ──
@@ -137,6 +141,7 @@ const (
 	OpTSList      OpCode = 0x1A4
 	OpTSDelete    OpCode = 0x1A5
 	OpTSRetention OpCode = 0x1A6
+	OpTSInfo      OpCode = 0x1A7
 
 	// ── Actions (0x300 – 0x31F) ──
 	OpActionRegister OpCode = 0x300
@@ -145,10 +150,11 @@ const (
 	OpActionList     OpCode = 0x303
 	OpActionListRuns OpCode = 0x304
 	OpActionDelete   OpCode = 0x305
-	OpActionAwait    OpCode = 0x306
-	OpActionComplete OpCode = 0x307
-	OpActionFail     OpCode = 0x308
-	OpActionTouch    OpCode = 0x309
+	OpActionAwait    OpCode = 0x30A
+	OpActionComplete OpCode = 0x30B
+	OpActionFail     OpCode = 0x30C
+	OpActionTouch    OpCode = 0x30D
+	OpActionInfo     OpCode = 0x30F
 
 	// ── Workers (0x320 – 0x33F) ──
 	OpWorkerRegister   OpCode = 0x320
@@ -177,6 +183,7 @@ const (
 	OpProcessingCancel OpCode = 0x362
 	OpProcessingStatus OpCode = 0x363
 	OpProcessingList   OpCode = 0x364
+	OpProcessingRemove OpCode = 0x365
 )
 
 // StatusCode represents status codes for Flo protocol responses.
@@ -494,6 +501,39 @@ type NackOptions struct {
 // DLQListOptions contains options for DLQ list operations.
 type DLQListOptions struct {
 	Namespace string
+	// Limit is the most dead letters on the page, 1..MaxDLQPage; 0 means
+	// MaxDLQPage.
+	Limit uint32
+	// After, when set, starts the page after the dead letter with this seq:
+	// the previous page's LastSeq.
+	After *uint64
+}
+
+// MaxDLQPage is the most dead letters one DLQList page holds.
+const MaxDLQPage = 100
+
+// DeadLetter is one message in a queue's dead letter queue.
+type DeadLetter struct {
+	Seq uint64
+	// Size is the payload's whole length; Payload holds at most its first
+	// 4 KiB.
+	Size         uint32
+	Payload      []byte
+	EnqueuedAtMS int64
+	Attempts     uint32
+	Priority     uint8
+	MovedAtMS    int64
+}
+
+// DLQPage is one page of a queue's dead letters, oldest first.
+type DLQPage struct {
+	Messages []DeadLetter
+	// Total is how many dead letters the queue holds.
+	Total uint64
+	// HasMore says another page follows: ask again with After set to LastSeq.
+	HasMore bool
+	// LastSeq is the seq of the page's last message; 0 on an empty page.
+	LastSeq uint64
 }
 
 // DLQRequeueOptions contains options for DLQ requeue operations.
@@ -504,6 +544,30 @@ type DLQRequeueOptions struct {
 // PeekOptions contains options for queue peek operations.
 type PeekOptions struct {
 	Namespace string
+}
+
+// MaxPeekLimit is the most messages one Peek may ask for.
+const MaxPeekLimit = 100
+
+// PeekedMessage is a ready message, as Peek shows it.
+type PeekedMessage struct {
+	Seq          uint64
+	Priority     uint32
+	Attempts     uint32
+	EnqueuedAtMS int64
+	// Size is the payload's whole length; Payload holds at most its first
+	// 4 KiB.
+	Size    uint32
+	Payload []byte
+}
+
+// PeekResult is the next ready messages of a queue, in the order a dequeue
+// takes them.
+type PeekResult struct {
+	Messages []PeekedMessage
+	// More says more may follow: the limit, the answer's room or a run of
+	// leased messages stopped it.
+	More bool
 }
 
 // =============================================================================
@@ -657,6 +721,45 @@ type StreamInfoOptions struct {
 	Namespace string
 }
 
+// StreamGroup is one consumer group, as GroupList shows it.
+type StreamGroup struct {
+	Name    string
+	Members uint32
+	// Pending counts the entries delivered and not yet acked.
+	Pending          uint64
+	CreatedAtMS      int64
+	AckTimeoutMS     uint32
+	MaxDeliver       uint8
+	LastDeliveredMS  uint64
+	LastDeliveredSeq uint64
+}
+
+// StreamGroupList is a stream's consumer groups.
+type StreamGroupList struct {
+	Groups []StreamGroup
+	// More says the stream has more groups than the answer holds.
+	More bool
+}
+
+// StreamGroupMember is one member of a consumer group.
+type StreamGroupMember struct {
+	ID string
+	// Leaving is set on a member that has left and still holds pending entries.
+	Leaving bool
+	// Pending counts the entries delivered to it and not yet acked.
+	Pending    uint32
+	JoinedAtMS int64
+	// LastActiveMS is nil until the server records the member active.
+	LastActiveMS *int64
+}
+
+// StreamGroupMembers is a consumer group's members.
+type StreamGroupMembers struct {
+	Members []StreamGroupMember
+	// More says the group has more members than the answer holds.
+	More bool
+}
+
 // StreamGroupJoinOptions contains options for consumer group join.
 type StreamGroupJoinOptions struct {
 	Namespace string
@@ -704,15 +807,59 @@ const (
 	RunStatusTimedOut  RunStatus = 5
 )
 
-// TaskAssignment represents a task assigned to a worker.
-type TaskAssignment struct {
-	TaskID             string
-	TaskType           string
-	Payload            []byte
-	CreatedAt          int64
-	Attempt            uint32
+// Delivery names one delivery of a run to a worker. A complete, fail or
+// touch names it back; one naming any other delivery of the run is refused
+// as stale (IsStaleReport).
+type Delivery struct {
+	RunID string
+	// Action is the action the run invokes; a report must name it.
+	Action string
+	// Deliveries counts the run's deliveries, this one included.
+	Deliveries uint32
+	// Term and Index are where in the log the delivery was made.
+	Term  uint64
+	Index uint64
+}
+
+// TaskID is the delivery as the flo CLI prints and parses it:
+// run:deliveries:term:index:action.
+func (d Delivery) TaskID() string {
+	return fmt.Sprintf("%s:%d:%d:%d:%s", d.RunID, d.Deliveries, d.Term, d.Index, d.Action)
+}
+
+// ParseTaskID reads a task id as TaskID writes it. The action comes last,
+// so it may hold colons; a run id holds none.
+func ParseTaskID(s string) (Delivery, error) {
+	parts := strings.SplitN(s, ":", 5)
+	bad := fmt.Errorf("flo: %q is not a task id (run:deliveries:term:index:action)", s)
+	if len(parts) != 5 || parts[0] == "" || parts[4] == "" {
+		return Delivery{}, bad
+	}
+	deliveries, err1 := strconv.ParseUint(parts[1], 10, 32)
+	term, err2 := strconv.ParseUint(parts[2], 10, 64)
+	index, err3 := strconv.ParseUint(parts[3], 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil {
+		return Delivery{}, bad
+	}
+	return Delivery{RunID: parts[0], Deliveries: uint32(deliveries), Term: term, Index: index, Action: parts[4]}, nil
+}
+
+// Task is a delivery of a run to a worker, as an await answers it.
+type Task struct {
+	Delivery
+	// Namespace is the run's namespace.
+	Namespace   string
+	CreatedAtMS int64
+	// Attempt is the run's failures so far, plus one. A fail with Abandoned
+	// set counts none, so the next delivery has the same attempt.
+	Attempt uint32
+	// LeaseMS is how long the worker holds the run without a touch.
+	LeaseMS uint64
+	// CallerRunID and CallerWorkflowName name the workflow run that invoked
+	// it; empty when none did.
 	CallerRunID        string
 	CallerWorkflowName string
+	Input              []byte
 }
 
 // ActionRunStatus represents the status of an action invocation.
@@ -732,28 +879,30 @@ type ActionRunStatus struct {
 	// one takes it. Only the leader knows a take at once: another node
 	// learns it at the run's next update.
 	WorkerID string
+	// Outcome is the outcome a completed run's worker named, which a
+	// workflow step follows; "" for success.
+	Outcome string
 }
 
 // ActionRegisterOptions contains options for action registration.
 // Registering replaces the action's settings: the last registration wins.
 type ActionRegisterOptions struct {
 	Namespace string
-	// TimeoutMS is how long a run may go without its worker completing,
-	// failing or touching it before it's taken back; 0 means never. nil
-	// sends 30000, the server's default today.
+	// TimeoutMS is the lease: how long a worker holds a run without
+	// completing, failing or touching it before it's taken back. The server
+	// takes MinLeaseMS..MaxLeaseMS; nil or 0 is its default, 300000.
 	TimeoutMS *uint32
-	// MaxRetries counts attempts in all, the first included. nil sends 3,
-	// the server's default today.
+	// MaxRetries counts attempts in all, the first included, 1..1000. nil
+	// sends 3, the server's default.
 	MaxRetries *uint32
 	Owner      string
 }
 
-func (o *ActionRegisterOptions) timeoutMS() uint32 {
-	if o.TimeoutMS == nil {
-		return 30000
-	}
-	return *o.TimeoutMS
-}
+// The lease an action's TimeoutMS may set.
+const (
+	MinLeaseMS = 5000
+	MaxLeaseMS = 12 * 60 * 60 * 1000
+)
 
 // ActionInvokeOptions contains options for action invocation.
 type ActionInvokeOptions struct {
@@ -782,13 +931,56 @@ type ActionListOptions struct {
 	Prefix string
 }
 
-// ActionListResult is one page of a namespace's action names.
+// ActionListEntry is one action in a list page.
+type ActionListEntry struct {
+	Name string
+	// Version counts the action's registrations.
+	Version     uint32
+	Owner       string
+	TimeoutMS   uint64
+	MaxAttempts uint32
+	CreatedAtMS int64
+}
+
+// ActionListResult is one page of a namespace's actions, in name order.
 type ActionListResult struct {
-	Names []string
+	Actions []ActionListEntry
 	// HasMore says another page follows; Cursor reads it.
 	HasMore bool
 	// Cursor is where the next page starts; nil on the last page.
 	Cursor []byte
+}
+
+// ActionInfoOptions contains options for Action.Info.
+type ActionInfoOptions struct {
+	Namespace string
+}
+
+// ActionInfo is one action's settings and counts.
+type ActionInfo struct {
+	Owner string
+	// Version counts the action's registrations.
+	Version     uint32
+	TimeoutMS   uint64
+	MaxAttempts uint32
+	CreatedAtMS int64
+	// Ready counts the runs waiting for a worker, up to 100,000;
+	// ReadyCapped says more wait than were counted.
+	Ready       uint64
+	ReadyCapped bool
+	// TooManyRuns says the action's shard holds too many of the namespace's
+	// runs to count them: the counts and latencies below are nil.
+	TooManyRuns bool
+	Running     *uint64
+	Completed   *uint64
+	Failed      *uint64
+	TimedOut    *uint64
+	// The latencies are of the completed runs measured, LatencyCount of them.
+	LatencyCount *uint64
+	LatencyAvgMS *uint64
+	LatencyP50MS *uint64
+	LatencyP95MS *uint64
+	LatencyMaxMS *uint64
 }
 
 // WorkerRegisterOptions contains options for registering a worker in the worker registry.
@@ -815,28 +1007,39 @@ type ProcessEntry struct {
 	Kind ProcessKind // action or stream_consumer
 }
 
-// WorkerAwaitOptions contains options for action_await (blocking wait for task).
+// WorkerAwaitOptions contains options for an await.
 type WorkerAwaitOptions struct {
 	Namespace string
 	BlockMS   *uint32 // Long-poll wait (nil = 30000, 0 = don't wait, max 300000)
+	// RequestKey, at most MaxRequestKey bytes, makes a retried await safe:
+	// one with the key an earlier await used gets the delivery that one
+	// got, while its lease holds, not a second run.
+	RequestKey string
 }
 
-// WorkerCompleteOptions contains options for action_complete.
+// MaxRequestKey is the longest await request key.
+const MaxRequestKey = 64
+
+// WorkerCompleteOptions contains options for a complete.
 type WorkerCompleteOptions struct {
 	Namespace string
-	Outcome   string // Named outcome for workflow routing (default: "success")
+	Outcome   string // Named outcome a workflow step follows; "" is success
 }
 
-// WorkerFailOptions contains options for action_fail.
+// WorkerFailOptions contains options for a fail.
 type WorkerFailOptions struct {
 	Namespace string
-	Retry     bool
+	// Retry runs it again while attempts are left; false fails the run now.
+	Retry bool
+	// Abandoned hands the run back untried: no failure is counted.
+	Abandoned bool
+	// DelayMS is how long before the run is ready again, at most a day.
+	DelayMS uint64
 }
 
-// WorkerTouchOptions contains options for action_touch (extend lease).
+// WorkerTouchOptions contains options for a touch.
 type WorkerTouchOptions struct {
 	Namespace string
-	ExtendMS  *uint32
 }
 
 // WorkerHeartbeatOptions contains options for worker heartbeat.
@@ -1050,6 +1253,8 @@ type WorkflowDefinitionEntry struct {
 	Name      string
 	Version   string
 	CreatedAt int64
+	// Enabled is false for a disabled definition, which starts no runs.
+	Enabled bool
 }
 
 // WorkflowDefinitionListResult is one page of a namespace's workflow
@@ -1120,16 +1325,37 @@ type ProcessingStatusResult struct {
 	BatchSize        uint32
 	RecordsProcessed uint64
 	CreatedAt        int64
-	// FailureReason says why the job failed; empty unless Status is "failed".
-	FailureReason string
+	// Reason says why a failed job failed, or, for a running job this node
+	// holds back, "held here: " and why; empty otherwise.
+	Reason string
+	// Running and what follows are the job's pipelines on the node that
+	// answered, since that node started them; none of it is replicated.
+	Running     bool
+	RecordsIn   uint64
+	RecordsOut  uint64
+	WatermarkMS int64
+	TickAvgUS   uint64
+	TickMaxUS   uint64
+	UptimeMS    uint64
+	// YAML is the definition the job was submitted with.
+	YAML []byte
 }
 
 // ProcessingListEntry represents a single entry in a processing job list.
 type ProcessingListEntry struct {
-	Name      string
-	JobID     string
-	Status    string
-	CreatedAt int64
+	Name  string
+	JobID string
+	// Status is the job's status as the server words it: "RUNNING",
+	// "FAILED: why", "RUNNING (held here: why)".
+	Status           string
+	CreatedAt        int64
+	BatchSize        uint32
+	RecordsProcessed uint64
+}
+
+// ProcessingRemoveOptions contains options for removing a processing job.
+type ProcessingRemoveOptions struct {
+	Namespace string
 }
 
 // Reason says why the server refused a request. It mirrors the server's
@@ -1181,9 +1407,10 @@ const (
 	// ReasonTooManyTransactions: the shard holds as many open transactions
 	// as it may.
 	ReasonTooManyTransactions Reason = 25
-	// ReasonStaleReport: an action complete or fail for a run that has moved
-	// on (another worker holds it, or it finished). It was dropped; resending
-	// it is refused the same way.
+	// ReasonStaleReport: an action complete, fail or touch naming a delivery
+	// the run has moved on from (its lease expired, it was delivered again,
+	// another worker holds it, or it finished otherwise). It was dropped. A
+	// resent report that already applied answers ok instead.
 	ReasonStaleReport Reason = 26
 	// ReasonWorkerUnhealthy: an await from a worker that missed its
 	// heartbeats; a heartbeat, or registering again, lets it take work.
@@ -1196,6 +1423,9 @@ const (
 	ReasonShardHalted Reason = 29
 	// ReasonAdminOnly: the op is served only on the node's admin socket.
 	ReasonAdminOnly Reason = 30
+	// ReasonJobRunning: a processing job that is still running can't be
+	// removed; stop or cancel it first.
+	ReasonJobRunning Reason = 31
 )
 
 var reasonNames = map[Reason]string{
@@ -1209,7 +1439,7 @@ var reasonNames = map[Reason]string{
 	ReasonConflictingFields: "conflicting_fields", ReasonWritesStopped: "writes_stopped", ReasonTooManyProposals: "too_many_proposals",
 	ReasonWrongType: "wrong_type", ReasonTooManyTransactions: "too_many_transactions",
 	ReasonStaleReport: "stale_report", ReasonWorkerUnhealthy: "worker_unhealthy", ReasonWorkerDraining: "worker_draining",
-	ReasonShardHalted: "shard_halted", ReasonAdminOnly: "admin_only",
+	ReasonShardHalted: "shard_halted", ReasonAdminOnly: "admin_only", ReasonJobRunning: "job_running",
 }
 
 func (r Reason) String() string {

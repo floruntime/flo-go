@@ -300,280 +300,210 @@ func decodeWorkerInfoAnswer(data []byte) (*WorkerDetails, error) {
 	return got, nil
 }
 
-// Await waits for a task assignment (action_await).
-func (w *WorkerClient) Await(taskTypes []string, opts *WorkerAwaitOptions) (*TaskAssignment, error) {
+// The longest fields an await or a report carries.
+const (
+	maxAwaitActions = 64
+	maxActionName   = 256
+	maxOutcome      = 256
+	maxResult       = 65535
+	maxFailError    = 65535
+	maxFailDelayMS  = 24 * 60 * 60 * 1000
+	maxTaskInput    = 64 * 1024
+	maxNamespaceLen = 63
+)
+
+// Await waits up to BlockMS for a task of one of actions, tried in order,
+// and of the actions the worker registered. It returns nil when no run was
+// ready in time.
+func (w *WorkerClient) Await(actions []string, opts *WorkerAwaitOptions) (*Task, error) {
 	if opts == nil {
 		opts = &WorkerAwaitOptions{}
 	}
 	if err := checkBlockMS(opts.BlockMS); err != nil {
 		return nil, err
 	}
-
-	namespace := w.client.getNamespace(opts.Namespace)
-
-	// Wire format: [count:u32][task_type_len:u16][task_type]...
-	size := 4 // count
-	for _, tt := range taskTypes {
-		size += 2 + len(tt)
-	}
-
-	value := make([]byte, size)
-	offset := 0
-
-	// Task types count
-	binary.LittleEndian.PutUint32(value[offset:], uint32(len(taskTypes)))
-	offset += 4
-
-	// Each task type: [len:u16][data]
-	for _, tt := range taskTypes {
-		binary.LittleEndian.PutUint16(value[offset:], uint16(len(tt)))
-		offset += 2
-		copy(value[offset:], tt)
-		offset += len(tt)
-	}
-
-	// Build options for blocking/timeout
-	builder := NewOptionsBuilder()
-
 	// Send the server's 30000 default explicitly when unset, so the client
 	// deadline covers the wait.
 	blockMS := defaultWorkerBlockMS
 	if opts.BlockMS != nil {
 		blockMS = *opts.BlockMS
 	}
-	builder.AddU32(OptBlockMS, blockMS)
-
-	resp, err := w.client.sendAndCheck(OpActionAwait, namespace, []byte(w.workerID), value, builder.Build(), true)
+	body, err := encodeAwaitBody(actions, blockMS, opts.RequestKey)
 	if err != nil {
 		return nil, err
 	}
-
-	if len(resp.Data) == 0 {
-		return nil, nil // No task available
+	resp, err := w.client.sendAndCheck(OpActionAwait, w.client.getNamespace(opts.Namespace), []byte(w.workerID), body, nil, false)
+	if err != nil {
+		return nil, err
 	}
-
-	return parseTaskAssignment(resp.Data)
+	return decodeAwaitAnswer(resp.Data)
 }
 
-// Complete marks a task as successfully completed.
-// Wire format: [action_name_len:u16][action_name][task_id_len:u16][task_id][outcome_len:u16][outcome][result_len:u16][result]
-func (w *WorkerClient) Complete(actionName string, taskID string, result []byte, opts *WorkerCompleteOptions) error {
+// encodeAwaitBody codes action.await's request: actions, block_ms,
+// request_key.
+func encodeAwaitBody(actions []string, blockMS uint32, requestKey string) ([]byte, error) {
+	if len(actions) == 0 || len(actions) > maxAwaitActions {
+		return nil, fmt.Errorf("flo: an await names 1..%d actions, got %d", maxAwaitActions, len(actions))
+	}
+	if len(requestKey) > MaxRequestKey {
+		return nil, fmt.Errorf("flo: request key is %d bytes, at most %d", len(requestKey), MaxRequestKey)
+	}
+	wr := bodyWriter{buf: make([]byte, 0, 16+len(requestKey))}
+	wr.u8(uint8(len(actions)))
+	for _, a := range actions {
+		if a == "" || len(a) > maxActionName {
+			return nil, fmt.Errorf("flo: action name %q: want 1..%d bytes", a, maxActionName)
+		}
+		wr.bytes16([]byte(a))
+	}
+	wr.u8(1)
+	wr.u64(uint64(blockMS))
+	if requestKey == "" {
+		wr.u8(0)
+	} else {
+		wr.u8(1)
+		wr.bytes8([]byte(requestKey))
+	}
+	return wr.buf, nil
+}
+
+// decodeAwaitAnswer reads action.await's answer: an optional task.
+func decodeAwaitAnswer(data []byte) (*Task, error) {
+	r := bodyReader{buf: data}
+	if !r.present() {
+		return nil, r.done()
+	}
+	t := &Task{}
+	t.RunID = string(r.bytes16())
+	t.Namespace = string(r.bytes8())
+	t.Deliveries = r.u32()
+	t.Term = r.u64()
+	t.Index = r.u64()
+	t.Action = string(r.bytes16())
+	t.CreatedAtMS = int64(r.u64())
+	t.Attempt = r.u32()
+	t.LeaseMS = r.u64()
+	if r.present() {
+		t.CallerRunID = string(r.bytes16())
+	}
+	if r.present() {
+		t.CallerWorkflowName = string(r.bytes16())
+	}
+	t.Input = r.bytes32()
+	if len(t.Namespace) > maxNamespaceLen || len(t.Action) > maxActionName || len(t.Input) > maxTaskInput {
+		r.bad = true
+	}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// reportBody starts a report's request with the delivery it names: action,
+// worker, deliveries, term, index.
+func (w *WorkerClient) reportBody(d Delivery, extra int) (*bodyWriter, error) {
+	if d.RunID == "" {
+		return nil, fmt.Errorf("flo: a report names a run")
+	}
+	if d.Action == "" || len(d.Action) > maxActionName {
+		return nil, fmt.Errorf("flo: action name %q: want 1..%d bytes", d.Action, maxActionName)
+	}
+	if len(w.workerID) > maxWorkerID {
+		return nil, fmt.Errorf("flo: worker id is %d bytes, at most %d", len(w.workerID), maxWorkerID)
+	}
+	wr := &bodyWriter{buf: make([]byte, 0, 2+len(d.Action)+2+len(w.workerID)+20+extra)}
+	wr.bytes16([]byte(d.Action))
+	wr.bytes16([]byte(w.workerID))
+	wr.u32(d.Deliveries)
+	wr.u64(d.Term)
+	wr.u64(d.Index)
+	return wr, nil
+}
+
+// Complete reports a delivery done with result. A resend of a complete that
+// already applied answers ok; one for a delivery the run has moved on from,
+// or with another result, is a *StaleReportError.
+func (w *WorkerClient) Complete(d Delivery, result []byte, opts *WorkerCompleteOptions) error {
 	if opts == nil {
 		opts = &WorkerCompleteOptions{}
 	}
-
-	namespace := w.client.getNamespace(opts.Namespace)
-
-	outcome := opts.Outcome
-	if outcome == "" {
-		outcome = "success"
+	if len(opts.Outcome) > maxOutcome {
+		return fmt.Errorf("flo: outcome is %d bytes, at most %d", len(opts.Outcome), maxOutcome)
 	}
-
-	value := make([]byte, 2+len(actionName)+2+len(taskID)+2+len(outcome)+2+len(result))
-	offset := 0
-
-	// action_name
-	binary.LittleEndian.PutUint16(value[offset:], uint16(len(actionName)))
-	offset += 2
-	copy(value[offset:], actionName)
-	offset += len(actionName)
-
-	// task_id
-	binary.LittleEndian.PutUint16(value[offset:], uint16(len(taskID)))
-	offset += 2
-	copy(value[offset:], taskID)
-	offset += len(taskID)
-
-	// outcome
-	binary.LittleEndian.PutUint16(value[offset:], uint16(len(outcome)))
-	offset += 2
-	copy(value[offset:], outcome)
-	offset += len(outcome)
-
-	// result
-	binary.LittleEndian.PutUint16(value[offset:], uint16(len(result)))
-	offset += 2
-	copy(value[offset:], result)
-
-	// not_found means the run or namespace is unknown, never "already
-	// done" (a duplicate complete answers ok), so it is a refusal.
-	_, err := w.client.sendAndCheck(OpActionComplete, namespace, []byte(w.workerID), value, nil, false)
-	return err
+	if len(result) > maxResult {
+		return fmt.Errorf("%w: a result is at most %d bytes, got %d", ErrValueTooLarge, maxResult, len(result))
+	}
+	wr, err := w.reportBody(d, 6+len(opts.Outcome)+len(result))
+	if err != nil {
+		return err
+	}
+	wr.u8(1)
+	wr.bytes16([]byte(opts.Outcome))
+	wr.u8(1)
+	wr.bytes16(result)
+	resp, err := w.client.sendAndCheck(OpActionComplete, w.client.getNamespace(opts.Namespace), []byte(d.RunID), wr.buf, nil, false)
+	if err != nil {
+		return err
+	}
+	return decodeEmptyAnswer(resp.Data)
 }
 
-// Fail marks a task as failed.
-// Wire format: [action_name_len:u16][action_name][task_id_len:u16][task_id][retry:u8][error_message...]
-func (w *WorkerClient) Fail(actionName string, taskID string, errorMessage string, opts *WorkerFailOptions) error {
+// Fail reports a delivery failed with errorMessage. As for Complete, a
+// resend that already applied answers ok.
+func (w *WorkerClient) Fail(d Delivery, errorMessage string, opts *WorkerFailOptions) error {
 	if opts == nil {
 		opts = &WorkerFailOptions{}
 	}
-
-	namespace := w.client.getNamespace(opts.Namespace)
-
-	value := make([]byte, 2+len(actionName)+2+len(taskID)+1+len(errorMessage))
-	offset := 0
-
-	// action_name
-	binary.LittleEndian.PutUint16(value[offset:], uint16(len(actionName)))
-	offset += 2
-	copy(value[offset:], actionName)
-	offset += len(actionName)
-
-	// task_id
-	binary.LittleEndian.PutUint16(value[offset:], uint16(len(taskID)))
-	offset += 2
-	copy(value[offset:], taskID)
-	offset += len(taskID)
-
-	// retry flag
-	if opts.Retry {
-		value[offset] = 1
-	} else {
-		value[offset] = 0
+	if opts.DelayMS > maxFailDelayMS {
+		return fmt.Errorf("flo: fail delay %d ms, at most %d", opts.DelayMS, maxFailDelayMS)
 	}
-	offset++
-
-	// error_message
-	copy(value[offset:], errorMessage)
-
-	// As for Complete, not_found is a refusal.
-	_, err := w.client.sendAndCheck(OpActionFail, namespace, []byte(w.workerID), value, nil, false)
-	return err
+	if len(errorMessage) > maxFailError {
+		errorMessage = errorMessage[:maxFailError]
+	}
+	wr, err := w.reportBody(d, 16+len(errorMessage))
+	if err != nil {
+		return err
+	}
+	wr.u8(1)
+	wr.u8(boolByte(opts.Retry))
+	wr.u8(1)
+	wr.u8(boolByte(opts.Abandoned))
+	wr.u8(1)
+	wr.u64(opts.DelayMS)
+	wr.u8(1)
+	wr.bytes16([]byte(errorMessage))
+	resp, err := w.client.sendAndCheck(OpActionFail, w.client.getNamespace(opts.Namespace), []byte(d.RunID), wr.buf, nil, false)
+	if err != nil {
+		return err
+	}
+	return decodeEmptyAnswer(resp.Data)
 }
 
-// Touch extends the lease on a task, for the longer of opts.ExtendMS and
-// the action's timeout. It returns ErrNotFound for a run that no longer
-// exists, and a conflict for one that isn't running.
-// Wire format: [action_name_len:u16][action_name][task_id_len:u16][task_id][extend_ms:u32]
-func (w *WorkerClient) Touch(actionName string, taskID string, opts *WorkerTouchOptions) error {
+// Touch keeps a delivery's lease and returns when it runs out, in Unix
+// milliseconds. While more than half the lease is left it changes nothing
+// and answers the current expiry; after that it renews the lease in full.
+func (w *WorkerClient) Touch(d Delivery, opts *WorkerTouchOptions) (int64, error) {
 	if opts == nil {
 		opts = &WorkerTouchOptions{}
 	}
-
-	namespace := w.client.getNamespace(opts.Namespace)
-
-	extendMS := uint32(30000)
-	if opts.ExtendMS != nil {
-		extendMS = *opts.ExtendMS
+	wr, err := w.reportBody(d, 0)
+	if err != nil {
+		return 0, err
 	}
-
-	value := make([]byte, 2+len(actionName)+2+len(taskID)+4)
-	offset := 0
-
-	// action_name
-	binary.LittleEndian.PutUint16(value[offset:], uint16(len(actionName)))
-	offset += 2
-	copy(value[offset:], actionName)
-	offset += len(actionName)
-
-	// task_id
-	binary.LittleEndian.PutUint16(value[offset:], uint16(len(taskID)))
-	offset += 2
-	copy(value[offset:], taskID)
-	offset += len(taskID)
-
-	// extend_ms
-	binary.LittleEndian.PutUint32(value[offset:], extendMS)
-
-	_, err := w.client.sendAndCheck(OpActionTouch, namespace, []byte(w.workerID), value, nil, false)
-	return err
+	resp, err := w.client.sendAndCheck(OpActionTouch, w.client.getNamespace(opts.Namespace), []byte(d.RunID), wr.buf, nil, false)
+	if err != nil {
+		return 0, err
+	}
+	r := bodyReader{buf: resp.Data}
+	at := int64(r.u64())
+	return at, r.done()
 }
 
-func parseTaskAssignment(data []byte) (*TaskAssignment, error) {
-	if len(data) < 10 { // Minimum size
-		return nil, fmt.Errorf("incomplete task assignment response")
+func boolByte(b bool) uint8 {
+	if b {
+		return 1
 	}
-
-	pos := 0
-
-	// Read task_id
-	if pos+2 > len(data) {
-		return nil, fmt.Errorf("incomplete task assignment: missing task_id length")
-	}
-	taskIDLen := binary.LittleEndian.Uint16(data[pos:])
-	pos += 2
-
-	if pos+int(taskIDLen) > len(data) {
-		return nil, fmt.Errorf("incomplete task assignment: missing task_id")
-	}
-	taskID := string(data[pos : pos+int(taskIDLen)])
-	pos += int(taskIDLen)
-
-	// Read task_type
-	if pos+2 > len(data) {
-		return nil, fmt.Errorf("incomplete task assignment: missing task_type length")
-	}
-	taskTypeLen := binary.LittleEndian.Uint16(data[pos:])
-	pos += 2
-
-	if pos+int(taskTypeLen) > len(data) {
-		return nil, fmt.Errorf("incomplete task assignment: missing task_type")
-	}
-	taskType := string(data[pos : pos+int(taskTypeLen)])
-	pos += int(taskTypeLen)
-
-	// Read created_at
-	if pos+8 > len(data) {
-		return nil, fmt.Errorf("incomplete task assignment: missing created_at")
-	}
-	createdAt := int64(binary.LittleEndian.Uint64(data[pos:]))
-	pos += 8
-
-	// Read attempt
-	if pos+4 > len(data) {
-		return nil, fmt.Errorf("incomplete task assignment: missing attempt")
-	}
-	attempt := binary.LittleEndian.Uint32(data[pos:])
-	pos += 4
-
-	// caller block: [has_caller:u8][run_id_len:u16][run_id][wf_name_len:u16][wf_name]
-	if pos+1 > len(data) {
-		return nil, fmt.Errorf("incomplete task assignment: missing has_caller")
-	}
-	hasCaller := data[pos]
-	pos += 1
-	var callerRunID string
-	var callerWorkflowName string
-	if hasCaller == 1 {
-		if pos+2 > len(data) {
-			return nil, fmt.Errorf("incomplete task assignment: missing caller_run_id length")
-		}
-		cridLen := int(binary.LittleEndian.Uint16(data[pos:]))
-		pos += 2
-		if pos+cridLen > len(data) {
-			return nil, fmt.Errorf("incomplete task assignment: missing caller_run_id")
-		}
-		callerRunID = string(data[pos : pos+cridLen])
-		pos += cridLen
-
-		if pos+2 > len(data) {
-			return nil, fmt.Errorf("incomplete task assignment: missing caller_workflow_name length")
-		}
-		cwnLen := int(binary.LittleEndian.Uint16(data[pos:]))
-		pos += 2
-		if pos+cwnLen > len(data) {
-			return nil, fmt.Errorf("incomplete task assignment: missing caller_workflow_name")
-		}
-		callerWorkflowName = string(data[pos : pos+cwnLen])
-		pos += cwnLen
-	}
-
-	// Read payload (rest of data)
-	var payload []byte
-	if pos < len(data) {
-		payload = make([]byte, len(data)-pos)
-		copy(payload, data[pos:])
-	}
-
-	return &TaskAssignment{
-		TaskID:             taskID,
-		TaskType:           taskType,
-		Payload:            payload,
-		CreatedAt:          createdAt,
-		Attempt:            attempt,
-		CallerRunID:        callerRunID,
-		CallerWorkflowName: callerWorkflowName,
-	}, nil
+	return 0
 }
 
 // stdLogger is a simple logger that uses log.Printf.

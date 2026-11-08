@@ -20,7 +20,10 @@ func isTableOp(op OpCode) bool {
 	case OpKVPut, OpKVGet, OpKVMGet, OpKVDelete, OpKVScan, OpKVHistory,
 		OpKVIncr, OpKVJsonGet, OpKVJsonSet, OpKVJsonDel,
 		OpKVBeginTxn, OpKVCommitTxn, OpKVRollbackTxn, OpKVExpire, OpKVExists,
-		OpActionStatus, OpWorkerList, OpWorkerInfo:
+		OpNamespaceCreate, OpNamespaceDelete, OpNamespaceList, OpNamespaceInfo,
+		OpStreamGroupList, OpStreamGroupMembers, OpQueuePeek, OpTSInfo,
+		OpActionStatus, OpActionAwait, OpActionComplete, OpActionFail, OpActionTouch, OpActionInfo,
+		OpWorkerList, OpWorkerInfo, OpProcessingRemove:
 		return true
 	}
 	return false
@@ -74,6 +77,10 @@ func (w *bodyWriter) optU64(v *uint64) {
 	}
 	w.u8(1)
 	w.u64(*v)
+}
+func (w *bodyWriter) bytes8(b []byte) {
+	w.u8(uint8(len(b)))
+	w.buf = append(w.buf, b...)
 }
 func (w *bodyWriter) bytes16(b []byte) {
 	w.u16(uint16(len(b)))

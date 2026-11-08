@@ -34,6 +34,11 @@ func actionStatusAnswer(status RunStatus, started, completed *int64, attempt uin
 	} else {
 		b = append(binary.LittleEndian.AppendUint16(append(b, 1), uint16(len(*worker))), *worker...)
 	}
+	if status == RunStatusCompleted {
+		b = append(binary.LittleEndian.AppendUint16(append(b, 1), 4), "paid"...) // outcome
+	} else {
+		b = append(b, 0)
+	}
 	return b
 }
 
@@ -45,7 +50,7 @@ func TestActionStatusDecodesACompletedRunsOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	if st.Status != RunStatusCompleted || st.CreatedAt != 1000 || *st.StartedAt != 1100 || *st.CompletedAt != 1200 ||
-		st.Attempt != 1 || !bytes.Equal(st.Output, []byte(`{"ok":true}`)) || st.ErrorMessage != "" || st.WorkerID != worker {
+		st.Attempt != 1 || !bytes.Equal(st.Output, []byte(`{"ok":true}`)) || st.ErrorMessage != "" || st.WorkerID != worker || st.Outcome != "paid" {
 		t.Fatalf("decoded %+v", st)
 	}
 }

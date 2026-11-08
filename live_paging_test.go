@@ -106,7 +106,14 @@ func TestLiveActionListPagesEveryActionOnce(t *testing.T) {
 		if err != nil {
 			return nil, false, nil, err
 		}
-		return r.Names, r.HasMore, r.Cursor, nil
+		var names []string
+		for _, a := range r.Actions {
+			if a.Version == 0 || a.TimeoutMS != 300000 || a.MaxAttempts != 3 || a.CreatedAtMS == 0 {
+				t.Errorf("action %+v: want a registration with the default lease and attempts", a)
+			}
+			names = append(names, a.Name)
+		}
+		return names, r.HasMore, r.Cursor, nil
 	})
 }
 

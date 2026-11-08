@@ -68,9 +68,9 @@ func processOrder(actx *flo.ActionContext) (interface{}, error) {
 
 		time.Sleep(2 * time.Second)
 
-		// Extend the lease every 3 items
+		// Keep the lease every 3 items
 		if (i+1)%3 == 0 {
-			if err := actx.Touch(30000); err != nil {
+			if _, err := actx.Touch(); err != nil {
 				log.Printf("Warning: failed to extend lease: %v", err)
 			} else {
 				log.Printf("  Extended lease for order %s", req.OrderID)
@@ -128,7 +128,7 @@ func generateReport(actx *flo.ActionContext) (interface{}, error) {
 		log.Printf("  Report generation step %d/%d", step+1, totalSteps)
 		time.Sleep(1 * time.Second)
 		if step == 2 {
-			_ = actx.Touch(30000)
+			_, _ = actx.Touch()
 		}
 	}
 
