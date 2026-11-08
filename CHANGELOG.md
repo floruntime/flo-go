@@ -77,6 +77,9 @@ live tests run against; this SDK no longer talks to an older server.
 - An action handler that panics fails its run with retry, as one that
   returns an error does, so the action's max attempts bounds it (it used to
   fail the run at once)
+- So does a handler that runs past the worker's `ActionTimeout` (it too used
+  to fail the run at once); `NonRetryableError` is the one way to fail a run
+  at once
 
 ### Added
 

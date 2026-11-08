@@ -518,7 +518,8 @@ nothing; both answer when the lease runs out. However often it is touched,
 the server holds one delivery at most 12 hours (`flo.MaxHoldMS`) from when
 it was given; then the run is taken back.
 
-A handler that returns an error or panics fails its run with retry, so the
+A handler that returns an error, panics or runs past `ActionTimeout` fails
+its run with retry, so the
 action's max attempts bounds a handler that keeps failing; return a
 `flo.NewNonRetryableError` to fail the run at once. `Stop` takes no more
 tasks and cancels every running handler's context: a handler that returns
@@ -534,9 +535,11 @@ after its lease expired and another worker took it, is refused with a
 applied answers ok. A worker that stops mid-run hands the run back with no
 failure counted. Each poll carries a request key, kept until a poll is
 answered, so a poll resent after a lost answer gets the task the first one
-got. The worker also
-stops any handler after its own `ActionTimeout` (5 minutes by default)
-whatever the action's timeout, so raise it for actions that run longer.
+got.
+
+The worker also stops any handler after its own `ActionTimeout` (5 minutes
+by default) whatever the action's timeout, and fails the run with retry, so
+raise it for actions that run longer.
 
 Delivery is at-least-once: a handler may see a task or record again, for
 example when a dropped connection loses its result, so make handlers safe to
