@@ -80,6 +80,10 @@ live tests run against; this SDK no longer talks to an older server.
 - So does a handler that runs past the worker's `ActionTimeout` (it too used
   to fail the run at once); `NonRetryableError` is the one way to fail a run
   at once
+- So do a task with no handler and a result that doesn't marshal to JSON
+- `AutoTouch` touches at the task's arrival plus whole intervals, skipping a
+  slot that passed during a slow touch; each touch's latency used to push
+  the later ones back
 
 ### Added
 

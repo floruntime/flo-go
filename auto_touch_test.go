@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -194,5 +195,45 @@ func TestRegisterActionRefusesAnOwnerTooLongForTheWire(t *testing.T) {
 	}
 	if n := len(s.got(OpActionRegister)); n != 0 {
 		t.Errorf("%d register requests sent", n)
+	}
+}
+
+// Touches are due at the task's arrival plus whole intervals: a slow touch
+// doesn't push the next one back, and a slot that passed while one was in
+// flight is skipped. With a 100 ms interval, touches answered after 80 ms
+// stay 100 ms apart (drifting would make them 180), and ones answered after
+// 150 ms land 200 ms apart (drifting would make them 250).
+func TestAutoTouchKeepsToItsScheduleWhateverATouchTakes(t *testing.T) {
+	for _, c := range []struct {
+		latency, gap time.Duration
+	}{{80 * time.Millisecond, 100 * time.Millisecond}, {150 * time.Millisecond, 200 * time.Millisecond}} {
+		t.Run(c.latency.String(), func(t *testing.T) {
+			var mu sync.Mutex
+			var at []time.Time
+			_, addr := newFrameServer(t, func(op OpCode, _ int) reply {
+				if op == OpActionTouch {
+					mu.Lock()
+					at = append(at, time.Now())
+					mu.Unlock()
+					time.Sleep(c.latency)
+				}
+				return reply{}
+			})
+			w := touchWorker(t, addr, sleeper(700*time.Millisecond))
+			start := time.Now()
+			w.executeTask(w.resultClient.workerClient(w.config.WorkerID), testTask(600), start)
+			mu.Lock()
+			defer mu.Unlock()
+			if len(at) < 3 {
+				t.Fatalf("%d touches, want at least 3", len(at))
+			}
+			for i, ts := range at {
+				// Each lands within 40 ms of its slot.
+				slot := start.Add(100*time.Millisecond + time.Duration(i)*c.gap)
+				if d := ts.Sub(slot); d < -5*time.Millisecond || d > 40*time.Millisecond {
+					t.Errorf("touch %d at +%v, want +%v: %v off its slot", i, ts.Sub(start), slot.Sub(start), d)
+				}
+			}
+		})
 	}
 }

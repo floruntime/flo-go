@@ -147,7 +147,7 @@ func runTask(w *ActionWorker) { runTaskLeased(w, 60000) }
 
 // runTaskLeased runs the test task with a lease of leaseMS.
 func runTaskLeased(w *ActionWorker, leaseMS uint64) {
-	w.executeTask(w.resultClient.workerClient(w.config.WorkerID), testTask(leaseMS))
+	w.executeTask(w.resultClient.workerClient(w.config.WorkerID), testTask(leaseMS), time.Now())
 }
 
 func succeed(*ActionContext) (interface{}, error) {
@@ -400,8 +400,9 @@ func TestUnreadableCompleteAnswerIsResent(t *testing.T) {
 	}
 }
 
-// A handler that panics or returns an error fails its run with retry, so the
-// action's max attempts bounds it; a NonRetryableError fails it at once.
+// A handler that panics or returns an error, a missing handler and a result
+// that isn't JSON each fail the run with retry, so the action's max attempts
+// bounds it; only a NonRetryableError fails it at once.
 func TestAFailingHandlerFailsTheRunWithRetry(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -412,6 +413,8 @@ func TestAFailingHandlerFailsTheRunWithRetry(t *testing.T) {
 		{"panic", func(*ActionContext) (interface{}, error) { panic("boom") }, 1, "action panicked: boom"},
 		{"error", func(*ActionContext) (interface{}, error) { return nil, errors.New("boom") }, 1, "boom"},
 		{"non-retryable", func(*ActionContext) (interface{}, error) { return nil, NewNonRetryableErrorf("boom") }, 0, "boom"},
+		{"no handler", nil, 1, "no handler for: a"},
+		{"result not JSON", func(*ActionContext) (interface{}, error) { return make(chan int), nil }, 1, "marshal error: json: unsupported type: chan int"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, addr := newFrameServer(t, func(OpCode, int) reply { return reply{} })
