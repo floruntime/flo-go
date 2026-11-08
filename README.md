@@ -514,7 +514,16 @@ touching it is taken back and run again, by this worker or another.
 `AutoTouch` touches each run every sixth of its lease while the handler runs;
 it's off by default. Without it, call `actx.Touch()` from long handlers. A
 touch renews the lease once half of it is gone, and before that changes
-nothing; both answer when the lease runs out.
+nothing; both answer when the lease runs out. However often it is touched,
+the server holds one delivery at most 12 hours (`flo.MaxHoldMS`) from when
+it was given; then the run is taken back.
+
+A handler that returns an error or panics fails its run with retry, so the
+action's max attempts bounds a handler that keeps failing; return a
+`flo.NewNonRetryableError` to fail the run at once. `Stop` takes no more
+tasks and cancels every running handler's context: a handler that returns
+the context's error hands its run back with no failure counted, and results
+may still be sent for 2 s, after which an unsent one waits out its lease.
 
 Each task is one delivery of a run, named by its run id, delivery count,
 term and log index (`actx.TaskID()` prints them as the flo CLI does,
