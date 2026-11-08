@@ -98,6 +98,19 @@ func (p *ProcessingClient) Cancel(jobID string, opts *ProcessingCancelOptions) e
 	return err
 }
 
+// Remove deletes a stopped, cancelled or failed job, freeing its slot. A
+// running job is refused with ReasonJobRunning: stop or cancel it first.
+func (p *ProcessingClient) Remove(jobID string, opts *ProcessingRemoveOptions) error {
+	if opts == nil {
+		opts = &ProcessingRemoveOptions{}
+	}
+	resp, err := p.client.sendAndCheck(OpProcessingRemove, p.client.getNamespace(opts.Namespace), []byte(jobID), nil, nil, false)
+	if err != nil {
+		return err
+	}
+	return decodeEmptyAnswer(resp.Data)
+}
+
 // =============================================================================
 // Declarative Sync
 // =============================================================================
@@ -193,91 +206,57 @@ func extractProcessingMeta(data []byte) (string, error) {
 
 var processingStatusNames = []string{"running", "stopped", "cancelled", "failed", "completed"}
 
-// parseProcessingStatus parses the binary wire format for processing job status.
-//
-// Wire format: [job_id_len:u16][job_id][name_len:u16][name][status:u8]
-//
-//	[batch_size:u32][records_processed:u64][created_at:i64]
-//	[reason_len:u16][reason]
+// parseProcessingStatus reads processing.status's answer:
+// [job_id_len:u16][job_id][name_len:u16][name][status:u8][batch_size:u32]
+// [records_processed:u64][created_at:i64][reason_len:u16][reason]
+// [running:u8][records_in:u64][records_out:u64][watermark_ms:i64]
+// [tick_avg_us:u64][tick_max_us:u64][uptime_ms:u64][yaml_len:u32][yaml].
 func parseProcessingStatus(data []byte) (*ProcessingStatusResult, error) {
-	pos := 0
-	short := func(field string) error {
-		return fmt.Errorf("%w: processing status ends before %s", ErrIncompleteResponse, field)
-	}
-	readStr := func(field string) (string, error) {
-		if pos+2 > len(data) {
-			return "", short(field)
-		}
-		n := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		pos += 2
-		if pos+n > len(data) {
-			return "", short(field)
-		}
-		s := string(data[pos : pos+n])
-		pos += n
-		return s, nil
-	}
-
-	jobID, err := readStr("job_id")
-	if err != nil {
+	r := bodyReader{buf: data}
+	got := &ProcessingStatusResult{JobID: string(r.bytes16()), Name: string(r.bytes16())}
+	status := r.u8()
+	got.BatchSize = r.u32()
+	got.RecordsProcessed = r.u64()
+	got.CreatedAt = int64(r.u64())
+	got.Reason = string(r.bytes16())
+	got.Running = r.bool()
+	got.RecordsIn = r.u64()
+	got.RecordsOut = r.u64()
+	got.WatermarkMS = int64(r.u64())
+	got.TickAvgUS = r.u64()
+	got.TickMaxUS = r.u64()
+	got.UptimeMS = r.u64()
+	got.YAML = r.bytes32()
+	if err := r.done(); err != nil {
 		return nil, err
 	}
-	name, err := readStr("name")
-	if err != nil {
-		return nil, err
+	if int(status) >= len(processingStatusNames) {
+		return nil, fmt.Errorf("%w: processing status %d is not one this client knows", ErrIncompleteResponse, status)
 	}
-
-	if pos+1+4+8+8 > len(data) {
-		return nil, short("created_at")
-	}
-	statusByte := data[pos]
-	pos++
-	if int(statusByte) >= len(processingStatusNames) {
-		return nil, fmt.Errorf("%w: processing status %d is not one this client knows", ErrIncompleteResponse, statusByte)
-	}
-	batchSize := binary.LittleEndian.Uint32(data[pos : pos+4])
-	pos += 4
-	recordsProcessed := binary.LittleEndian.Uint64(data[pos : pos+8])
-	pos += 8
-	createdAt := int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
-	pos += 8
-
-	reason, err := readStr("failure reason")
-	if err != nil {
-		return nil, err
-	}
-	if pos != len(data) {
-		return nil, fmt.Errorf("%w: %d bytes after the processing status", ErrIncompleteResponse, len(data)-pos)
-	}
-
-	return &ProcessingStatusResult{
-		JobID:            jobID,
-		Name:             name,
-		Status:           processingStatusNames[statusByte],
-		BatchSize:        batchSize,
-		RecordsProcessed: recordsProcessed,
-		CreatedAt:        createdAt,
-		FailureReason:    reason,
-	}, nil
+	got.Status = processingStatusNames[status]
+	return got, nil
 }
 
 // parseProcessingList reads processing.list's answer:
 // [count:u32]([name_len:u16][name][job_id_len:u16][job_id]
-// [status_len:u16][status][created_at:i64])*[has_more:u8][cursor_len:u16][cursor].
+// [status_len:u16][status][created_at:i64][batch_size:u32][records_processed:u64])*
+// [has_more:u8][cursor_len:u16][cursor].
 func parseProcessingList(data []byte) (*ProcessingListResult, error) {
 	r := bodyReader{buf: data}
 	n := r.u32()
-	// Each job takes at least fourteen bytes, so a count past that is a lie.
-	if uint64(n)*14 > uint64(len(data)) {
+	// Each job takes at least 26 bytes, so a count past that is a lie.
+	if uint64(n)*26 > uint64(len(data)) {
 		return nil, ErrIncompleteResponse
 	}
 	got := &ProcessingListResult{Jobs: make([]*ProcessingListEntry, 0, n)}
 	for i := uint32(0); i < n && !r.bad; i++ {
 		got.Jobs = append(got.Jobs, &ProcessingListEntry{
-			Name:      string(r.bytes16()),
-			JobID:     string(r.bytes16()),
-			Status:    string(r.bytes16()),
-			CreatedAt: int64(r.u64()),
+			Name:             string(r.bytes16()),
+			JobID:            string(r.bytes16()),
+			Status:           string(r.bytes16()),
+			CreatedAt:        int64(r.u64()),
+			BatchSize:        r.u32(),
+			RecordsProcessed: r.u64(),
 		})
 	}
 	got.HasMore, got.Cursor = r.pageTrailer()

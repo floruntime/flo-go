@@ -406,13 +406,13 @@ func (w *WorkflowClient) ListDefinitions(opts *WorkflowListDefinitionsOptions) (
 }
 
 // parseWorkflowDefinitionList reads workflow.list_definitions' answer:
-// [count:u32]([name_len:u16][name][version_len:u16][version][created_at:i64])*
+// [count:u32]([name_len:u16][name][version_len:u16][version][created_at:i64][enabled:u8])*
 // [has_more:u8][cursor_len:u16][cursor].
 func parseWorkflowDefinitionList(data []byte) (*WorkflowDefinitionListResult, error) {
 	r := bodyReader{buf: data}
 	n := r.u32()
-	// Each definition takes at least twelve bytes, so a count past that is a lie.
-	if uint64(n)*12 > uint64(len(data)) {
+	// Each definition takes at least 13 bytes, so a count past that is a lie.
+	if uint64(n)*13 > uint64(len(data)) {
 		return nil, ErrIncompleteResponse
 	}
 	got := &WorkflowDefinitionListResult{Definitions: make([]*WorkflowDefinitionEntry, 0, n)}
@@ -421,6 +421,7 @@ func parseWorkflowDefinitionList(data []byte) (*WorkflowDefinitionListResult, er
 			Name:      string(r.bytes16()),
 			Version:   string(r.bytes16()),
 			CreatedAt: int64(r.u64()),
+			Enabled:   r.bool(),
 		})
 	}
 	got.HasMore, got.Cursor = r.pageTrailer()

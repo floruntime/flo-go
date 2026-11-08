@@ -2,7 +2,6 @@ package flo
 
 import (
 	"context"
-	"encoding/binary"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -16,17 +15,6 @@ func fastHeartbeats(t *testing.T) {
 	hb, notice, result := heartbeatInterval, drainNoticeInterval, resultReconnectWait
 	heartbeatInterval, drainNoticeInterval, resultReconnectWait = 30*time.Millisecond, 50*time.Millisecond, 200*time.Millisecond
 	t.Cleanup(func() { heartbeatInterval, drainNoticeInterval, resultReconnectWait = hb, notice, result })
-}
-
-// oneTask is an Await answer assigning task "t1" of action "a".
-func oneTask() []byte {
-	b := binary.LittleEndian.AppendUint16(nil, 2)
-	b = append(b, "t1"...)
-	b = binary.LittleEndian.AppendUint16(b, 1)
-	b = append(b, 'a')
-	b = binary.LittleEndian.AppendUint64(b, 0) // created_at
-	b = binary.LittleEndian.AppendUint32(b, 1) // attempt
-	return append(b, 0)                        // no caller, empty payload
 }
 
 // pollOnce answers the first poll with work and later ones empty after a

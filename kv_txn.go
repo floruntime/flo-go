@@ -30,9 +30,15 @@ type KVTxnCASOptions struct {
 // hash to the same partition as the routing key passed to Begin; otherwise
 // the server refuses it with ReasonWrongRoutingKey.
 //
-// Caps (server-enforced):
-//   - 256 ops per transaction
-//   - 1 MiB total payload across buffered writes
+// The server caps a transaction at 64 ops and 256 KiB of keys and values
+// unless its operator sets otherwise; an op past either is refused with
+// ReasonTxnTooLarge.
+//
+// A Condition, CASVersion or Incr is decided when the commit applies, not
+// when its op is buffered: a buffered op that won't hold is accepted, and
+// Commit is refused, applying none of the transaction: ErrConflict with
+// ReasonCASMismatch or ReasonConditionFailed, or ErrBadRequest for an Incr
+// of a value that isn't a counter or that would overflow.
 //
 // The following operations are NOT supported inside a transaction and return
 // ErrTxnUnsupportedOp without a server round-trip: Scan, MGet, JsonGet,
@@ -208,7 +214,8 @@ func (t *KVTransaction) History(key string, opts *HistoryOptions) (*HistoryResul
 	return nil, ErrTxnUnsupportedOp
 }
 
-// Commit atomically applies all buffered operations in the transaction. After
+// Commit atomically applies all buffered operations in the transaction, or,
+// when one of their conditions doesn't hold, none of them. After
 // Commit returns (success or error) the transaction is closed and further
 // operations return an error.
 func (t *KVTransaction) Commit() (*KVCommitResult, error) {

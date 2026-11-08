@@ -42,6 +42,8 @@ func (c *Client) kvGet(namespace, key string, opts *GetOptions, txn *uint64) (*G
 // Put sets a key-value pair and returns the new version assigned by the
 // server. A CASVersion that isn't the key's, or a Condition that doesn't
 // hold, returns ErrConflict with ReasonCASMismatch or ReasonConditionFailed.
+// The server decides them as the write applies, in log order, so a refused
+// write still costs a replicated commit.
 func (kv *KVClient) Put(key string, value []byte, opts *PutOptions) (PutResult, error) {
 	if opts == nil {
 		opts = &PutOptions{}

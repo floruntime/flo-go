@@ -89,7 +89,11 @@ func (s *frameServer) serve(conn net.Conn) {
 		if r.wrongID {
 			id++
 		}
-		f := statusFrame(id, r.status, r.body)
+		body := r.body
+		if body == nil && r.status == StatusOK {
+			body = okBody(op)
+		}
+		f := statusFrame(id, r.status, body)
 		if r.badCRC {
 			f[16] ^= 0xff
 		}
@@ -138,8 +142,11 @@ func resultTestWorker(t *testing.T, addr string, netTimeout, actionTimeout time.
 	return w, logger
 }
 
-func runTask(w *ActionWorker) {
-	w.executeTask(w.resultClient.workerClient(w.config.WorkerID), &TaskAssignment{TaskType: "a", TaskID: "t1"})
+func runTask(w *ActionWorker) { runTaskLeased(w, 60000) }
+
+// runTaskLeased runs the test task with a lease of leaseMS.
+func runTaskLeased(w *ActionWorker, leaseMS uint64) {
+	w.executeTask(w.resultClient.workerClient(w.config.WorkerID), testTask(leaseMS))
 }
 
 func succeed(*ActionContext) (interface{}, error) {
@@ -230,7 +237,7 @@ func TestRefusedCompleteIsNotResent(t *testing.T) {
 func TestStopDuringHandlerFailsWithRetry(t *testing.T) {
 	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
 		if op == OpActionAwait && n == 0 {
-			return reply{body: taskT1()}
+			return reply{body: oneTask()}
 		}
 		return reply{}
 	})
@@ -260,8 +267,9 @@ func TestStopDuringHandlerFailsWithRetry(t *testing.T) {
 	if len(fails) != 1 {
 		t.Fatalf("server saw %d fails, want 1", len(fails))
 	}
-	// The value ends [retry:u8][message], then an empty options field.
-	if want := []byte("\x01worker stopped\x00\x00"); !bytes.HasSuffix(fails[0], want) {
+	// The body ends retry, abandoned, delay_ms 0 and the message, each
+	// present: the run goes back with no failure counted.
+	if want := append(cat([]byte{1, 1, 1, 1, 1}, u64le(0), []byte{1, 14, 0}), "worker stopped"...); !bytes.HasSuffix(fails[0], want) {
 		t.Errorf("fail frame ends %q, want %q", fails[0][len(fails[0])-len(want):], want)
 	}
 	checkSends(t, s, 0, 1)
@@ -279,7 +287,7 @@ func TestActionTimeoutFailsWithoutRetry(t *testing.T) {
 	if len(fails) != 1 {
 		t.Fatalf("server saw %d fails, want 1", len(fails))
 	}
-	if want := []byte("\x00action timed out\x00\x00"); !bytes.HasSuffix(fails[0], want) {
+	if want := append(cat([]byte{1, 0, 1, 0, 1}, u64le(0), []byte{1, 16, 0}), "action timed out"...); !bytes.HasSuffix(fails[0], want) {
 		t.Errorf("fail frame ends %q, want %q", fails[0][len(fails[0])-len(want):], want)
 	}
 }
@@ -331,14 +339,6 @@ func TestCompleteDroppedAfterThreeSends(t *testing.T) {
 	}
 }
 
-// taskT1 is an await answer assigning task "t1" of action "a".
-func taskT1() []byte {
-	task := []byte{2, 0, 't', '1', 1, 0, 'a'}
-	task = binary.LittleEndian.AppendUint64(task, 0) // created_at
-	task = binary.LittleEndian.AppendUint32(task, 1) // attempt
-	return append(task, 0)                           // has_caller
-}
-
 // A result send that stalls when Stop is called is given up within the
 // stop deadline, so Start returns promptly, and the drop is logged.
 func TestStopDoesNotWaitOutAStalledResult(t *testing.T) {
@@ -346,7 +346,7 @@ func TestStopDoesNotWaitOutAStalledResult(t *testing.T) {
 		switch op {
 		case OpActionAwait:
 			if n == 0 {
-				return reply{body: taskT1()}
+				return reply{body: oneTask()}
 			}
 		case OpActionComplete:
 			return reply{stall: true}
@@ -374,7 +374,7 @@ func TestStopDoesNotWaitOutAStalledResult(t *testing.T) {
 	case <-time.After(stopResultWait + 3*time.Second):
 		t.Fatalf("Start still running %v after Stop", time.Since(stopAt))
 	}
-	if !logger.has("Error: dropped complete for task t1 while the worker stops") {
+	if !logger.has("Error: dropped complete for task t1:1:2:7:a while the worker stops") {
 		t.Errorf("no drop logged; log: %q", logger.lines)
 	}
 	checkSends(t, s, 1, 0)

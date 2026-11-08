@@ -397,6 +397,102 @@ func (s *StreamClient) GroupClaim(stream, group, consumer string, minIdleMS uint
 	return parseClaimResponse(resp.Data)
 }
 
+// GroupList returns a stream's consumer groups, as many as one answer
+// holds; More says there are others. It reads the leader's state.
+func (s *StreamClient) GroupList(stream string, opts *StreamInfoOptions) (*StreamGroupList, error) {
+	if opts == nil {
+		opts = &StreamInfoOptions{}
+	}
+	resp, err := s.client.sendAndCheck(OpStreamGroupList, s.client.getNamespace(opts.Namespace), []byte(stream), nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeGroupListAnswer(resp.Data)
+}
+
+// GroupMembers returns a consumer group's members, as many as one answer
+// holds; More says there are others. An unknown group is an error that
+// IsNotFound reports. It reads the leader's state.
+func (s *StreamClient) GroupMembers(stream, group string, opts *StreamInfoOptions) (*StreamGroupMembers, error) {
+	if opts == nil {
+		opts = &StreamInfoOptions{}
+	}
+	if len(group) > maxGroupName {
+		return nil, fmt.Errorf("flo: group name is %d bytes, at most %d", len(group), maxGroupName)
+	}
+	w := bodyWriter{buf: make([]byte, 0, 2+len(group))}
+	w.bytes16([]byte(group))
+	resp, err := s.client.sendAndCheck(OpStreamGroupMembers, s.client.getNamespace(opts.Namespace), []byte(stream), w.buf, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeGroupMembersAnswer(resp.Data)
+}
+
+const (
+	maxGroupName       = 4096
+	maxListedGroups    = 256
+	maxListedMembers   = 1024
+	memberStateLeaving = 1
+)
+
+// decodeGroupListAnswer reads stream.group.list's answer: groups, more.
+func decodeGroupListAnswer(data []byte) (*StreamGroupList, error) {
+	r := bodyReader{buf: data}
+	n := int(r.u16())
+	if n > maxListedGroups {
+		return nil, ErrIncompleteResponse
+	}
+	got := &StreamGroupList{Groups: make([]StreamGroup, 0, n)}
+	for i := 0; i < n && !r.bad; i++ {
+		got.Groups = append(got.Groups, StreamGroup{
+			Name:             string(r.bytes16()),
+			Members:          r.u32(),
+			Pending:          r.u64(),
+			CreatedAtMS:      int64(r.u64()),
+			AckTimeoutMS:     r.u32(),
+			MaxDeliver:       r.u8(),
+			LastDeliveredMS:  r.u64(),
+			LastDeliveredSeq: r.u64(),
+		})
+	}
+	got.More = r.bool()
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
+}
+
+// decodeGroupMembersAnswer reads stream.group.members' answer: members, more.
+func decodeGroupMembersAnswer(data []byte) (*StreamGroupMembers, error) {
+	r := bodyReader{buf: data}
+	n := int(r.u16())
+	if n > maxListedMembers {
+		return nil, ErrIncompleteResponse
+	}
+	got := &StreamGroupMembers{Members: make([]StreamGroupMember, 0, n)}
+	for i := 0; i < n && !r.bad; i++ {
+		m := StreamGroupMember{ID: string(r.bytes16())}
+		state := r.u8()
+		if state > memberStateLeaving {
+			r.bad = true
+		}
+		m.Leaving = state == memberStateLeaving
+		m.Pending = r.u32()
+		m.JoinedAtMS = int64(r.u64())
+		if r.present() {
+			at := int64(r.u64())
+			m.LastActiveMS = &at
+		}
+		got.Members = append(got.Members, m)
+	}
+	got.More = r.bool()
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
+}
+
 // parseClaimResponse decodes a stream_group_claim response:
 // <records blob> + [next_ts:u64][next_seq:u64] 16-byte cursor trailer.
 // A StreamID.MAX (max,max) cursor sets Done (PEL fully scanned).

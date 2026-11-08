@@ -205,6 +205,37 @@ func TestLiveKVHistoryPages(t *testing.T) {
 	}
 }
 
+// A transaction's CAS that doesn't hold is accepted when buffered and
+// refused at commit, which then applies none of the transaction.
+func TestLiveKVTransactionConflictIsRefusedAtCommit(t *testing.T) {
+	c := liveClient(t)
+	put, err := c.KV.Put("acct", []byte("1"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txn, err := c.KV.Begin("acct", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := txn.Put("acct", []byte("2"), nil); err != nil {
+		t.Fatal(err)
+	}
+	// Not the version the first put gives it, nor the one it has now.
+	stale := put.Version + 5
+	if _, err := txn.Put("acct", []byte("3"), &PutOptions{CASVersion: &stale}); err != nil {
+		t.Fatalf("buffering a CAS that won't hold: %v, want it accepted", err)
+	}
+	_, err = txn.Commit()
+	var se *ServerError
+	if !IsConflict(err) || !errors.As(err, &se) || se.Reason != ReasonCASMismatch {
+		t.Fatalf("commit: %v, want a CAS conflict", err)
+	}
+	got, err := c.KV.Get("acct", nil)
+	if err != nil || string(got.Value) != "1" || got.Version != put.Version {
+		t.Fatalf("after the refused commit: %+v, %v; want the key unchanged", got, err)
+	}
+}
+
 func TestLiveStreamAppendAndRead(t *testing.T) {
 	c := liveClient(t)
 	for _, p := range []string{"one", "two", "three"} {
@@ -373,9 +404,9 @@ func TestLiveActionWorkerCompletesAnInvokedRun(t *testing.T) {
 	}
 }
 
-// A handler that runs past its action's timeout is run once when the worker
-// touches it: without AutoTouch the server would take the run back after 1 s
-// and hand it out again.
+// A handler that runs past its action's lease is run once when the worker
+// touches it: without AutoTouch the server would take the run back after
+// 5 s, the shortest lease, and hand it out again.
 func TestLiveAutoTouchKeepsALongHandlerFromRunningTwice(t *testing.T) {
 	c := liveClient(t)
 	logger := &captureLogger{}
@@ -385,10 +416,10 @@ func TestLiveAutoTouchKeepsALongHandlerFromRunningTwice(t *testing.T) {
 	}
 	defer w.Close()
 	var runs atomic.Int32
-	timeout := uint32(1000)
+	timeout := uint32(MinLeaseMS)
 	w.MustRegisterAction("slow", func(*ActionContext) (interface{}, error) {
 		runs.Add(1)
-		time.Sleep(2500 * time.Millisecond)
+		time.Sleep(7 * time.Second)
 		return []byte("ok"), nil
 	}, &ActionRegisterOptions{TimeoutMS: &timeout})
 	ctx, cancel := context.WithCancel(context.Background())

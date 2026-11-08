@@ -120,7 +120,28 @@ var (
 	// other thing inside a namespace. Reads, lists and scans in a namespace
 	// that was never created return it; a write creates the namespace.
 	ErrNoNamespace = &ServerError{Status: StatusNoNamespace}
+
+	// ErrStaleReport matches a *StaleReportError.
+	ErrStaleReport = errors.New("flo: stale report")
 )
+
+// StaleReportError is an action complete, fail or touch the server dropped
+// because it names a delivery the run has moved on from: the lease expired,
+// the run was delivered again or finished, or another worker holds it. The
+// message says which. Don't resend it; the run is someone else's now. A
+// resent report that already applied answers ok, not this.
+type StaleReportError struct {
+	*ServerError
+}
+
+func (e *StaleReportError) Unwrap() error { return e.ServerError }
+
+func (e *StaleReportError) Is(target error) bool { return target == ErrStaleReport }
+
+// IsStaleReport reports a report the server dropped as stale.
+func IsStaleReport(err error) bool {
+	return errors.Is(err, ErrStaleReport)
+}
 
 // newServerError reads a refusal's body: [reason:u16][ran:u8][message].
 func newServerError(status StatusCode, data []byte) error {
@@ -132,12 +153,16 @@ func newServerError(status StatusCode, data []byte) error {
 	if _, ok := reasonNames[reason]; !ok || ran > RanUnknown {
 		return fmt.Errorf("%w: a refusal with reason %d and ran %d", ErrIncompleteResponse, reason, ran)
 	}
-	return &ServerError{
+	se := &ServerError{
 		Status:  status,
 		Reason:  reason,
 		Ran:     ran,
 		Message: string(data[3:]),
 	}
+	if status == StatusConflict && reason == ReasonStaleReport {
+		return &StaleReportError{se}
+	}
+	return se
 }
 
 // errResponseMismatch is an answer carrying another request's id.

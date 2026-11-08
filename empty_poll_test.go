@@ -37,7 +37,11 @@ func fakeServer(t *testing.T, answer func(op OpCode) []byte) string {
 					if _, err := io.ReadFull(conn, payload); err != nil {
 						return
 					}
-					data := answer(OpCode(binary.LittleEndian.Uint16(header[20:22])))
+					op := OpCode(binary.LittleEndian.Uint16(header[20:22]))
+					data := answer(op)
+					if data == nil {
+						data = okBody(op)
+					}
 					resp := make([]byte, HeaderSize+len(data))
 					binary.LittleEndian.PutUint32(resp[0:4], Magic)
 					binary.LittleEndian.PutUint32(resp[4:8], uint32(len(data)))
@@ -336,11 +340,7 @@ func checkResetAfterWork(t *testing.T, arrivals func() []time.Time) {
 }
 
 func TestActionWorkerResetsBackoffAfterWork(t *testing.T) {
-	task := []byte{2, 0, 't', '1', 1, 0, 'a'}
-	task = binary.LittleEndian.AppendUint64(task, 0) // created_at
-	task = binary.LittleEndian.AppendUint32(task, 1) // attempt
-	task = append(task, 0)                           // has_caller
-	answer, arrivals := pollAfterWork(OpActionAwait, task)
+	answer, arrivals := pollAfterWork(OpActionAwait, oneTask())
 	w := newTestActionWorker(t, fakeServer(t, answer))
 	go w.Start(context.Background())
 	checkResetAfterWork(t, arrivals)

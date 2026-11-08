@@ -31,9 +31,13 @@ func (a *ActionClient) Register(name string, actionType ActionType, opts *Action
 	if len(opts.Owner) > math.MaxUint16 {
 		return fmt.Errorf("flo: action owner is longer than %d bytes", math.MaxUint16)
 	}
+	var timeoutMS uint32
+	if opts.TimeoutMS != nil {
+		timeoutMS = *opts.TimeoutMS
+	}
 	value := make([]byte, 11, 11+len(opts.Owner))
 	value[0] = byte(actionType)
-	binary.LittleEndian.PutUint32(value[1:], opts.timeoutMS())
+	binary.LittleEndian.PutUint32(value[1:], timeoutMS)
 	binary.LittleEndian.PutUint32(value[5:], maxRetries)
 	binary.LittleEndian.PutUint16(value[9:], uint16(len(opts.Owner)))
 	value = append(value, opts.Owner...)
@@ -101,7 +105,20 @@ func (a *ActionClient) Status(runID string, opts *ActionStatusOptions) (*ActionR
 	return st, nil
 }
 
-// List returns one page of the namespace's action names. Pass the result's
+// Info returns an action's settings and its runs' counts. An action the
+// server doesn't hold is an error that IsNotFound reports.
+func (a *ActionClient) Info(name string, opts *ActionInfoOptions) (*ActionInfo, error) {
+	if opts == nil {
+		opts = &ActionInfoOptions{}
+	}
+	resp, err := a.client.sendAndCheck(OpActionInfo, a.client.getNamespace(opts.Namespace), []byte(name), nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeActionInfoAnswer(resp.Data)
+}
+
+// List returns one page of the namespace's actions. Pass the result's
 // Cursor in the next call's options to read the next page.
 func (a *ActionClient) List(opts *ActionListOptions) (*ActionListResult, error) {
 	if opts == nil {
@@ -150,19 +167,29 @@ func parseActionInvokeResult(data []byte) (*ActionInvokeResult, error) {
 }
 
 // decodeActionListAnswer reads action.list's answer:
-// [count:u32]([name_len:u16][name][value_len:u32][value])*[has_more:u8][cursor_len:u16][cursor].
-// The server sends each value empty.
+// [count:u32]([name_len:u16][name][value_len:u32][value])*[has_more:u8][cursor_len:u16][cursor],
+// each value [version:u32][owner_len:u16][owner][timeout_ms:u64]
+// [max_attempts:u32][created_at_ms:i64].
 func decodeActionListAnswer(data []byte) (*ActionListResult, error) {
 	r := bodyReader{buf: data}
 	n := r.u32()
-	// Each name takes at least six bytes, so a count past that is a lie.
-	if uint64(n)*6 > uint64(len(data)) {
+	// Each entry takes at least 32 bytes, so a count past that is a lie.
+	if uint64(n)*32 > uint64(len(data)) {
 		return nil, ErrIncompleteResponse
 	}
-	got := &ActionListResult{Names: make([]string, 0, n)}
+	got := &ActionListResult{Actions: make([]ActionListEntry, 0, n)}
 	for i := uint32(0); i < n && !r.bad; i++ {
-		got.Names = append(got.Names, string(r.bytes16()))
-		r.bytes32()
+		e := ActionListEntry{Name: string(r.bytes16())}
+		v := bodyReader{buf: r.bytes32()}
+		e.Version = v.u32()
+		e.Owner = string(v.bytes16())
+		e.TimeoutMS = v.u64()
+		e.MaxAttempts = v.u32()
+		e.CreatedAtMS = int64(v.u64())
+		if v.done() != nil {
+			r.bad = true
+		}
+		got.Actions = append(got.Actions, e)
 	}
 	got.HasMore, got.Cursor = r.pageTrailer()
 	if err := r.done(); err != nil {
@@ -173,8 +200,8 @@ func decodeActionListAnswer(data []byte) (*ActionListResult, error) {
 
 // decodeActionStatusAnswer reads action.status's answer:
 // [status:u8][created_at_ms:i64][started_at_ms?][completed_at_ms?][attempt:u32]
-// [output?: u16 length][error_message?: u16 length][worker_id?: u16 length],
-// each ? a present byte first.
+// [output?: u16 length][error_message?: u16 length][worker_id?: u16 length]
+// [outcome?: u16 length], each ? a present byte first.
 func decodeActionStatusAnswer(data []byte) (*ActionRunStatus, error) {
 	r := bodyReader{buf: data}
 	st := &ActionRunStatus{Status: RunStatus(r.u8()), CreatedAt: int64(r.u64())}
@@ -196,6 +223,9 @@ func decodeActionStatusAnswer(data []byte) (*ActionRunStatus, error) {
 	if r.present() {
 		st.WorkerID = string(r.bytes16())
 	}
+	if r.present() {
+		st.Outcome = string(r.bytes16())
+	}
 	if err := r.done(); err != nil {
 		return nil, err
 	}
@@ -203,4 +233,32 @@ func decodeActionStatusAnswer(data []byte) (*ActionRunStatus, error) {
 		return nil, fmt.Errorf("%w: action status %d is not one this client knows", ErrIncompleteResponse, st.Status)
 	}
 	return st, nil
+}
+
+// decodeActionInfoAnswer reads action.info's answer: owner, version,
+// timeout_ms, max_attempts, created_at_ms, ready, ready_capped,
+// too_many_runs, then nine optional u64 counts and latencies.
+func decodeActionInfoAnswer(data []byte) (*ActionInfo, error) {
+	r := bodyReader{buf: data}
+	info := &ActionInfo{
+		Owner:       string(r.bytes16()),
+		Version:     r.u32(),
+		TimeoutMS:   r.u64(),
+		MaxAttempts: r.u32(),
+		CreatedAtMS: int64(r.u64()),
+		Ready:       r.u64(),
+		ReadyCapped: r.bool(),
+		TooManyRuns: r.bool(),
+	}
+	for _, f := range []**uint64{&info.Running, &info.Completed, &info.Failed, &info.TimedOut,
+		&info.LatencyCount, &info.LatencyAvgMS, &info.LatencyP50MS, &info.LatencyP95MS, &info.LatencyMaxMS} {
+		if r.present() {
+			v := r.u64()
+			*f = &v
+		}
+	}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return info, nil
 }

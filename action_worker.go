@@ -35,9 +35,10 @@ type ActionWorkerOptions struct {
 	// 0 means 30000.
 	BlockMS uint32
 
-	// AutoTouch touches each run every third of its action's timeout while
-	// the handler runs. Off by default: a handler that runs past the
-	// action's timeout without calling Touch is taken back and run again.
+	// AutoTouch touches each run every sixth of its lease while the handler
+	// runs; a touch renews the lease once half of it is gone. Off by
+	// default: a handler that runs past the lease without calling Touch is
+	// taken back and run again.
 	AutoTouch bool
 
 	// Logger for worker output (optional, defaults to log.Printf)
@@ -69,8 +70,6 @@ type ActionWorker struct {
 	// Action handlers
 	mu       sync.RWMutex
 	handlers map[string]ActionHandler
-	// timeouts holds each action's registered timeout_ms.
-	timeouts map[string]uint32
 
 	// Worker state. ctx ends on Stop or when Start's context does; handler
 	// contexts derive from it, so a drain, which doesn't end it, lets
@@ -160,7 +159,6 @@ func (c *Client) NewActionWorker(opts ActionWorkerOptions) (*ActionWorker, error
 		resultClient: resultClient,
 		handlers:     make(map[string]ActionHandler),
 		drain:        newDrainState(),
-		timeouts:     make(map[string]uint32),
 		logger:       opts.Logger,
 	}
 
@@ -168,8 +166,8 @@ func (c *Client) NewActionWorker(opts ActionWorkerOptions) (*ActionWorker, error
 }
 
 // RegisterAction registers an action handler, and the action with the
-// server with exactly opts (nil sends a 30 s timeout and 3 attempts, the
-// server's defaults today). Registering replaces the action's settings, so workers that
+// server with exactly opts (nil takes the server's defaults: a 300 s lease
+// and 3 attempts). Registering replaces the action's settings, so workers that
 // register one action with different options leave it with whichever
 // registered last. opts.Namespace is ignored: the action goes in the
 // worker's.
@@ -191,7 +189,6 @@ func (w *ActionWorker) RegisterAction(actionName string, handler ActionHandler, 
 	}
 
 	w.handlers[actionName] = handler
-	w.timeouts[actionName] = reg.timeoutMS()
 
 	w.logger.Printf("Registered action: %s", actionName)
 	return nil
@@ -314,9 +311,12 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 	}
 	defer beats.start(heartbeatInterval)()
 
-	// Main polling loop
+	// Main polling loop. Each poll carries a request key, kept until a poll
+	// is answered: a poll whose answer was lost, or that a new leader may
+	// have served, is sent again with it and gets the delivery it got.
 	var backoff emptyPollBackoff
 	failed := newWorkerBackoff()
+	requestKey := randomID(32)
 	for {
 		select {
 		case <-w.ctx.Done():
@@ -339,7 +339,8 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 			// Await task
 			polled := time.Now()
 			task, err := workerClient.Await(actionNames, &WorkerAwaitOptions{
-				BlockMS: &w.config.BlockMS,
+				BlockMS:    &w.config.BlockMS,
+				RequestKey: requestKey,
 			})
 			if err != nil {
 				<-sem // Release slot
@@ -395,6 +396,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 			}
 			failed.reset()
 			halted.reset()
+			requestKey = randomID(32)
 
 			if task == nil {
 				<-sem // Release slot - no task available
@@ -405,7 +407,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 
 			// Execute task in background
 			w.wg.Add(1)
-			go func(t *TaskAssignment) {
+			go func(t *Task) {
 				defer w.wg.Done()
 				defer func() { <-sem }()
 				running.Add(1)
@@ -487,17 +489,19 @@ var errActionTimeout = errors.New("flo: action timed out")
 // executeTask runs a task's handler and reports its outcome. The handler's
 // outcome alone decides complete or fail: a complete that can't be sent is
 // never turned into a fail.
-func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignment) {
-	fail := func(msg string, retry bool) {
-		w.sendResult("fail", task.TaskID, func() error {
-			return workerClient.Fail(task.TaskType, task.TaskID, msg, &WorkerFailOptions{Retry: retry})
+func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *Task) {
+	taskID := task.TaskID()
+	sendFail := func(msg string, opts *WorkerFailOptions) {
+		w.sendResult("fail", taskID, func() error {
+			return workerClient.Fail(task.Delivery, msg, opts)
 		})
 	}
+	fail := func(msg string, retry bool) { sendFail(msg, &WorkerFailOptions{Retry: retry}) }
 	complete := func(data []byte, opts *WorkerCompleteOptions) {
-		if w.sendResult("complete", task.TaskID, func() error {
-			return workerClient.Complete(task.TaskType, task.TaskID, data, opts)
+		if w.sendResult("complete", taskID, func() error {
+			return workerClient.Complete(task.Delivery, data, opts)
 		}) == nil {
-			w.logger.Printf("Action completed: %s (task=%s)", task.TaskType, task.TaskID)
+			w.logger.Printf("Action completed: %s (task=%s)", task.Action, taskID)
 		}
 	}
 
@@ -509,16 +513,16 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 	}()
 
 	w.logger.Printf("Executing action: %s (task=%s, attempt=%d)",
-		task.TaskType, task.TaskID, task.Attempt)
+		task.Action, taskID, task.Attempt)
 
 	// Get handler
 	w.mu.RLock()
-	handler := w.handlers[task.TaskType]
+	handler := w.handlers[task.Action]
 	w.mu.RUnlock()
 
 	if handler == nil {
-		w.logger.Printf("No handler registered for action: %s", task.TaskType)
-		fail(fmt.Sprintf("no handler for: %s", task.TaskType), false)
+		w.logger.Printf("No handler registered for action: %s", task.Action)
+		fail(fmt.Sprintf("no handler for: %s", task.Action), false)
 		return
 	}
 
@@ -529,9 +533,9 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 	actx := &ActionContext{
 		ctx:                ctx,
 		namespace:          w.client.Namespace(),
-		actionName:         task.TaskType,
-		input:              task.Payload,
-		taskID:             task.TaskID,
+		actionName:         task.Action,
+		input:              task.Input,
+		delivery:           task.Delivery,
 		attempt:            task.Attempt,
 		callerRunID:        task.CallerRunID,
 		callerWorkflowName: task.CallerWorkflowName,
@@ -548,18 +552,18 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 		ctxErr := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 		switch {
 		case ctxErr && context.Cause(ctx) == errActionTimeout:
-			w.logger.Printf("Action timed out: %s (task=%s)", task.TaskType, task.TaskID)
+			w.logger.Printf("Action timed out: %s (task=%s)", task.Action, taskID)
 			fail("action timed out", false)
 		case ctxErr && w.ctx.Err() != nil:
-			// The worker is stopping, not the task failing: let it run
-			// again elsewhere.
-			w.logger.Printf("Action interrupted by worker stop: %s (task=%s)", task.TaskType, task.TaskID)
-			fail("worker stopped", true)
+			// The worker is stopping, not the task failing: hand it back
+			// with no failure counted, to run again elsewhere.
+			w.logger.Printf("Action interrupted by worker stop: %s (task=%s)", task.Action, taskID)
+			sendFail("worker stopped", &WorkerFailOptions{Retry: true, Abandoned: true})
 		case IsNonRetryable(err):
-			w.logger.Printf("Action failed (non-retryable): %s - %v", task.TaskType, err)
+			w.logger.Printf("Action failed (non-retryable): %s - %v", task.Action, err)
 			fail(err.Error(), false)
 		default:
-			w.logger.Printf("Action failed: %s - %v", task.TaskType, err)
+			w.logger.Printf("Action failed: %s - %v", task.Action, err)
 			fail(err.Error(), true)
 		}
 		return
@@ -583,36 +587,27 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *TaskAssignm
 	}
 }
 
-const (
-	// minTouchInterval: AutoTouch never touches more often, whatever the timeout.
-	minTouchInterval = 100 * time.Millisecond
-	// maxTouchExtendMS is the longest lease a touch may ask for; the server refuses more.
-	maxTouchExtendMS = 3_600_000
-)
+// minTouchInterval: AutoTouch never touches more often, whatever the lease.
+const minTouchInterval = 100 * time.Millisecond
 
-// touchPace is how often to touch a run of an action with timeoutMS, and
-// the lease each touch asks for: the timeout, at most an hour, touched every
-// third of that (at least minTouchInterval apart) so two can fail in a row.
-func touchPace(timeoutMS uint32) (interval time.Duration, extendMS uint32) {
-	extendMS = min(timeoutMS, maxTouchExtendMS)
-	return max(time.Duration(extendMS)*time.Millisecond/3, minTouchInterval), extendMS
+// touchInterval is how often AutoTouch touches a run with a lease of
+// leaseMS. A touch renews the lease only once half of it is gone, so every
+// sixth of it leaves two more tries before it runs out if one fails.
+func touchInterval(leaseMS uint64) time.Duration {
+	return max(time.Duration(leaseMS)*time.Millisecond/6, minTouchInterval)
 }
 
-// startTouching touches task's run every third of its action's timeout
-// (of an hour, for longer ones) until the returned stop is called, which waits for a touch in flight, so
-// the outcome is sent after it. Each touch asks for this worker's timeout
-// (at most an hour), so the lease covers it even if another worker's
-// registration shortened the action's. Conflict, not found or bad request
-// means the run moved on and touching stops; any other refusal, or a lost
-// touch, is tried again next interval, a lost connection reconnected first.
-func (w *ActionWorker) startTouching(wc *WorkerClient, task *TaskAssignment) (stop func()) {
-	w.mu.RLock()
-	timeoutMS := w.timeouts[task.TaskType]
-	w.mu.RUnlock()
-	if !w.config.AutoTouch || timeoutMS == 0 {
+// startTouching touches task's run every touchInterval until the returned
+// stop is called, which waits for a touch in flight, so the outcome is sent
+// after it. Conflict (a stale delivery), not found or bad request means the
+// run moved on and touching stops; any other refusal, or a lost touch, is
+// tried again next interval, a lost connection reconnected first.
+func (w *ActionWorker) startTouching(wc *WorkerClient, task *Task) (stop func()) {
+	if !w.config.AutoTouch || task.LeaseMS == 0 {
 		return func() {}
 	}
-	interval, extend := touchPace(timeoutMS)
+	interval := touchInterval(task.LeaseMS)
+	taskID := task.TaskID()
 	done := make(chan struct{})
 	finished := make(chan struct{})
 	go func() {
@@ -625,18 +620,18 @@ func (w *ActionWorker) startTouching(wc *WorkerClient, task *TaskAssignment) (st
 				return
 			case <-timer.C:
 			}
-			err := wc.Touch(task.TaskType, task.TaskID, &WorkerTouchOptions{ExtendMS: &extend})
+			_, err := wc.Touch(task.Delivery, nil)
 			var se *ServerError
 			switch {
 			case err == nil:
 			case errors.As(err, &se) && (se.Status == StatusConflict || se.Status == StatusNotFound || se.Status == StatusBadRequest):
-				w.logger.Printf("Touch for task %s was refused, stopping: %v", task.TaskID, err)
+				w.logger.Printf("Touch for task %s was refused, stopping: %v", taskID, err)
 				return
 			case IsConnectionError(err):
-				w.logger.Printf("Touch for task %s lost: %v; reconnecting", task.TaskID, err)
+				w.logger.Printf("Touch for task %s lost: %v; reconnecting", taskID, err)
 				_ = w.reconnectResult()
 			default:
-				w.logger.Printf("Touch for task %s failed: %v; trying again", task.TaskID, err)
+				w.logger.Printf("Touch for task %s failed: %v; trying again", taskID, err)
 			}
 			timer.Reset(interval)
 		}
@@ -710,7 +705,7 @@ type ActionContext struct {
 	namespace          string
 	actionName         string
 	input              []byte
-	taskID             string
+	delivery           Delivery
 	attempt            uint32
 	callerRunID        string
 	callerWorkflowName string
@@ -737,9 +732,19 @@ func (a *ActionContext) ActionName() string {
 	return a.actionName
 }
 
-// TaskID returns the task ID.
+// TaskID returns the task's id, run:deliveries:term:index:action.
 func (a *ActionContext) TaskID() string {
-	return a.taskID
+	return a.delivery.TaskID()
+}
+
+// RunID returns the run's id.
+func (a *ActionContext) RunID() string {
+	return a.delivery.RunID
+}
+
+// Delivery returns the delivery the worker reports on.
+func (a *ActionContext) Delivery() Delivery {
+	return a.delivery
 }
 
 // Attempt returns the attempt number (starts at 1).
@@ -782,16 +787,15 @@ func (a *ActionContext) Bytes(v interface{}) ([]byte, error) {
 	return json.Marshal(v)
 }
 
-// Touch extends the lease on this task.
-// Use this for long-running tasks to prevent the task from timing out.
-// The extendMS parameter specifies how long to extend the lease (default: 30000ms).
-func (a *ActionContext) Touch(extendMS uint32) error {
+// Touch keeps this task's lease, so a long handler isn't taken back, and
+// returns when the lease runs out, in Unix milliseconds. While more than
+// half of the lease is left it changes nothing; after that it renews the
+// lease in full. A run that has moved on is a *StaleReportError.
+func (a *ActionContext) Touch() (int64, error) {
 	if a.workerClient == nil {
-		return fmt.Errorf("worker client not available")
+		return 0, fmt.Errorf("worker client not available")
 	}
-	return a.workerClient.Touch(a.actionName, a.taskID, &WorkerTouchOptions{
-		ExtendMS: &extendMS,
-	})
+	return a.workerClient.Touch(a.delivery, nil)
 }
 
 // Result creates an ActionResult with a named outcome for workflow routing.
