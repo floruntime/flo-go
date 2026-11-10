@@ -67,83 +67,64 @@ func main() {
 		fmt.Printf("  seq=%d payload=%s\n", msg.Seq, string(msg.Payload))
 	}
 
-	// Dequeue messages for processing
+	// Dequeue messages for processing. They're leased to this consumer:
+	// complete each within the lease, or it's delivered again.
 	fmt.Println("\n--- Dequeuing messages ---")
-	dequeueResult, err := queue.Dequeue("tasks", 10, nil)
+	dequeueResult, err := queue.Dequeue("tasks", 10, &flo.DequeueOptions{Consumer: "worker-1"})
 	if err != nil {
 		log.Fatalf("Dequeue failed: %v", err)
 	}
 	fmt.Printf("Dequeued %d messages:\n", len(dequeueResult.Messages))
 
-	var processedSeqs []uint64
-	var failedSeqs []uint64
-
+	var processed, failed []flo.QueueItem
 	for i, msg := range dequeueResult.Messages {
-		fmt.Printf("  Processing seq=%d: %s\n", msg.Seq, string(msg.Payload))
+		fmt.Printf("  Processing seq=%d (delivery %d): %s\n", msg.Seq, msg.Deliveries, string(msg.Payload))
 
 		// Simulate processing - some succeed, some fail
 		if i%3 == 2 {
-			// Simulate failure
-			failedSeqs = append(failedSeqs, msg.Seq)
+			failed = append(failed, msg.Item())
 		} else {
-			// Success
-			processedSeqs = append(processedSeqs, msg.Seq)
+			processed = append(processed, msg.Item())
 		}
 	}
 
-	// A dequeue consumes its messages; queues are currently at-most-once, so Ack and Nack have no effect on a dequeued message.
-	if len(processedSeqs) > 0 {
-		if err := queue.Ack("tasks", processedSeqs, nil); err != nil {
-			log.Fatalf("Ack failed: %v", err)
+	if len(processed) > 0 {
+		report, err := queue.Complete("tasks", dequeueResult.Lease, processed, nil)
+		if err != nil {
+			log.Fatalf("Complete failed: %v", err)
 		}
-		fmt.Printf("Acknowledged %d messages\n", len(processedSeqs))
+		fmt.Printf("Completed %d messages\n", report.Applied)
 	}
 
-	// Nack has no effect either: these messages are not retried
-	if len(failedSeqs) > 0 {
-		if err := queue.Nack("tasks", failedSeqs, nil); err != nil {
-			log.Fatalf("Nack failed: %v", err)
+	// Failed messages are ready again after the delay, or dead once their
+	// attempts are spent
+	if len(failed) > 0 {
+		if _, err := queue.Fail("tasks", dequeueResult.Lease, failed, &flo.QueueFailOptions{DelayMS: 1000, Error: "simulated failure"}); err != nil {
+			log.Fatalf("Fail failed: %v", err)
 		}
-		fmt.Printf("Nacked %d messages\n", len(failedSeqs))
+		fmt.Printf("Failed %d messages\n", len(failed))
 	}
 
-	// Dequeue with blocking (long polling)
-	fmt.Println("\n--- Blocking dequeue (5 second timeout) ---")
+	// Dequeue with blocking (long polling), completing as they're taken
+	fmt.Println("\n--- Blocking dequeue with ack (5 second timeout) ---")
 	blockMS := uint32(5000)
 	dequeueResult, err = queue.Dequeue("tasks", 5, &flo.DequeueOptions{
 		BlockMS: &blockMS,
+		Ack:     true,
 	})
 	if err != nil {
 		log.Fatalf("Blocking dequeue failed: %v", err)
 	}
 	fmt.Printf("Blocking dequeue returned %d messages\n", len(dequeueResult.Messages))
 
-	if len(dequeueResult.Messages) > 0 {
-		queue.Ack("tasks", []uint64{dequeueResult.Messages[0].Seq}, nil)
-	}
-
-	// Dead Letter Queue (DLQ). Queues are currently at-most-once, so a
-	// dequeued message does not reach the DLQ in normal use; it is usually empty.
+	// Dead Letter Queue (DLQ): messages failed or expired until their
+	// attempts ran out
 	fmt.Println("\n--- DLQ operations ---")
-
-	// List DLQ messages
 	dlqResult, err := queue.DLQList("tasks", nil)
 	if err != nil {
 		log.Fatalf("DLQ list failed: %v", err)
 	}
 	fmt.Printf("DLQ contains %d messages\n", len(dlqResult.Messages))
-
-	// Requeue DLQ messages back to main queue
-	if len(dlqResult.Messages) > 0 {
-		dlqSeqs := make([]uint64, len(dlqResult.Messages))
-		for i, msg := range dlqResult.Messages {
-			dlqSeqs[i] = msg.Seq
-		}
-		if err := queue.DLQRequeue("tasks", dlqSeqs, nil); err != nil {
-			log.Fatalf("DLQ requeue failed: %v", err)
-		}
-		fmt.Printf("Requeued %d messages from DLQ\n", len(dlqSeqs))
-	}
 
 	fmt.Println("\n=== Done ===")
 }

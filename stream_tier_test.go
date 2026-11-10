@@ -14,7 +14,8 @@ func tierRecord(tier byte) []byte {
 }
 
 func TestStreamRecordTierIsReadAsTheServerSendsIt(t *testing.T) {
-	for b, want := range map[byte]StorageTier{0: StorageTierHot, 1: StorageTierWarm} {
+	// A code this SDK doesn't know is kept, not refused.
+	for b, want := range map[byte]StorageTier{0: StorageTierHot, 1: StorageTierWarm, 2: StorageTierDisk, 9: StorageTier(9)} {
 		res, err := parseStreamReadResponse(tierRecord(b))
 		if err != nil {
 			t.Fatalf("tier %d: %v", b, err)
@@ -23,8 +24,8 @@ func TestStreamRecordTierIsReadAsTheServerSendsIt(t *testing.T) {
 			t.Fatalf("tier %d read as %d, want %d", b, got, want)
 		}
 	}
-	if _, err := parseStreamReadResponse(tierRecord(2)); err == nil {
-		t.Fatal("tier 2 was accepted; the server sends only 0 and 1")
+	if got := StorageTier(9).String(); got != "unknown(9)" {
+		t.Fatalf("tier 9 reads %q", got)
 	}
 }
 

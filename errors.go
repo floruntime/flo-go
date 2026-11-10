@@ -41,11 +41,12 @@ var (
 	// ErrValueTooLarge indicates the value exceeds maximum size.
 	ErrValueTooLarge = errors.New("flo: value too large (max 16 MB)")
 
-	// ErrStaleNotFound: a halted shard answered that the key doesn't exist
-	// as of the entry it halted at; it may exist since. Get and JsonGet
+	// ErrStaleNotFound: a stale shard (halted, diverged or blocked reading
+	// the log) answered that the key doesn't exist as of its state; it may
+	// exist since. Get and JsonGet
 	// return it wrapped with the server's not-found refusal, so IsNotFound
 	// and IsStale both report it.
-	ErrStaleNotFound = errors.New("flo: not found as of a halted shard's state")
+	ErrStaleNotFound = errors.New("flo: not found as of a stale shard's state")
 
 	// ErrBlockTooLong indicates a BlockMS over MaxBlockMS. The server refuses
 	// it with bad_request, so the SDK refuses it first.
