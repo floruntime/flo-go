@@ -16,12 +16,12 @@ type codeName struct {
 	Name string `json:"name"`
 }
 
-// The status codes and reasons are coded by hand; the server's ops.json
+// The status codes, reasons and storage tiers are coded by hand; the server's ops.json
 // (FLO_OPS_JSON, from `zig build gen`) lists its own. This reads the
 // constants from the source, so one added, dropped or renumbered on either
 // side fails here. A constant's name is its type's name and the server's
 // name in CamelCase: not_found is StatusNotFound, cas_mismatch ReasonCASMismatch.
-func TestStatusesAndReasonsMatchTheServer(t *testing.T) {
+func TestStatusesReasonsAndTiersMatchTheServer(t *testing.T) {
 	path := os.Getenv("FLO_OPS_JSON")
 	if path == "" {
 		if os.Getenv("CI") == "1" {
@@ -36,6 +36,7 @@ func TestStatusesAndReasonsMatchTheServer(t *testing.T) {
 	var ops struct {
 		Statuses []codeName `json:"statuses"`
 		Reasons  []codeName `json:"reasons"`
+		Tiers    []codeName `json:"storage_tiers"`
 	}
 	if err := json.Unmarshal(raw, &ops); err != nil {
 		t.Fatalf("%s: %v", path, err)
@@ -43,9 +44,13 @@ func TestStatusesAndReasonsMatchTheServer(t *testing.T) {
 	if len(ops.Statuses) == 0 || len(ops.Reasons) == 0 {
 		t.Fatalf("%s lists no statuses or no reasons", path)
 	}
-	sdk := constsOfType(t, "types.go", "StatusCode", "Reason")
+	if len(ops.Tiers) == 0 {
+		t.Fatalf("%s lists no storage tiers", path)
+	}
+	sdk := constsOfType(t, "types.go", "StatusCode", "Reason", "StorageTier")
 	compare(t, "status", "Status", ops.Statuses, sdk["StatusCode"])
 	compare(t, "reason", "Reason", ops.Reasons, sdk["Reason"])
+	compare(t, "storage tier", "StorageTier", ops.Tiers, sdk["StorageTier"])
 	for _, r := range ops.Reasons {
 		if got := Reason(r.Code).String(); got != r.Name {
 			t.Errorf("Reason(%d).String() = %q, want %q", r.Code, got, r.Name)

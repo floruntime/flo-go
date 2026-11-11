@@ -521,7 +521,13 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 					return err
 				} else if !waitIfHalted(sw.pollCtx, sw.logger, "["+stream+"] group read", err, &halted) {
 					d := failed.next()
-					sw.logger.Printf("[%s] GroupRead error: %v, retrying in %v...", stream, err, d)
+					if isRefusedUnrun(err) {
+						// Routine, e.g. records being read back from disk: the
+						// read claimed and delivered nothing, so it's sent again.
+						sw.logger.Printf("[%s] GroupRead not served yet: %v, retrying in %v...", stream, err, d)
+					} else {
+						sw.logger.Printf("[%s] GroupRead error: %v, retrying in %v...", stream, err, d)
+					}
 					sleepCtx(sw.pollCtx, d)
 				}
 				continue
@@ -621,10 +627,15 @@ func (sw *StreamWorker) drainPending() {
 	}
 
 	const maxPagesPerStream = 1000 // safety cap: maxPages * BatchSize entries
+	// maxClaimRetries bounds the resends of one refused claim, backing off
+	// up to 5 s each, so a long refusal ends the drain, not the worker.
+	const maxClaimRetries = 20
 
 	for _, stream := range sw.streams {
 		cursor := StreamID{} // MIN — scan from the start of the PEL
 		pages := 0
+		claimRetries := 0
+		wait := newWorkerBackoff()
 		for {
 			if sw.pollCtx.Err() != nil {
 				return
@@ -634,10 +645,21 @@ func (sw *StreamWorker) drainPending() {
 				sw.config.ClaimMinIdleMS, cursor, sw.config.BatchSize, nil,
 			)
 			if err != nil {
+				// A claim refused unrun, e.g. while records are read back from
+				// disk, claimed nothing: it's sent again from the same cursor.
+				if isRefusedUnrun(err) && claimRetries < maxClaimRetries {
+					claimRetries++
+					d := wait.next()
+					sw.logger.Printf("[%s] pending drain claim not served yet: %v, retrying in %v...", stream, err, d)
+					sleepCtx(sw.pollCtx, d)
+					continue
+				}
 				// Don't fail the reconnect on a drain error; normal reads resume.
 				sw.logger.Printf("[%s] pending drain claim failed: %v", stream, err)
 				break
 			}
+			claimRetries = 0
+			wait.reset()
 			for _, record := range res.Records {
 				sw.sem <- struct{}{} // same concurrency gate as live reads
 				sw.handlers.Add(1)

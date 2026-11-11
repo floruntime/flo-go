@@ -37,11 +37,12 @@ func main() {
 
     // Queue operations
     client.Queue.Enqueue("tasks", []byte(`{"task":"process"}`), nil)
-    result, _ := client.Queue.Dequeue("tasks", 10, nil)
+    result, _ := client.Queue.Dequeue("tasks", 10, &flo.DequeueOptions{Consumer: "worker-1"})
     for _, msg := range result.Messages {
         fmt.Printf("Processing: %s\n", msg.Payload)
-        client.Queue.Ack("tasks", []uint64{msg.Seq}, nil)
     }
+    // Complete within the lease, or the messages are delivered again
+    client.Queue.Complete("tasks", result.Lease, result.Items(), nil)
 
     // Stream operations
     client.Stream.Append("events", []byte(`{"event":"login"}`), nil)
@@ -275,43 +276,64 @@ applies, so it still costs a replicated commit.
 
 ### Queue Operations
 
+Queues deliver at least once. A dequeue leases its messages to its consumer
+(30 s unless `LeaseMS` says otherwise); they stay in the queue until
+completed. Complete each within the lease, `Touch` to keep a long one, or
+`Fail` it to make it ready again. A message whose lease runs out is
+delivered again, with `Deliveries` counting up, and one failed or expired
+five times is dead (see the DLQ). `Ack` in `DequeueOptions` completes them as
+they're taken instead.
+
 #### Enqueue
 
 ```go
 // Simple enqueue
 seq, err := client.Queue.Enqueue("tasks", []byte(`{"task":"process"}`), nil)
 
-// Enqueue with priority (lower is taken first)
+// With a priority (lower is taken first), ready a minute from now
 seq, err := client.Queue.Enqueue("tasks", payload, &flo.EnqueueOptions{
     Priority: 10,
+    DelayMS:  60_000,
 })
 ```
 
-#### Dequeue
+A queue holds at most its caps of messages and bytes (ready, leased and
+dead), and a shard's queues their cap of bytes; the server's operator sets
+them. Past one, an enqueue is refused `overloaded` with ran no: the client
+retries it briefly like any such refusal, then returns `flo.ErrOverloaded`
+with the server's message. It succeeds again once the queue is consumed or
+purged.
+
+#### Dequeue, complete, fail, touch
 
 ```go
-// Dequeue up to 10 messages
-result, err := client.Queue.Dequeue("tasks", 10, nil)
-for _, msg := range result.Messages {
-    // Process message
-    fmt.Printf("seq=%d payload=%s\n", msg.Seq, msg.Payload)
-}
-
-// Long polling (wait up to 30 seconds for messages)
+// Dequeue up to 10 messages, waiting up to 30 s for one
 blockMS := uint32(30000)
 result, err := client.Queue.Dequeue("tasks", 10, &flo.DequeueOptions{
-    BlockMS: &blockMS,
+    Consumer: "worker-1",
+    BlockMS:  &blockMS,
 })
+var done, failed []flo.QueueItem
+for _, msg := range result.Messages {
+    if process(msg.Payload) == nil {
+        done = append(done, msg.Item())
+    } else {
+        failed = append(failed, msg.Item())
+    }
+}
+report, err := client.Queue.Complete("tasks", result.Lease, done, nil)
+_, err = client.Queue.Fail("tasks", result.Lease, failed, &flo.QueueFailOptions{DelayMS: 5000})
+
+// Keep a long one: with half its lease or less left, a touch renews it
+_, err = client.Queue.Touch("tasks", result.Lease, result.Items(), nil)
 ```
 
-#### Ack/Nack
-
-A dequeue consumes its messages; queues are currently at-most-once, so Ack and Nack have no effect on a dequeued message and a dequeued message does not reach the DLQ.
-
-```go
-err := client.Queue.Ack("tasks", []uint64{msg.Seq}, nil)
-err := client.Queue.Nack("tasks", []uint64{msg.Seq}, nil)
-```
+A report names the dequeue's lease (consumer, term and index) and each
+message by seq and deliveries. Its answer is ok, with `Applied` and, per
+message it didn't apply to, a `QueueRefusal` whose `Why` says why. For a
+complete, `flo.QueueGone` means done already (a resent complete); any other
+`Why` means that delivery is over and the message was, or will be,
+delivered again.
 
 #### DLQ Operations
 
@@ -322,9 +344,8 @@ for page.HasMore {
     page, err = client.Queue.DLQList("tasks", &flo.DLQListOptions{Limit: 50, After: &page.LastSeq})
 }
 
-// Requeue messages from DLQ back to main queue
-seqs := []uint64{msg1.Seq, msg2.Seq}
-err := client.Queue.DLQRequeue("tasks", seqs, nil)
+// Remove every message, dead letters included
+removed, err := client.Queue.Purge("tasks", nil)
 ```
 
 #### Peek
@@ -387,7 +408,10 @@ it, this is safe for writes too. Any other refusal, or one that may have run,
 comes straight back. A new leader still applying what earlier leaders
 committed, or a node catching up after a restart, refuses reads and writes
 this way (`unavailable` with reason `leader_unknown`), so those are retried
-too; a long catch-up can outlast the retries.
+too; a long catch-up can outlast the retries. A stream read, group read or claim of records the
+server is reading back from disk is refused `unavailable`, ran no, too, and
+claims and delivers nothing: the stream worker sends its group reads and
+pending-drain claims again, with a backoff, past the client's own retries.
 
 The client never retries two refusals from a halted shard on your
 requests. `unavailable` with reason `shard_halted` (`flo.IsShardHalted`)
@@ -407,10 +431,12 @@ stream ack) refused by a halted shard aren't resent either; the task or record
 comes back by its own timeout.
 
 A halted shard still answers reads, from its state just before the entry it
-halted at. Such a read succeeds with `Stale` set on its result (`GetResult`,
-`MGetEntry`, `ScanResult`, `HistoryResult`, `ExistsResult`): it is not an
-error, but it doesn't hold anything written since. A key missing from such an
-answer is missing as of the halt, so `Get` and `JsonGet` return
+halted at, and so does a node that is blocked reading a committed entry from
+its log, or has diverged, from the state it has applied. Such a read succeeds
+with `Stale` set on its result (`GetResult`, `MGetEntry`, `ScanResult`,
+`HistoryResult`, `ExistsResult`): it is not an error, but it doesn't hold
+anything written since. A key missing from such an answer is missing as of
+that state, so `Get` and `JsonGet` return
 `flo.ErrStaleNotFound` (`flo.IsStale` and `flo.IsNotFound` both hold) rather
 than nil. Only the KV reads carry the flag for now: other reads (streams,
 queues, actions, workers) drop it.

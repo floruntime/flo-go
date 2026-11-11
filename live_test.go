@@ -311,27 +311,99 @@ func TestLiveReadInANamespaceNeverCreatedIsNoNamespace(t *testing.T) {
 	}
 }
 
-func TestLiveQueueEnqueueDequeueAck(t *testing.T) {
+// live: queue round trip. A dequeue leases its messages: completed within
+// the lease they're gone, a resent complete answers gone, a failed one is
+// ready again, and one whose lease runs out is delivered again.
+func TestLiveQueueLeasedUntilCompleted(t *testing.T) {
 	c := liveClient(t)
 	if _, err := c.Queue.Enqueue("jobs", []byte("job-1"), nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := c.Queue.Dequeue("jobs", 1, nil)
+	opts := &DequeueOptions{Consumer: "c1"}
+	res, err := c.Queue.Dequeue("jobs", 1, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Messages) != 1 || string(res.Messages[0].Payload) != "job-1" {
-		t.Fatalf("dequeue = %+v", res.Messages)
+	if len(res.Messages) != 1 || string(res.Messages[0].Payload) != "job-1" || res.Messages[0].Deliveries != 1 ||
+		res.Lease.Consumer != "c1" || res.Lease.Term == 0 || res.Lease.Index == 0 || res.ExpiresAtMS <= time.Now().UnixMilli() {
+		t.Fatalf("dequeue = %+v", res)
 	}
-	if err := c.Queue.Ack("jobs", []uint64{res.Messages[0].Seq}, nil); err != nil {
+	if again, err := c.Queue.Dequeue("jobs", 1, opts); err != nil || len(again.Messages) != 0 {
+		t.Fatalf("dequeue while leased: %+v, %v; want nothing", again, err)
+	}
+	report, err := c.Queue.Complete("jobs", res.Lease, res.Items(), nil)
+	if err != nil || report.Applied != 1 || len(report.Refused) != 0 {
+		t.Fatalf("complete: %+v, %v", report, err)
+	}
+	report, err = c.Queue.Complete("jobs", res.Lease, res.Items(), nil)
+	if err != nil || report.Applied != 0 || len(report.Refused) != 1 || report.Refused[0].Why != QueueGone {
+		t.Fatalf("resent complete: %+v, %v; want gone, which means done", report, err)
+	}
+	if again, err := c.Queue.Dequeue("jobs", 1, opts); err != nil || len(again.Messages) != 0 {
+		t.Fatalf("dequeue after the complete: %+v, %v; want nothing", again, err)
+	}
+
+	// A fail readies it again, and its next delivery counts 2.
+	if _, err := c.Queue.Enqueue("jobs", []byte("job-2"), nil); err != nil {
 		t.Fatal(err)
 	}
-	again, err := c.Queue.Peek("jobs", 10, nil)
-	if err != nil {
+	res, err = c.Queue.Dequeue("jobs", 1, opts)
+	if err != nil || len(res.Messages) != 1 {
+		t.Fatalf("dequeue job-2: %+v, %v", res, err)
+	}
+	if report, err := c.Queue.Fail("jobs", res.Lease, res.Items(), &QueueFailOptions{Error: "boom"}); err != nil || report.Applied != 1 {
+		t.Fatalf("fail: %+v, %v", report, err)
+	}
+	if report, err := c.Queue.Complete("jobs", res.Lease, res.Items(), nil); err != nil || len(report.Refused) != 1 || report.Refused[0].Why != QueueReleased {
+		t.Fatalf("complete after the fail: %+v, %v; want released", report, err)
+	}
+	lease := uint64(MinLeaseMS)
+	res, err = c.Queue.Dequeue("jobs", 1, &DequeueOptions{Consumer: "c1", LeaseMS: &lease})
+	if err != nil || len(res.Messages) != 1 || res.Messages[0].Deliveries != 2 {
+		t.Fatalf("dequeue after the fail: %+v, %v; want job-2's second delivery", res, err)
+	}
+	touched, err := c.Queue.Touch("jobs", res.Lease, res.Items(), nil)
+	if err != nil || touched.Applied != 1 || touched.ExpiresAtMS != res.ExpiresAtMS {
+		t.Fatalf("touch with most of the lease left: %+v, %v; want expiry %d unchanged", touched, err, res.ExpiresAtMS)
+	}
+
+	// Left uncompleted, the lease runs out and it's delivered again.
+	block := uint32(15000)
+	again, err := c.Queue.Dequeue("jobs", 1, &DequeueOptions{Consumer: "c2", BlockMS: &block})
+	if err != nil || len(again.Messages) != 1 || again.Messages[0].Seq != res.Messages[0].Seq || again.Messages[0].Deliveries != 3 {
+		t.Fatalf("dequeue after the lease ran out: %+v, %v; want job-2's third delivery", again, err)
+	}
+	if report, err := c.Queue.Complete("jobs", res.Lease, res.Items(), nil); err != nil || len(report.Refused) != 1 || report.Refused[0].Why != QueueDeliveredAgain {
+		t.Fatalf("complete of the expired delivery: %+v, %v; want delivered_again", report, err)
+	}
+}
+
+// With ack a dequeue completes as it takes: nothing comes back.
+func TestLiveQueueDequeueWithAck(t *testing.T) {
+	c := liveClient(t)
+	if _, err := c.Queue.Enqueue("acked", []byte("x"), nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(again.Messages) != 0 {
-		t.Fatalf("acked message still queued: %+v", again.Messages)
+	res, err := c.Queue.Dequeue("acked", 1, &DequeueOptions{Ack: true})
+	if err != nil || len(res.Messages) != 1 || res.ExpiresAtMS != 0 {
+		t.Fatalf("dequeue with ack: %+v, %v", res, err)
+	}
+	if n, err := c.Queue.Purge("acked", nil); err != nil || n != 0 {
+		t.Fatalf("purge after an acked dequeue: %d, %v; want nothing left", n, err)
+	}
+}
+
+// A delayed message isn't ready until its delay passes; purge removes it.
+func TestLiveQueueDelayAndPurge(t *testing.T) {
+	c := liveClient(t)
+	if _, err := c.Queue.Enqueue("later", []byte("x"), &EnqueueOptions{DelayMS: 60000}); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := c.Queue.Dequeue("later", 1, nil); err != nil || len(res.Messages) != 0 {
+		t.Fatalf("dequeue of a delayed message: %+v, %v; want nothing yet", res, err)
+	}
+	if n, err := c.Queue.Purge("later", nil); err != nil || n != 1 {
+		t.Fatalf("purge: %d, %v; want 1", n, err)
 	}
 }
 

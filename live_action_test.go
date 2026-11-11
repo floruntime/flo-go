@@ -146,7 +146,7 @@ func TestLiveQueuePeekAndAnEmptyDLQ(t *testing.T) {
 	if len(got.Messages) != 2 || string(got.Messages[0].Payload) != "a" || got.Messages[0].Size != 1 || !got.More {
 		t.Fatalf("peek %+v, want a and b with more", got)
 	}
-	res, err := c.Queue.Dequeue("peeked", 3, nil)
+	res, err := c.Queue.Dequeue("peeked", 3, &DequeueOptions{Ack: true})
 	if err != nil || len(res.Messages) != 3 {
 		t.Fatalf("dequeue after peek: %+v, %v; want all three still there", res, err)
 	}

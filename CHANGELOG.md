@@ -8,10 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 These follow the server's wire. The server's op table changed with them, so
-`TableHash` is now `0x7eb599c24442118b`, the hash of flo `e63add5`, which CI's
+`TableHash` is now `0x19075df8e1ed5f75`, the hash of flo `5213836`, which CI's
 live tests run against; this SDK no longer talks to an older server.
 
 ### Breaking
+
+- Queues are leased until completed, at least once. `QueueClient.Dequeue`
+  (0x181) takes `DequeueOptions.Consumer`, `LeaseMS` and `Ack`, and returns
+  messages with `Deliveries` (replacing `DeliveryCount`; `Priority` is a
+  `uint32`), the dequeue's `Lease` and `ExpiresAtMS`. `Ack` and `Nack` are
+  replaced by `Complete` (0x182), `Fail` (0x183, with `DelayMS`, `Dead` and
+  `Error`) and the new `Touch` (0x184); each names the lease and its
+  messages (`QueueItem`) and answers a `QueueReport` with per-message
+  refusals (`QueueRefusalWhy`). Ops 0x171, 0x172 and 0x174 are gone
+- `QueueClient.DLQRequeue` is gone: the server doesn't implement it
+- `StorageTier` gains `StorageTierDisk` (2); a tier this SDK doesn't know is
+  kept, not refused
 
 - Action await, complete, fail and touch move to the server's typed ops
   0x30A-0x30D; 0x306-0x309 are gone. An await answers a `*Task` (replacing
@@ -86,6 +98,15 @@ live tests run against; this SDK no longer talks to an older server.
   the later ones back
 
 ### Added
+
+- `EnqueueOptions.DelayMS`, which the server applies, and
+  `QueueClient.Purge`
+- A full queue's refusal (`overloaded`, ran no) is retried as any other,
+  then returned with the server's message
+- The stream worker sends group reads and pending-drain claims refused
+  `unavailable` (ran no), as when records are read back from disk, again
+  with a backoff; the claim loop no longer gives up until the next reconnect
+- `Stale` also marks a read from a node blocked reading its log, or diverged
 
 - `MaxHoldMS`: the longest the server holds one delivery, 12 h, however
   often it is touched

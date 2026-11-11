@@ -125,59 +125,50 @@ func main() {
 	}
 	fmt.Printf("Enqueued priority message with seq=%d\n", seq)
 
-	// Dequeue messages
-	dequeueResult, err := client.Queue.Dequeue("tasks", 10, nil)
+	// Dequeue messages: they're leased to this consumer until completed
+	dequeueResult, err := client.Queue.Dequeue("tasks", 10, &flo.DequeueOptions{Consumer: "example"})
 	if err != nil {
 		log.Fatalf("Dequeue failed: %v", err)
 	}
 	fmt.Printf("Dequeued %d messages\n", len(dequeueResult.Messages))
-
 	for _, msg := range dequeueResult.Messages {
 		fmt.Printf("  Processing message seq=%d: %s\n", msg.Seq, msg.Payload)
-
-		// A dequeue consumes its messages; queues are currently at-most-once, so Ack and Nack have no effect on a dequeued message.
-		if err := client.Queue.Ack("tasks", []uint64{msg.Seq}, nil); err != nil {
-			log.Fatalf("Ack failed: %v", err)
+	}
+	// Complete them within the lease, or they're delivered again
+	if len(dequeueResult.Messages) > 0 {
+		report, err := client.Queue.Complete("tasks", dequeueResult.Lease, dequeueResult.Items(), nil)
+		if err != nil {
+			log.Fatalf("Complete failed: %v", err)
 		}
+		fmt.Printf("Completed %d messages\n", report.Applied)
 	}
 
 	// Dequeue with long polling (wait for messages)
 	blockMS := uint32(5000) // 5 seconds
 	dequeueResult, err = client.Queue.Dequeue("tasks", 10, &flo.DequeueOptions{
-		BlockMS: &blockMS,
+		Consumer: "example",
+		BlockMS:  &blockMS,
 	})
 	if err != nil {
 		log.Fatalf("Dequeue with blocking failed: %v", err)
 	}
 	fmt.Printf("Dequeued %d messages (with blocking)\n", len(dequeueResult.Messages))
 
-	// Nack has no effect on a dequeued message: it is not retried
+	// Fail hands a message back: ready again, or dead once its attempts are spent
 	if len(dequeueResult.Messages) > 0 {
 		msg := dequeueResult.Messages[0]
-		if err := client.Queue.Nack("tasks", []uint64{msg.Seq}, nil); err != nil {
-			log.Fatalf("Nack failed: %v", err)
+		if _, err := client.Queue.Fail("tasks", dequeueResult.Lease, []flo.QueueItem{msg.Item()}, &flo.QueueFailOptions{Error: "example failure"}); err != nil {
+			log.Fatalf("Fail failed: %v", err)
 		}
-		fmt.Printf("Nacked message seq=%d\n", msg.Seq)
+		fmt.Printf("Failed message seq=%d\n", msg.Seq)
 	}
 
-	// List DLQ messages (usually empty: a dequeued message does not reach the DLQ)
+	// List DLQ messages: those failed or expired until their attempts ran out
 	dlqResult, err := client.Queue.DLQList("tasks", nil)
 	if err != nil {
 		log.Fatalf("DLQ list failed: %v", err)
 	}
 	fmt.Printf("DLQ contains %d messages\n", len(dlqResult.Messages))
-
-	// Requeue DLQ messages
-	if len(dlqResult.Messages) > 0 {
-		seqs := make([]uint64, len(dlqResult.Messages))
-		for i, msg := range dlqResult.Messages {
-			seqs[i] = msg.Seq
-		}
-		if err := client.Queue.DLQRequeue("tasks", seqs, nil); err != nil {
-			log.Fatalf("DLQ requeue failed: %v", err)
-		}
-		fmt.Printf("Requeued %d DLQ messages\n", len(seqs))
-	}
 
 	fmt.Println("\n=== Done ===")
 }

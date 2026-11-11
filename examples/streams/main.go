@@ -68,13 +68,12 @@ func main() {
 		fmt.Printf("  id=%s payload=%s\n", rec.ID, string(rec.Payload))
 	}
 
-	// Read using continuation (use last record's sequence + 1)
+	// Read on from the last record: Start is exclusive, so pass its id
 	fmt.Println("\n--- Reading continuation ---")
 	if len(readResult.Records) > 0 {
 		last := readResult.Records[len(readResult.Records)-1]
-		startID := last.ID.Next()
 		readResult, err = stream.Read("events", &flo.StreamReadOptions{
-			Start: &startID,
+			Start: &last.ID,
 			Count: flo.Uint32Ptr(3),
 		})
 		if err != nil {

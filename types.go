@@ -33,7 +33,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0x7eb599c24442118b
+	TableHash uint64 = 0x19075df8e1ed5f75
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -122,15 +122,16 @@ const (
 
 	// ── Queues (0x170 – 0x19F) ──
 	OpQueueEnqueue    OpCode = 0x170
-	OpQueueDequeue    OpCode = 0x171
-	OpQueueComplete   OpCode = 0x172
-	OpQueueFail       OpCode = 0x174
 	OpQueueDLQList    OpCode = 0x176
 	OpQueueDLQDelete  OpCode = 0x177
 	OpQueueDLQRequeue OpCode = 0x178
 	OpQueueStats      OpCode = 0x17B
 	OpQueuePurge      OpCode = 0x17F
 	OpQueuePeek       OpCode = 0x180
+	OpQueueDequeue    OpCode = 0x181
+	OpQueueComplete   OpCode = 0x182
+	OpQueueFail       OpCode = 0x183
+	OpQueueTouch      OpCode = 0x184
 	OpQueueList       OpCode = 0x198
 
 	// ── Time-Series (0x1A0 – 0x1BF) ──
@@ -211,8 +212,9 @@ const (
 	StatusNoNamespace StatusCode = 14
 )
 
-// ResponseStale is the answer flag a halted shard sets on a read it serves
-// from the state just before the entry it halted at.
+// ResponseStale is the answer flag on a read served by a shard that can't
+// apply what its group committed: halted, diverged, or blocked reading the
+// log.
 const ResponseStale uint8 = 0x01
 
 // String returns a human-readable message for the status code.
@@ -262,13 +264,14 @@ const (
 
 	// Queue Options (0x10 - 0x1F)
 	OptPriority OptionTag = 0x10 // u8: Message priority (0-255, lower is taken first)
-	OptCount    OptionTag = 0x15 // u32: Number of messages to dequeue
+	OptDelayMS  OptionTag = 0x11 // u64: How long before an enqueued message is ready (at most a day)
+	OptCount    OptionTag = 0x15 // u32: Most records a stream read returns
 	OptBlockMS  OptionTag = 0x17 // u32: Blocking timeout (0 = don't wait, max 300000)
 
 	// Stream Options (0x20 - 0x2F) - StreamID-native ONLY
 	// All stream positioning uses StreamID (timestamp_ms + sequence) - no legacy offset/timestamp modes
 	// 0x20 reserved
-	OptStreamStart   OptionTag = 0x21 // [16]u8: Start StreamID for reads (inclusive)
+	OptStreamStart   OptionTag = 0x21 // [16]u8: Read the records after this StreamID (exclusive)
 	OptStreamEnd     OptionTag = 0x22 // [16]u8: End StreamID for reads (inclusive)
 	OptStreamTail    OptionTag = 0x23 // void: Flag indicating tail read (start from end)
 	OptPartition     OptionTag = 0x24 // u32: Explicit partition index
@@ -298,7 +301,8 @@ const (
 type ScanResult struct {
 	Keys   []string
 	Cursor []byte
-	// Stale: a halted shard answered, from its state before the halt.
+	// Stale: the read was served by a shard behind what its group
+	// committed (halted, or blocked reading the log), from its state then.
 	Stale bool
 }
 
@@ -308,14 +312,16 @@ type HistoryResult struct {
 	// More says older versions follow: ask again with BeforeVersion set to
 	// the last version here.
 	More bool
-	// Stale: a halted shard answered, from its state before the halt.
+	// Stale: the read was served by a shard behind what its group
+	// committed (halted, or blocked reading the log), from its state then.
 	Stale bool
 }
 
 // ExistsResult says whether a key is present.
 type ExistsResult struct {
 	Exists bool
-	// Stale: a halted shard answered, from its state before the halt.
+	// Stale: the read was served by a shard behind what its group
+	// committed (halted, or blocked reading the log), from its state then.
 	Stale bool
 }
 
@@ -358,8 +364,10 @@ type GetResult struct {
 	// ExpiresAtMs is when the key's TTL runs out, in Unix milliseconds; nil
 	// when it has none, and always nil from JsonGet.
 	ExpiresAtMs *int64
-	// Stale: a halted shard answered, from its state just before the entry
-	// it halted at. The read succeeded; writes since aren't in it.
+	// Stale: the read was served by a shard behind what its group committed:
+	// halted, from its state just before the entry it halted at, or blocked
+	// reading the log, or diverged. The read succeeded; later writes aren't
+	// in it.
 	Stale bool
 }
 
@@ -370,7 +378,8 @@ type MGetEntry struct {
 	Value   []byte
 	Version uint64
 	Found   bool
-	// Stale: a halted shard answered, from its state before the halt.
+	// Stale: the read was served by a shard behind what its group
+	// committed (halted, or blocked reading the log), from its state then.
 	Stale bool
 }
 
@@ -383,18 +392,99 @@ type KVMGetOptions struct {
 	RoutingKey string
 }
 
-// Message represents a queue message.
+// Message is a dequeued queue message. With its dequeue's QueueLease, Seq
+// and Deliveries name its delivery: Complete, Fail and Touch name it back.
 type Message struct {
-	Seq           uint64
-	Payload       []byte
-	EnqueuedAtMS  int64
-	DeliveryCount uint32
-	Priority      uint8
+	Seq      uint64
+	Priority uint32
+	// Deliveries counts the message's deliveries, this one included.
+	Deliveries   uint32
+	EnqueuedAtMS int64
+	Payload      []byte
 }
 
-// DequeueResult represents the result of a queue dequeue operation.
+// Item is how a report names the message: its seq and the deliveries it
+// was dequeued with.
+func (m Message) Item() QueueItem { return QueueItem{Seq: m.Seq, Deliveries: m.Deliveries} }
+
+// QueueItem names one delivered message in a report.
+type QueueItem struct {
+	Seq        uint64
+	Deliveries uint32
+}
+
+// QueueLease names a dequeue's delivery: the consumer that took the
+// messages and the log position the delivery was made at. A report must
+// name the same.
+type QueueLease struct {
+	Consumer string
+	Term     uint64
+	Index    uint64
+}
+
+// DequeueResult is what a dequeue took: its messages, leased to the
+// consumer until completed, failed or expired.
 type DequeueResult struct {
 	Messages []Message
+	Lease    QueueLease
+	// ExpiresAtMS is when the lease runs out without a touch, in Unix
+	// milliseconds; 0 when nothing was taken, or with Ack.
+	ExpiresAtMS int64
+}
+
+// Items names every message taken, for a report on all of them.
+func (r *DequeueResult) Items() []QueueItem {
+	items := make([]QueueItem, len(r.Messages))
+	for i, m := range r.Messages {
+		items[i] = m.Item()
+	}
+	return items
+}
+
+// QueueRefusalWhy says why a report applied nothing to a message.
+type QueueRefusalWhy uint8
+
+const (
+	// QueueGone: no such message in the queue. For a complete it means
+	// done: a resent complete whose first applied is answered this.
+	QueueGone QueueRefusalWhy = 0
+	// QueueDeliveredAgain: its lease ran out or it was failed, and it was
+	// dequeued again; this delivery is over.
+	QueueDeliveredAgain QueueRefusalWhy = 1
+	// QueueOtherHolder: another consumer holds this delivery.
+	QueueOtherHolder QueueRefusalWhy = 2
+	// QueueExpired: its lease ran out, and it is ready again or dead.
+	QueueExpired QueueRefusalWhy = 3
+	// QueueReleased: it was failed, and is ready again or dead.
+	QueueReleased QueueRefusalWhy = 4
+	// QueueNotHeld: it isn't leased.
+	QueueNotHeld QueueRefusalWhy = 5
+)
+
+var queueRefusalNames = [...]string{"gone", "delivered_again", "other_holder", "expired", "released", "not_held"}
+
+func (w QueueRefusalWhy) String() string {
+	if int(w) < len(queueRefusalNames) {
+		return queueRefusalNames[w]
+	}
+	return fmt.Sprintf("why(%d)", uint8(w))
+}
+
+// QueueRefusal is a message a report applied nothing to.
+type QueueRefusal struct {
+	Seq uint64
+	Why QueueRefusalWhy
+	// Reason says the same for a person; read Why, not this.
+	Reason string
+}
+
+// QueueReport is a complete's, fail's or touch's answer: per message, the
+// server applies it or says why not, in an ok answer.
+type QueueReport struct {
+	Applied uint32
+	Refused []QueueRefusal
+	// ExpiresAtMS, for a touch, is when the lease runs out without another.
+	ExpiresAtMS int64
 }
 
 // GetOptions contains options for KV get operations.
@@ -480,21 +570,48 @@ type HistoryOptions struct {
 type EnqueueOptions struct {
 	Namespace string
 	Priority  uint8 // Lower is taken first
+	// DelayMS is how long before the message is ready, at most
+	// MaxQueueDelayMS.
+	DelayMS uint64
 }
+
+// MaxQueueDelayMS is the longest an enqueue or a fail may delay a message.
+const MaxQueueDelayMS = 24 * 60 * 60 * 1000
 
 // DequeueOptions contains options for queue dequeue operations.
 type DequeueOptions struct {
 	Namespace string
-	BlockMS   *uint32 // Long-poll wait (nil or 0 = don't wait, max 300000)
+	// Consumer is who takes the messages; a report on them must name the
+	// same, and the result's Lease carries it.
+	Consumer string
+	// LeaseMS is how long the messages are held without a touch,
+	// MinLeaseMS..MaxLeaseMS; nil is the server's 30 s.
+	LeaseMS *uint64
+	BlockMS *uint32 // Long-poll wait (nil or 0 = don't wait, max 300000)
+	// Ack completes the messages as they're taken, a one-shot consume. If
+	// the leader fails in between, they come back once their lease runs out.
+	Ack bool
 }
 
-// AckOptions contains options for queue ack operations.
-type AckOptions struct {
+// QueueReportOptions contains options for a queue complete or touch.
+type QueueReportOptions struct {
 	Namespace string
 }
 
-// NackOptions contains options for queue nack operations.
-type NackOptions struct {
+// QueueFailOptions contains options for a queue fail.
+type QueueFailOptions struct {
+	Namespace string
+	// DelayMS is how long before the messages are ready again, at most
+	// MaxQueueDelayMS.
+	DelayMS uint64
+	// Dead dead-letters them now, whatever attempts are left.
+	Dead bool
+	// Error says why they failed, at most 1024 bytes.
+	Error string
+}
+
+// PurgeOptions contains options for a queue purge.
+type PurgeOptions struct {
 	Namespace string
 }
 
@@ -534,11 +651,6 @@ type DLQPage struct {
 	HasMore bool
 	// LastSeq is the seq of the page's last message; 0 on an empty page.
 	LastSeq uint64
-}
-
-// DLQRequeueOptions contains options for DLQ requeue operations.
-type DLQRequeueOptions struct {
-	Namespace string
 }
 
 // PeekOptions contains options for queue peek operations.
@@ -613,14 +725,27 @@ func (id StreamID) Next() StreamID {
 	}
 }
 
-// StorageTier is the tier a stream record was served from. These are the
-// only two the server sends.
+// StorageTier is the tier a stream record was served from. A code this
+// SDK doesn't know is kept as it came; String names it unknown.
 type StorageTier uint8
 
 const (
 	StorageTierHot  StorageTier = 0 // the in-memory log
 	StorageTierWarm StorageTier = 1 // the warm store, after the record left the log
+	StorageTierDisk StorageTier = 2 // read back from the log's segments on disk, past the warm store
 )
+
+func (t StorageTier) String() string {
+	switch t {
+	case StorageTierHot:
+		return "hot"
+	case StorageTierWarm:
+		return "warm"
+	case StorageTierDisk:
+		return "disk"
+	}
+	return fmt.Sprintf("unknown(%d)", uint8(t))
+}
 
 // StreamRecord represents a single stream record.
 type StreamRecord struct {
@@ -686,7 +811,7 @@ type StreamAppendOptions struct {
 // StreamReadOptions contains options for stream read operations.
 type StreamReadOptions struct {
 	Namespace string
-	Start     *StreamID // Start StreamID for reads (inclusive)
+	Start     *StreamID // Read the records after this id (exclusive): pass the last id read
 	End       *StreamID // End StreamID for reads (inclusive)
 	Tail      bool      // Start from end of stream (mutually exclusive with Start)
 	Partition *uint32   // Explicit partition index

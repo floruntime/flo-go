@@ -289,80 +289,10 @@ func parseResponseHeader(header []byte) (StatusCode, uint32, uint64, uint32, err
 	return status, dataLen, requestID, crc, nil
 }
 
-// parseDequeueResponse parses dequeue response data.
-func parseDequeueResponse(data []byte) (*DequeueResult, error) {
-	if len(data) < 4 {
-		return nil, ErrIncompleteResponse
-	}
-
-	offset := 0
-
-	count := binary.LittleEndian.Uint32(data[offset:])
-	offset += 4
-	// Each message is at least its fixed fields; a count the data can't hold
-	// is refused before it sizes an allocation.
-	const minMessage = 8 + 4 + 8 + 4 + 1
-	if uint64(count) > uint64(len(data)-offset)/minMessage {
-		return nil, ErrIncompleteResponse
-	}
-
-	messages := make([]Message, 0, count)
-	for i := uint32(0); i < count; i++ {
-		if len(data) < offset+12 {
-			return nil, ErrIncompleteResponse
-		}
-
-		seq := binary.LittleEndian.Uint64(data[offset:])
-		offset += 8
-
-		payloadLen := binary.LittleEndian.Uint32(data[offset:])
-		offset += 4
-
-		if len(data) < offset+int(payloadLen) {
-			return nil, ErrIncompleteResponse
-		}
-
-		payload := make([]byte, payloadLen)
-		copy(payload, data[offset:offset+int(payloadLen)])
-		offset += int(payloadLen)
-
-		// [enqueued_at_ms:i64][delivery_count:u32][priority:u8]
-		if len(data) < offset+13 {
-			return nil, ErrIncompleteResponse
-		}
-		enqueuedAt := int64(binary.LittleEndian.Uint64(data[offset:]))
-		deliveries := binary.LittleEndian.Uint32(data[offset+8:])
-		priority := data[offset+12]
-		offset += 13
-
-		messages = append(messages, Message{
-			Seq:           seq,
-			Payload:       payload,
-			EnqueuedAtMS:  enqueuedAt,
-			DeliveryCount: deliveries,
-			Priority:      priority,
-		})
-	}
-
-	return &DequeueResult{Messages: messages}, nil
-}
-
 // parseEnqueueResponse parses enqueue response data.
 func parseEnqueueResponse(data []byte) (uint64, error) {
 	if len(data) < 8 {
 		return 0, ErrIncompleteResponse
 	}
 	return binary.LittleEndian.Uint64(data[:8]), nil
-}
-
-// serializeSeqs serializes sequence numbers for ack/nack.
-func serializeSeqs(seqs []uint64) []byte {
-	buf := make([]byte, 4+len(seqs)*8)
-	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(seqs)))
-	offset := 4
-	for _, seq := range seqs {
-		binary.LittleEndian.PutUint64(buf[offset:], seq)
-		offset += 8
-	}
-	return buf
 }
