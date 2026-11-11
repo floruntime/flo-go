@@ -373,8 +373,8 @@ func TestLiveQueueLeasedUntilCompleted(t *testing.T) {
 	if err != nil || len(again.Messages) != 1 || again.Messages[0].Seq != res.Messages[0].Seq || again.Messages[0].Deliveries != 3 {
 		t.Fatalf("dequeue after the lease ran out: %+v, %v; want job-2's third delivery", again, err)
 	}
-	if report, err := c.Queue.Complete("jobs", res.Lease, res.Items(), nil); err != nil || len(report.Refused) != 1 || report.Refused[0].Why == QueueGone {
-		t.Fatalf("complete of the expired delivery: %+v, %v; want a stale refusal", report, err)
+	if report, err := c.Queue.Complete("jobs", res.Lease, res.Items(), nil); err != nil || len(report.Refused) != 1 || report.Refused[0].Why != QueueDeliveredAgain {
+		t.Fatalf("complete of the expired delivery: %+v, %v; want delivered_again", report, err)
 	}
 }
 

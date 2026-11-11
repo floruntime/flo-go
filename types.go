@@ -271,7 +271,7 @@ const (
 	// Stream Options (0x20 - 0x2F) - StreamID-native ONLY
 	// All stream positioning uses StreamID (timestamp_ms + sequence) - no legacy offset/timestamp modes
 	// 0x20 reserved
-	OptStreamStart   OptionTag = 0x21 // [16]u8: Start StreamID for reads (inclusive)
+	OptStreamStart   OptionTag = 0x21 // [16]u8: Read the records after this StreamID (exclusive)
 	OptStreamEnd     OptionTag = 0x22 // [16]u8: End StreamID for reads (inclusive)
 	OptStreamTail    OptionTag = 0x23 // void: Flag indicating tail read (start from end)
 	OptPartition     OptionTag = 0x24 // u32: Explicit partition index
@@ -811,7 +811,7 @@ type StreamAppendOptions struct {
 // StreamReadOptions contains options for stream read operations.
 type StreamReadOptions struct {
 	Namespace string
-	Start     *StreamID // Start StreamID for reads (inclusive)
+	Start     *StreamID // Read the records after this id (exclusive): pass the last id read
 	End       *StreamID // End StreamID for reads (inclusive)
 	Tail      bool      // Start from end of stream (mutually exclusive with Start)
 	Partition *uint32   // Explicit partition index
