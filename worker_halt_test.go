@@ -269,7 +269,7 @@ func TestHaltedRefusalsOfResultsAreNotResent(t *testing.T) {
 			t.Cleanup(func() { sw.Close() })
 			sw.ctx, sw.cancel = context.WithCancel(context.Background())
 			sw.pollCtx = sw.ctx
-			sw.processRecord("s", testLease, testGroupRecord(), time.Now())
+			sw.processRecord("s", testLease, testGroupRecord(), nil)
 			if n := len(s.got(OpStreamGroupAck)); n != 1 {
 				t.Errorf("ack sent %d times, want once", n)
 			}

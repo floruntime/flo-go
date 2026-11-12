@@ -198,7 +198,7 @@ func TestDroppedAckIsResentNeverNacked(t *testing.T) {
 	t.Cleanup(func() { sw.Close() })
 	sw.ctx, sw.cancel = context.WithCancel(context.Background())
 	sw.pollCtx = sw.ctx
-	sw.processRecord("s", testLease, testGroupRecord(), time.Now())
+	sw.processRecord("s", testLease, testGroupRecord(), nil)
 	acks := s.got(OpStreamGroupAck)
 	if len(acks) != 2 {
 		t.Errorf("server saw %d acks, want 2", len(acks))

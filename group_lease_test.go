@@ -2,10 +2,10 @@ package flo
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -327,40 +327,154 @@ func TestAWorkerLoopWarnsOfALimitOncePerReason(t *testing.T) {
 	}
 }
 
-// AutoTouch touches a running record on the schedule an action's is: every
-// sixth of its group's lease, which GroupList gives, naming the record's
-// delivery; it stops before the ack.
-func TestStreamWorkerAutoTouchesOnItsGroupsLease(t *testing.T) {
+// groupListWith answers stream.group.list with the default group at
+// leaseMS.
+func groupListWith(leaseMS uint32) []byte {
 	list := binary.LittleEndian.AppendUint16(nil, 1)
 	list = binary.LittleEndian.AppendUint16(list, 7)
 	list = append(list, "default"...)
-	list = cat(list, []byte{0, 0, 0, 0}, u64le(0), u64le(0), []byte{0x58, 0x02, 0, 0}, []byte{5}, u64le(0), u64le(0), []byte{0}) // 600 ms lease
+	return cat(list, []byte{0, 0, 0, 0}, u64le(0), u64le(0), binary.LittleEndian.AppendUint32(nil, leaseMS), []byte{5}, u64le(0), u64le(0), []byte{0})
+}
+
+// readOf is a group read answer leasing n records, ids (1, 1..n), under
+// delivery (2, 7), expiring at expiresAt.
+func readOf(n int, expiresAt int64) []byte {
+	b := cat(u64le(2), u64le(7), u64le(uint64(expiresAt)), binary.LittleEndian.AppendUint32(nil, uint32(n)))
+	for i := 1; i <= n; i++ {
+		b = cat(b, u64le(uint64(i)), u64le(1), []byte{0}, []byte{0, 0, 0, 0}, []byte{0}, []byte{1, 0, 0, 0, 'x'}, []byte{0, 0, 0, 0}, []byte{1, 0, 0, 0})
+	}
+	return b
+}
+
+// touchItems is how many records a touch request names.
+func touchItems(t *testing.T, frame []byte) int {
+	t.Helper()
+	_, value, _ := requestParts(t, frame[HeaderSize:])
+	g := int(binary.LittleEndian.Uint16(value))
+	c := int(binary.LittleEndian.Uint16(value[2+g:]))
+	return int(binary.LittleEndian.Uint32(value[2+g+2+c+16:]))
+}
+
+// With more records than handler slots, AutoTouch keeps them all leased
+// from arrival: one touch names the read's delivery and every record not
+// yet acked, dropping each as it is acked.
+func TestStreamWorkerAutoTouchesWaitingRecordsFromArrival(t *testing.T) {
 	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
-		if op == OpStreamGroupList {
-			return reply{body: list}
+		switch {
+		case op == OpStreamGroupList:
+			return reply{body: groupListWith(600)} // touch every 100 ms
+		case op == OpStreamGroupRead && n == 0:
+			return reply{body: readOf(3, 0)}
+		case op == OpStreamGroupRead:
+			time.Sleep(20 * time.Millisecond)
 		}
 		return reply{}
 	})
-	sw, err := NewClient(addr, WithTimeout(time.Second)).NewStreamWorker(StreamWorkerOptions{Stream: "s", AutoTouch: true, Logger: &captureLogger{}},
-		func(*StreamContext) error { time.Sleep(350 * time.Millisecond); return nil })
+	var handled atomic.Int32
+	sw, err := NewClient(addr, WithTimeout(time.Second)).NewStreamWorker(StreamWorkerOptions{Stream: "s", Concurrency: 1, AutoTouch: true, Logger: &captureLogger{}},
+		func(*StreamContext) error { time.Sleep(250 * time.Millisecond); handled.Add(1); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { sw.Close() })
-	sw.ctx, sw.cancel = context.WithCancel(context.Background())
-	sw.processRecord("s", testLease, testGroupRecord(), time.Now())
+	done := startWorker(sw.Start)
+	waitFor(t, "three acks", func() bool { return len(s.got(OpStreamGroupAck)) == 3 })
+	sw.Stop()
+	waitStart(t, done)
 	touches := s.got(OpStreamGroupTouch)
-	if n := len(touches); n < 2 || n > 4 {
-		t.Fatalf("%d touches in 350 ms at a 100 ms interval, want about 3", n)
+	if len(touches) < 4 {
+		t.Fatalf("%d touches over 750 ms at a 100 ms interval", len(touches))
 	}
-	_, value, _ := requestParts(t, touches[0][HeaderSize:])
-	want := cat([]byte{7, 0}, []byte("default"), []byte{1, 0, 'c'}, u64le(2), u64le(7), []byte{1, 0, 0, 0}, u64le(7), u64le(1), []byte{1, 0, 0, 0})
-	if !bytes.Equal(value, want) {
-		t.Errorf("touch value % x, want % x", value, want)
+	if n := touchItems(t, touches[0]); n != 3 {
+		t.Errorf("the first touch named %d records, want all 3 (two wait for a slot)", n)
+	}
+	if n := touchItems(t, touches[len(touches)-1]); n != 1 {
+		t.Errorf("the last touch named %d records, want the one not yet acked", n)
 	}
 	order := s.arrivals()
-	if order[len(order)-1] != OpStreamGroupAck {
-		t.Errorf("the ack wasn't last: %v", order)
+	if last := order[len(order)-1]; last == OpStreamGroupTouch {
+		t.Errorf("a touch after every ack: %v", order)
+	}
+}
+
+// AutoTouch paces by the server's word: a touch answer saying the lease runs
+// out sooner than this clock expects brings the next touch forward.
+func TestStreamWorkerAutoTouchRecalibratesFromTheServersExpiry(t *testing.T) {
+	const skew = -3000 // the server's clock runs 3 s behind
+	serverNow := func() int64 { return time.Now().UnixMilli() + skew }
+	var mu sync.Mutex
+	var touchedAt []time.Time
+	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
+		switch {
+		case op == OpStreamGroupList:
+			return reply{body: groupListWith(6000)} // touch every 1 s
+		case op == OpStreamGroupRead && n == 0:
+			return reply{body: readOf(1, serverNow()+6000)}
+		case op == OpStreamGroupRead:
+			time.Sleep(20 * time.Millisecond)
+		case op == OpStreamGroupTouch:
+			mu.Lock()
+			touchedAt = append(touchedAt, time.Now())
+			mu.Unlock()
+			// Not renewed: 1.5 s left by the server's clock.
+			return reply{body: append(u64le(uint64(serverNow()+1500)), groupReportBody1...)}
+		}
+		return reply{}
+	})
+	sw, err := NewClient(addr, WithTimeout(time.Second)).NewStreamWorker(StreamWorkerOptions{Stream: "s", AutoTouch: true, Logger: &captureLogger{}},
+		func(*StreamContext) error { time.Sleep(1800 * time.Millisecond); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sw.Close() })
+	done := startWorker(sw.Start)
+	waitFor(t, "the ack", func() bool { return len(s.got(OpStreamGroupAck)) == 1 })
+	sw.Stop()
+	waitStart(t, done)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(touchedAt) < 2 {
+		t.Fatalf("%d touches, want at least 2", len(touchedAt))
+	}
+	if gap := touchedAt[1].Sub(touchedAt[0]); gap > 800*time.Millisecond {
+		t.Errorf("second touch %v after the first, want it brought forward to about 500 ms", gap)
+	}
+}
+
+// Touching carries on through transient refusals and a lost answer, and
+// stops on a stale report.
+func TestStreamWorkerAutoTouchRetriesTransientErrors(t *testing.T) {
+	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
+		switch {
+		case op == OpStreamGroupList:
+			return reply{body: groupListWith(600)}
+		case op == OpStreamGroupRead && n == 0:
+			return reply{body: readOf(1, 0)}
+		case op == OpStreamGroupRead:
+			time.Sleep(20 * time.Millisecond)
+		case op == OpStreamGroupTouch && n == 0:
+			return reply{status: StatusUnavailable, body: refusalBody(ReasonLeaderUnknown, RanNo, "unavailable")}
+		case op == OpStreamGroupTouch && n == 1:
+			return reply{status: StatusOverloaded, body: refusalBody(ReasonShardBusy, RanNo, "overloaded")}
+		case op == OpStreamGroupTouch && n == 2:
+			return reply{hangUp: true}
+		case op == OpStreamGroupTouch && n == 4:
+			return reply{status: StatusConflict, body: refusalBody(ReasonStaleReport, RanNo, "stale")}
+		}
+		return reply{}
+	})
+	sw, err := NewClient(addr, WithTimeout(time.Second), WithRetry(RetryPolicy{MaxAttempts: 1})).NewStreamWorker(StreamWorkerOptions{Stream: "s", AutoTouch: true, Logger: &captureLogger{}},
+		func(*StreamContext) error { time.Sleep(1200 * time.Millisecond); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sw.Close() })
+	done := startWorker(sw.Start)
+	waitFor(t, "the ack", func() bool { return len(s.got(OpStreamGroupAck)) == 1 })
+	sw.Stop()
+	waitStart(t, done)
+	if n := len(s.got(OpStreamGroupTouch)); n != 5 {
+		t.Errorf("%d touches, want 5: three transient failures, one applied, then the stale one ends it", n)
 	}
 }
 

@@ -496,7 +496,9 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 				continue
 			}
 			backoff.reset()
-			arrived := time.Now()
+			// Touched from arrival, so records waiting for a handler slot
+			// keep their lease too.
+			touch := sw.startTouching(stream, result, time.Now())
 
 			for _, record := range result.Records {
 				sem <- struct{}{} // concurrency gate
@@ -504,7 +506,7 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 				go func(rec StreamGroupRecord) {
 					defer sw.handlers.Done()
 					defer func() { <-sem }()
-					sw.processRecord(stream, result.Lease, rec, arrived)
+					sw.processRecord(stream, result.Lease, rec, touch)
 				}(record)
 			}
 		}
@@ -555,18 +557,17 @@ func (sw *StreamWorker) handleReconnect() error {
 	return nil
 }
 
-// processRecord handles a single record, then acks or nacks it.
-func (sw *StreamWorker) processRecord(stream string, lease StreamGroupLease, record StreamGroupRecord, arrived time.Time) {
+// processRecord handles a single record, then stops touching it and acks
+// or nacks it. touch may be nil.
+func (sw *StreamWorker) processRecord(stream string, lease StreamGroupLease, record StreamGroupRecord, touch *readToucher) {
 	sw.running.Add(1)
 	defer sw.running.Add(-1)
-	// Deferred too, so a panicking handler stops touching before its nack.
-	stopTouching := sw.startTouching(stream, lease, record, arrived)
-	defer stopTouching()
+	defer touch.drop(record.ID)
 	defer func() {
 		if r := recover(); r != nil {
-			stopTouching()
 			sw.logger.Printf("[%s] Stream handler panicked on id %s: %v", stream, record.ID, r)
 			atomic.AddUint64(&sw.messagesFailed, 1)
+			touch.drop(record.ID)
 			sw.reportWithRetry(stream, lease, record, false, fmt.Sprintf("handler panicked: %v", r))
 		}
 	}()
@@ -586,15 +587,16 @@ func (sw *StreamWorker) processRecord(stream string, lease StreamGroupLease, rec
 	}
 
 	err := sw.handler(sctx)
-	stopTouching()
 	if err != nil {
 		atomic.AddUint64(&sw.messagesFailed, 1)
 		sw.logger.Printf("[%s] Stream record %s failed: %v", stream, record.ID, err)
+		touch.drop(record.ID)
 		sw.reportWithRetry(stream, lease, record, false, err.Error())
 		return
 	}
 
 	atomic.AddUint64(&sw.messagesProcessed, 1)
+	touch.drop(record.ID)
 	sw.reportWithRetry(stream, lease, record, true, "")
 }
 
@@ -619,60 +621,123 @@ func (sw *StreamWorker) leaseOf(stream string) uint64 {
 	return MinGroupAckTimeoutMS
 }
 
-// startTouching touches record every touchInterval of its group's lease
-// from when it arrived, until the returned stop is called, which waits for
-// a touch in flight, so the ack or nack is sent after it. The nth touch is
-// due at arrived plus n intervals; a slot that passed while one was in
-// flight is skipped. A refused record (its delivery moved on), not found or
-// bad request stops touching; any other error, or a lost touch, is tried
-// again next interval, a lost connection reconnected first.
-func (sw *StreamWorker) startTouching(stream string, lease StreamGroupLease, record StreamGroupRecord, arrived time.Time) (stop func()) {
-	if !sw.config.AutoTouch {
-		return func() {}
+// readToucher keeps one read's unacked records leased: each touch names
+// the read's delivery and the records not yet acked or nacked.
+type readToucher struct {
+	mu    sync.Mutex
+	items map[StreamID]StreamGroupItem
+	done  chan struct{}
+	once  sync.Once
+}
+
+// drop stops touching id; with none left, touching ends. Safe on nil.
+func (t *readToucher) drop(id StreamID) {
+	if t == nil {
+		return
 	}
-	interval := touchInterval(sw.leaseOf(stream))
-	done := make(chan struct{})
-	finished := make(chan struct{})
+	t.mu.Lock()
+	delete(t.items, id)
+	empty := len(t.items) == 0
+	t.mu.Unlock()
+	if empty {
+		t.once.Do(func() { close(t.done) })
+	}
+}
+
+func (t *readToucher) pending() []StreamGroupItem {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]StreamGroupItem, 0, len(t.items))
+	for _, it := range t.items {
+		out = append(out, it)
+	}
+	return out
+}
+
+// startTouching touches a read's records every touchInterval of the
+// group's lease from when they arrived, whether their handlers have started
+// or are waiting for a slot, until each is acked or nacked. The nth touch is
+// due at arrival plus n intervals, a slot that passed during a slow touch
+// skipped, and never later than an interval before the lease runs out by
+// the server's last word: each touch's answer gives the expiry in the
+// server's clock, read through the offset the read's own expiry showed, so a
+// skewed clock doesn't let a lease lapse. A record a touch refuses (its
+// delivery moved on) is dropped; a stale, conflict, not found or bad request
+// refusal ends touching; anything else (overloaded, unavailable, a lost
+// connection) is tried again next interval. Nil without AutoTouch.
+func (sw *StreamWorker) startTouching(stream string, read *StreamGroupReadResult, arrived time.Time) *readToucher {
+	if !sw.config.AutoTouch || len(read.Records) == 0 {
+		return nil
+	}
+	t := &readToucher{items: make(map[StreamID]StreamGroupItem, len(read.Records)), done: make(chan struct{})}
+	for _, r := range read.Records {
+		t.items[r.ID] = r.Item()
+	}
+	leaseMS := sw.leaseOf(stream)
+	lease := time.Duration(leaseMS) * time.Millisecond
+	interval := touchInterval(leaseMS)
+	// serverAhead is how far the server's clock reads past this one's: the
+	// read's lease ran from the server's now, which this side saw as arrived.
+	var serverAhead time.Duration
+	localExpiry := arrived.Add(lease)
+	if read.ExpiresAtMS > 0 {
+		serverAhead = time.UnixMilli(read.ExpiresAtMS).Add(-lease).Sub(arrived)
+	}
 	go func() {
-		defer close(finished)
 		next := arrived.Add(interval)
 		timer := time.NewTimer(time.Until(next))
 		defer timer.Stop()
 		for {
 			select {
-			case <-done:
+			case <-t.done:
+				return
+			case <-sw.closeCtx.Done():
 				return
 			case <-timer.C:
 			}
-			rep, err := sw.ackClient.Stream.GroupTouch(stream, sw.config.Group, lease, []StreamGroupItem{record.Item()}, nil)
+			items := t.pending()
+			if len(items) == 0 {
+				return
+			}
+			rep, err := sw.ackClient.Stream.GroupTouch(stream, sw.config.Group, read.Lease, items, nil)
 			var se *ServerError
 			switch {
-			case err == nil && len(rep.Refused) > 0:
-				sw.logger.Printf("[%s] Touch for %s was refused (%s), stopping", stream, record.ID, rep.Refused[0].Why)
-				return
 			case err == nil:
-			case errors.As(err, &se) && (se.Status == StatusNotFound || se.Status == StatusBadRequest):
-				sw.logger.Printf("[%s] Touch for %s was refused, stopping: %v", stream, record.ID, err)
+				for _, f := range rep.Refused {
+					if f.Why == QueueGone {
+						// Acked or nacked as this touch went out.
+						t.drop(f.ID)
+						continue
+					}
+					sw.logger.Printf("[%s] Touch for %s was refused (%s), no longer touching it", stream, f.ID, f.Why)
+					t.drop(f.ID)
+				}
+				if rep.ExpiresAtMS > 0 {
+					localExpiry = time.UnixMilli(rep.ExpiresAtMS).Add(-serverAhead)
+				}
+			case errors.As(err, &se) && (se.Status == StatusConflict || se.Status == StatusNotFound || se.Status == StatusBadRequest):
+				sw.logger.Printf("[%s] Touch was refused, stopping: %v", stream, err)
 				return
 			case IsConnectionError(err):
-				sw.logger.Printf("[%s] Touch for %s lost: %v; reconnecting", stream, record.ID, err)
+				sw.logger.Printf("[%s] Touch lost: %v; reconnecting", stream, err)
 				_ = sw.reconnectAck()
 			default:
-				sw.logger.Printf("[%s] Touch for %s failed: %v; trying again", stream, record.ID, err)
+				sw.logger.Printf("[%s] Touch failed: %v; trying again", stream, err)
 			}
-			for now := time.Now(); !next.After(now); {
+			now := time.Now()
+			for !next.After(now) {
 				next = next.Add(interval)
+			}
+			if latest := localExpiry.Add(-interval); next.After(latest) {
+				next = latest
+			}
+			if earliest := now.Add(minTouchInterval); next.Before(earliest) {
+				next = earliest
 			}
 			timer.Reset(time.Until(next))
 		}
 	}()
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			close(done)
-			<-finished
-		})
-	}
+	return t
 }
 
 // reportWithRetry acks (or nacks, with why) a record, reconnecting if the
