@@ -159,14 +159,14 @@ func TestLiveQueuePeekAndAnEmptyDLQ(t *testing.T) {
 	}
 }
 
-// GroupList and GroupMembers show a group a consumer joined.
+// GroupList and GroupMembers show a group whose consumer holds a record.
 func TestLiveStreamGroupListAndMembers(t *testing.T) {
 	c := liveClient(t)
 	if _, err := c.Stream.Append("events", []byte("x"), nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Stream.GroupJoin("events", "workers", "c1", nil); err != nil {
-		t.Fatal(err)
+	if got, err := c.Stream.GroupRead("events", "workers", "c1", nil); err != nil || len(got.Records) != 1 {
+		t.Fatalf("group read: %+v, %v; want the one record", got, err)
 	}
 	groups, err := c.Stream.GroupList("events", nil)
 	if err != nil {

@@ -67,8 +67,8 @@ func (c *Client) kvSet(namespace, key string, value []byte, opts *PutOptions, tx
 const MaxMGetKeys = 256
 
 // MGet looks up many keys and returns one entry per requested key, in the
-// same order. Keys may live on different shards; with a RoutingKey they
-// are all looked up on its shard. Keys that don't fit one
+// same order. Keys may live on different shards: the server gathers them.
+// Keys that don't fit one
 // request frame are sent in more than one request, and when the server's
 // answer fills up before every key in a request is answered, MGet asks
 // again from the first key left.
@@ -82,15 +82,12 @@ func (kv *KVClient) MGet(keys []string, opts *KVMGetOptions) ([]MGetEntry, error
 	if err := checkMGetKeys(keys); err != nil {
 		return nil, err
 	}
-	if err := checkRoutingKey(opts.RoutingKey); err != nil {
-		return nil, err
-	}
 	namespace := kv.client.getNamespace(opts.Namespace)
 	out := make([]MGetEntry, 0, len(keys))
 	for len(out) < len(keys) {
 		rest := keys[len(out):]
 		rest = rest[:mgetBatch(rest)]
-		body, err := encodeMGetBody(rest, opts.RoutingKey)
+		body, err := encodeMGetBody(rest)
 		if err != nil {
 			return nil, err
 		}
@@ -124,10 +121,7 @@ func (kv *KVClient) Delete(key string, opts *DeleteOptions) (bool, error) {
 	if opts == nil {
 		opts = &DeleteOptions{}
 	}
-	body, err := encodeDeleteBody(opts.CASVersion, opts.RoutingKey, nil)
-	if err != nil {
-		return false, err
-	}
+	body := encodeDeleteBody(opts.CASVersion, nil)
 	resp, err := kv.client.sendAndCheck(OpKVDelete, kv.client.getNamespace(opts.Namespace), []byte(key), body, nil, false)
 	if err != nil {
 		return false, err
@@ -182,7 +176,7 @@ func (kv *KVClient) History(key string, opts *HistoryOptions) (*HistoryResult, e
 	if opts.Limit != nil {
 		limit = *opts.Limit
 	}
-	body, err := encodeHistoryBody(limit, opts.BeforeVersion, opts.RoutingKey)
+	body, err := encodeHistoryBody(limit, opts.BeforeVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -209,8 +203,6 @@ type KVIncrOptions struct {
 	Namespace string
 	// Delta is the amount to add (may be negative). Defaults to +1 when nil.
 	Delta *int64
-	// RoutingKey routes the request in place of the key.
-	RoutingKey string
 }
 
 // Incr atomically adds Delta (default +1) to the i64 counter stored at key
@@ -225,10 +217,7 @@ func (kv *KVClient) Incr(key string, opts *KVIncrOptions) (IncrResult, error) {
 	if opts.Delta != nil {
 		delta = *opts.Delta
 	}
-	body, err := encodeIncrBody(delta, opts.RoutingKey, nil)
-	if err != nil {
-		return IncrResult{}, err
-	}
+	body := encodeIncrBody(delta, nil)
 	resp, err := kv.client.sendAndCheck(OpKVIncr, kv.client.getNamespace(opts.Namespace), []byte(key), body, nil, false)
 	if err != nil {
 		return IncrResult{}, err
@@ -250,8 +239,6 @@ type KVExpireOptions struct {
 	// CASVersion, when set, must be the key's version: only the owner
 	// extends a lease.
 	CASVersion *uint64
-	// RoutingKey routes the request in place of the key.
-	RoutingKey string
 }
 
 // Expire sets an existing key's TTL to ttlMs milliseconds (at most
@@ -261,7 +248,7 @@ func (kv *KVClient) Expire(key string, ttlMs uint64, opts *KVExpireOptions) erro
 	if opts == nil {
 		opts = &KVExpireOptions{}
 	}
-	body, err := encodeExpireBody(ttlMs, opts.CASVersion, opts.RoutingKey, nil)
+	body, err := encodeExpireBody(ttlMs, opts.CASVersion, nil)
 	if err != nil {
 		return err
 	}
@@ -275,8 +262,6 @@ func (kv *KVClient) Expire(key string, ttlMs uint64, opts *KVExpireOptions) erro
 // KVExistsOptions contains options for KV Exists operations.
 type KVExistsOptions struct {
 	Namespace string
-	// RoutingKey routes the request in place of the key.
-	RoutingKey string
 }
 
 // Exists reports whether the key is present, without transferring its
@@ -285,15 +270,11 @@ func (kv *KVClient) Exists(key string, opts *KVExistsOptions) (ExistsResult, err
 	if opts == nil {
 		opts = &KVExistsOptions{}
 	}
-	return kv.client.kvExists(kv.client.getNamespace(opts.Namespace), key, opts.RoutingKey, nil)
+	return kv.client.kvExists(kv.client.getNamespace(opts.Namespace), key, nil)
 }
 
-func (c *Client) kvExists(namespace, key, routingKey string, txn *uint64) (ExistsResult, error) {
-	body, err := encodeExistsBody(routingKey, txn)
-	if err != nil {
-		return ExistsResult{}, err
-	}
-	resp, err := c.sendAndCheck(OpKVExists, namespace, []byte(key), body, nil, false)
+func (c *Client) kvExists(namespace, key string, txn *uint64) (ExistsResult, error) {
+	resp, err := c.sendAndCheck(OpKVExists, namespace, []byte(key), encodeExistsBody(txn), nil, false)
 	if err != nil {
 		return ExistsResult{}, err
 	}
@@ -308,8 +289,6 @@ func (c *Client) kvExists(namespace, key, routingKey string, txn *uint64) (Exist
 // KVJsonOptions contains options for JSON operations.
 type KVJsonOptions struct {
 	Namespace string
-	// RoutingKey routes the request in place of the key.
-	RoutingKey string
 }
 
 // JsonGet reads the value at a JSONPath ("" means the root, "$") inside
@@ -320,7 +299,7 @@ func (kv *KVClient) JsonGet(key, path string, opts *KVJsonOptions) (*GetResult, 
 	if opts == nil {
 		opts = &KVJsonOptions{}
 	}
-	body, err := encodeJSONPathBody(path, opts.RoutingKey)
+	body, err := encodeJSONPathBody(path)
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +326,7 @@ func (kv *KVClient) JsonSet(key, path string, jsonValue []byte, opts *KVJsonOpti
 	if opts == nil {
 		opts = &KVJsonOptions{}
 	}
-	body, err := encodeJSONSetBody(path, jsonValue, opts.RoutingKey)
+	body, err := encodeJSONSetBody(path, jsonValue)
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +345,7 @@ func (kv *KVClient) JsonDel(key, path string, opts *KVJsonOptions) (*PutResult, 
 	if opts == nil {
 		opts = &KVJsonOptions{}
 	}
-	body, err := encodeJSONPathBody(path, opts.RoutingKey)
+	body, err := encodeJSONPathBody(path)
 	if err != nil {
 		return nil, err
 	}

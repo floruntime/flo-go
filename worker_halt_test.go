@@ -40,7 +40,7 @@ func warnedHalted(t *testing.T, l *captureLogger, n int) {
 }
 
 // A worker whose shard is halted waits it out and carries on once it's
-// repaired: at registration, at the group join, and at a poll.
+// repaired: at registration and at a poll.
 func TestWorkersWaitOutAHaltedShard(t *testing.T) {
 	fastHeartbeats(t)
 	for _, tc := range []struct {
@@ -51,7 +51,6 @@ func TestWorkersWaitOutAHaltedShard(t *testing.T) {
 		{"action worker registration", false, OpWorkerRegister},
 		{"action worker poll", false, OpActionAwait},
 		{"stream worker registration", true, OpWorkerRegister},
-		{"stream worker group join", true, OpStreamGroupJoin},
 		{"stream worker poll", true, OpStreamGroupRead},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,7 +133,6 @@ func TestOutcomePendingEndsTheWorker(t *testing.T) {
 		{"action worker registration", false, OpWorkerRegister},
 		{"action worker poll", false, OpActionAwait},
 		{"stream worker registration", true, OpWorkerRegister},
-		{"stream worker group join", true, OpStreamGroupJoin},
 		{"stream worker poll", true, OpStreamGroupRead},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -179,7 +177,7 @@ func TestTheHaltedWaitIsCappedAt30s(t *testing.T) {
 	}
 }
 
-// A stop or a drain during a halted wait at registration or the group join
+// A stop or a drain during a halted wait at registration
 // ends Start promptly, and the halted call isn't sent again.
 func TestAStopOrDrainEndsAHaltedWait(t *testing.T) {
 	fastHeartbeats(t)
@@ -193,8 +191,6 @@ func TestAStopOrDrainEndsAHaltedWait(t *testing.T) {
 		{"action registration, drain", false, OpWorkerRegister, true},
 		{"stream registration, stop", true, OpWorkerRegister, false},
 		{"stream registration, drain", true, OpWorkerRegister, true},
-		{"stream group join, stop", true, OpStreamGroupJoin, false},
-		{"stream group join, drain", true, OpStreamGroupJoin, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, addr := newFrameServer(t, haltedFor(tc.op, 1<<30))
@@ -273,7 +269,7 @@ func TestHaltedRefusalsOfResultsAreNotResent(t *testing.T) {
 			t.Cleanup(func() { sw.Close() })
 			sw.ctx, sw.cancel = context.WithCancel(context.Background())
 			sw.pollCtx = sw.ctx
-			sw.processRecord("s", StreamRecord{ID: testID})
+			sw.processRecord("s", testLease, testGroupRecord(), time.Now())
 			if n := len(s.got(OpStreamGroupAck)); n != 1 {
 				t.Errorf("ack sent %d times, want once", n)
 			}

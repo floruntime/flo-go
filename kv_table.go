@@ -31,7 +31,7 @@ func isTableOp(op OpCode) bool {
 
 const (
 	// MaxKVValueSize is the longest value kv.set takes.
-	MaxKVValueSize = 253817
+	MaxKVValueSize = 257916
 	// MaxTTLMs is the longest TTL a key may have.
 	MaxTTLMs = 18446744073709
 	// MaxScanLimit is the most names one Scan page may ask for.
@@ -41,16 +41,14 @@ const (
 	// MaxJSONPathSize is the longest JSON path.
 	MaxJSONPathSize = 1024
 	// MaxJSONDocumentSize is the longest JSON document JsonSet takes.
-	MaxJSONDocumentSize = 252819
+	MaxJSONDocumentSize = 256918
 
-	// maxRoutingKey is the longest routing key; its length prefix is a u16.
-	maxRoutingKey = 4096
 	// maxMGetKey is the longest key one MGet looks up.
 	maxMGetKey = 4096
 	// maxMGetKeyBytes is the most one kv.mget request's encoded keys (each
 	// length and bytes, not the count) may total: the request frame less
-	// the count and the longest routing key.
-	maxMGetKeyBytes = 253848
+	// the count.
+	maxMGetKeyBytes = 257947
 	// maxScanCursor is the longest scan cursor: a shard id (u16), then the
 	// last key read. Its length prefix is a u16.
 	maxScanCursor = 2 + 4096
@@ -89,14 +87,6 @@ func (w *bodyWriter) bytes16(b []byte) {
 func (w *bodyWriter) bytes32(b []byte) {
 	w.u32(uint32(len(b)))
 	w.buf = append(w.buf, b...)
-}
-func (w *bodyWriter) routingKey(k string) {
-	if k == "" {
-		w.u8(0)
-		return
-	}
-	w.u8(1)
-	w.bytes16([]byte(k))
 }
 
 // bodyReader reads an answer field by field. A read past the end, or a
@@ -190,13 +180,6 @@ func (r *bodyReader) done() error {
 	return nil
 }
 
-func checkRoutingKey(k string) error {
-	if len(k) > maxRoutingKey {
-		return fmt.Errorf("flo: routing key is %d bytes, at most %d", len(k), maxRoutingKey)
-	}
-	return nil
-}
-
 func checkTTL(ttl uint64) error {
 	if ttl > MaxTTLMs {
 		return fmt.Errorf("flo: TTL %d ms, at most %d", ttl, MaxTTLMs)
@@ -228,7 +211,7 @@ func absentNow(resp *rawResponse) (bool, error) {
 	return gone, err
 }
 
-// encodeGetBody codes kv.get's request: wait_ms, wait_for, routing_key, txn.
+// encodeGetBody codes kv.get's request: wait_ms, wait_for, txn.
 func encodeGetBody(opts *GetOptions, txn *uint64) ([]byte, error) {
 	if opts.WaitMs > MaxWaitMS {
 		return nil, fmt.Errorf("%w: WaitMs %d, at most %d", ErrBlockTooLong, opts.WaitMs, MaxWaitMS)
@@ -236,30 +219,23 @@ func encodeGetBody(opts *GetOptions, txn *uint64) ([]byte, error) {
 	if opts.WaitFor > WaitForChange {
 		return nil, fmt.Errorf("flo: unknown WaitFor %d", opts.WaitFor)
 	}
-	if err := checkRoutingKey(opts.RoutingKey); err != nil {
-		return nil, err
-	}
-	w := bodyWriter{buf: make([]byte, 0, 32+len(opts.RoutingKey))}
+	w := bodyWriter{buf: make([]byte, 0, 32)}
 	w.u8(1)
 	w.u64(opts.WaitMs)
 	w.u8(1)
 	w.u8(uint8(opts.WaitFor))
-	w.routingKey(opts.RoutingKey)
 	w.optU64(txn)
 	return w.buf, nil
 }
 
 // encodeSetBody codes kv.set's request: value, ttl_ms, condition,
-// cas_version, routing_key, txn.
+// cas_version, txn.
 func encodeSetBody(value []byte, opts *PutOptions, txn *uint64) ([]byte, error) {
 	if len(value) > MaxKVValueSize {
 		return nil, fmt.Errorf("%w: %d bytes, at most %d", ErrValueTooLarge, len(value), MaxKVValueSize)
 	}
 	if opts.Condition > ConditionIfPresent {
 		return nil, fmt.Errorf("flo: unknown Condition %d", opts.Condition)
-	}
-	if err := checkRoutingKey(opts.RoutingKey); err != nil {
-		return nil, err
 	}
 	ttl := opts.TTLMs
 	if ttl != nil && *ttl == 0 {
@@ -270,13 +246,12 @@ func encodeSetBody(value []byte, opts *PutOptions, txn *uint64) ([]byte, error) 
 			return nil, err
 		}
 	}
-	w := bodyWriter{buf: make([]byte, 0, 48+len(value)+len(opts.RoutingKey))}
+	w := bodyWriter{buf: make([]byte, 0, 48+len(value))}
 	w.bytes32(value)
 	w.optU64(ttl)
 	w.u8(1)
 	w.u8(uint8(opts.Condition))
 	w.optU64(opts.CASVersion)
-	w.routingKey(opts.RoutingKey)
 	w.optU64(txn)
 	return w.buf, nil
 }
@@ -306,16 +281,12 @@ func decodeSetAnswer(data []byte) (PutResult, error) {
 	return got, r.done()
 }
 
-// encodeDeleteBody codes kv.delete's request: cas_version, routing_key, txn.
-func encodeDeleteBody(cas *uint64, routingKey string, txn *uint64) ([]byte, error) {
-	if err := checkRoutingKey(routingKey); err != nil {
-		return nil, err
-	}
-	w := bodyWriter{buf: make([]byte, 0, 24+len(routingKey))}
+// encodeDeleteBody codes kv.delete's request: cas_version, txn.
+func encodeDeleteBody(cas *uint64, txn *uint64) []byte {
+	w := bodyWriter{buf: make([]byte, 0, 24)}
 	w.optU64(cas)
-	w.routingKey(routingKey)
 	w.optU64(txn)
-	return w.buf, nil
+	return w.buf
 }
 
 // decodeDeleteAnswer reads kv.delete's answer: whether the key existed,
@@ -374,19 +345,15 @@ func decodeScanAnswer(data []byte) (*ScanResult, error) {
 	return got, nil
 }
 
-// encodeHistoryBody codes kv.history's request: limit, routing_key.
-func encodeHistoryBody(limit uint32, before *uint64, routingKey string) ([]byte, error) {
+// encodeHistoryBody codes kv.history's request: limit, before_version.
+func encodeHistoryBody(limit uint32, before *uint64) ([]byte, error) {
 	if limit < 1 || limit > MaxHistoryLimit {
 		return nil, fmt.Errorf("flo: history limit %d, want 1..%d", limit, MaxHistoryLimit)
 	}
-	if err := checkRoutingKey(routingKey); err != nil {
-		return nil, err
-	}
-	w := bodyWriter{buf: make([]byte, 0, 17+len(routingKey))}
+	w := bodyWriter{buf: make([]byte, 0, 17)}
 	w.u8(1)
 	w.u32(limit)
 	w.optU64(before)
-	w.routingKey(routingKey)
 	return w.buf, nil
 }
 
@@ -435,12 +402,9 @@ func mgetBatch(keys []string) int {
 	return len(keys)
 }
 
-// encodeMGetBody codes kv.mget's request: keys, routing_key.
-func encodeMGetBody(keys []string, routingKey string) ([]byte, error) {
+// encodeMGetBody codes kv.mget's request: keys.
+func encodeMGetBody(keys []string) ([]byte, error) {
 	if err := checkMGetKeys(keys); err != nil {
-		return nil, err
-	}
-	if err := checkRoutingKey(routingKey); err != nil {
 		return nil, err
 	}
 	size := 0
@@ -450,12 +414,11 @@ func encodeMGetBody(keys []string, routingKey string) ([]byte, error) {
 	if size > maxMGetKeyBytes {
 		return nil, fmt.Errorf("flo: mget keys of %d bytes, at most %d", size, maxMGetKeyBytes)
 	}
-	w := bodyWriter{buf: make([]byte, 0, 2+size+3+len(routingKey))}
+	w := bodyWriter{buf: make([]byte, 0, 2+size)}
 	w.u16(uint16(len(keys)))
 	for _, k := range keys {
 		w.bytes16([]byte(k))
 	}
-	w.routingKey(routingKey)
 	return w.buf, nil
 }
 
@@ -490,17 +453,13 @@ func decodeMGetAnswer(data []byte) (mgetAnswer, error) {
 	return got, nil
 }
 
-// encodeIncrBody codes kv.incr's request: delta, routing_key, txn.
-func encodeIncrBody(delta int64, routingKey string, txn *uint64) ([]byte, error) {
-	if err := checkRoutingKey(routingKey); err != nil {
-		return nil, err
-	}
-	w := bodyWriter{buf: make([]byte, 0, 24+len(routingKey))}
+// encodeIncrBody codes kv.incr's request: delta, txn.
+func encodeIncrBody(delta int64, txn *uint64) []byte {
+	w := bodyWriter{buf: make([]byte, 0, 24)}
 	w.u8(1)
 	w.u64(uint64(delta))
-	w.routingKey(routingKey)
 	w.optU64(txn)
-	return w.buf, nil
+	return w.buf
 }
 
 // decodeIncrAnswer reads kv.incr's answer: version and value, both absent
@@ -529,32 +488,23 @@ func decodeIncrAnswer(data []byte) (*IncrResult, error) {
 	return &IncrResult{Version: *version, Value: *value}, nil
 }
 
-// encodeExpireBody codes kv.expire's request: ttl_ms, cas_version,
-// routing_key, txn.
-func encodeExpireBody(ttl uint64, cas *uint64, routingKey string, txn *uint64) ([]byte, error) {
+// encodeExpireBody codes kv.expire's request: ttl_ms, cas_version, txn.
+func encodeExpireBody(ttl uint64, cas *uint64, txn *uint64) ([]byte, error) {
 	if err := checkTTL(ttl); err != nil {
 		return nil, err
 	}
-	if err := checkRoutingKey(routingKey); err != nil {
-		return nil, err
-	}
-	w := bodyWriter{buf: make([]byte, 0, 32+len(routingKey))}
+	w := bodyWriter{buf: make([]byte, 0, 32)}
 	w.u64(ttl)
 	w.optU64(cas)
-	w.routingKey(routingKey)
 	w.optU64(txn)
 	return w.buf, nil
 }
 
-// encodeExistsBody codes kv.exists's request: routing_key, txn.
-func encodeExistsBody(routingKey string, txn *uint64) ([]byte, error) {
-	if err := checkRoutingKey(routingKey); err != nil {
-		return nil, err
-	}
-	w := bodyWriter{buf: make([]byte, 0, 16+len(routingKey))}
-	w.routingKey(routingKey)
+// encodeExistsBody codes kv.exists's request: txn.
+func encodeExistsBody(txn *uint64) []byte {
+	w := bodyWriter{buf: make([]byte, 0, 16)}
 	w.optU64(txn)
-	return w.buf, nil
+	return w.buf
 }
 
 // decodeExistsAnswer reads kv.exists's answer: exists, version.
@@ -578,26 +528,20 @@ func jsonPath(path string) (string, error) {
 	return path, nil
 }
 
-// encodeJSONPathBody codes kv.json_get's and kv.json_del's request: path,
-// routing_key.
-func encodeJSONPathBody(path, routingKey string) ([]byte, error) {
+// encodeJSONPathBody codes kv.json_get's and kv.json_del's request: path.
+func encodeJSONPathBody(path string) ([]byte, error) {
 	path, err := jsonPath(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkRoutingKey(routingKey); err != nil {
-		return nil, err
-	}
-	w := bodyWriter{buf: make([]byte, 0, 6+len(path)+len(routingKey))}
+	w := bodyWriter{buf: make([]byte, 0, 6+len(path))}
 	w.u8(1)
 	w.bytes16([]byte(path))
-	w.routingKey(routingKey)
 	return w.buf, nil
 }
 
-// encodeJSONSetBody codes kv.json_set's request: path, document,
-// routing_key.
-func encodeJSONSetBody(path string, document []byte, routingKey string) ([]byte, error) {
+// encodeJSONSetBody codes kv.json_set's request: path, document.
+func encodeJSONSetBody(path string, document []byte) ([]byte, error) {
 	path, err := jsonPath(path)
 	if err != nil {
 		return nil, err
@@ -605,14 +549,10 @@ func encodeJSONSetBody(path string, document []byte, routingKey string) ([]byte,
 	if len(document) > MaxJSONDocumentSize {
 		return nil, fmt.Errorf("%w: JSON document of %d bytes, at most %d", ErrValueTooLarge, len(document), MaxJSONDocumentSize)
 	}
-	if err := checkRoutingKey(routingKey); err != nil {
-		return nil, err
-	}
-	w := bodyWriter{buf: make([]byte, 0, 10+len(path)+len(document)+len(routingKey))}
+	w := bodyWriter{buf: make([]byte, 0, 10+len(path)+len(document))}
 	w.u8(1)
 	w.bytes16([]byte(path))
 	w.bytes32(document)
-	w.routingKey(routingKey)
 	return w.buf, nil
 }
 

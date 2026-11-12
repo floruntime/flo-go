@@ -318,6 +318,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 	// have served, is sent again with it and gets the delivery it got.
 	var backoff emptyPollBackoff
 	failed := newWorkerBackoff()
+	var limited limitNotice
 	requestKey := randomID(32)
 	for {
 		select {
@@ -380,7 +381,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 						// next poll take work.
 						beats.beat(runCtx.Done())
 					}
-					if waitIfHalted(pollCtx, w.logger, "await", err, &halted) {
+					if waitIfHalted(pollCtx, w.logger, "await", err, &halted) || limited.wait(pollCtx, w.logger, "await", err) {
 						continue
 					}
 					if IsOutcomePending(err) {
@@ -398,6 +399,7 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 			}
 			failed.reset()
 			halted.reset()
+			limited.reset()
 			requestKey = randomID(32)
 
 			if task == nil {

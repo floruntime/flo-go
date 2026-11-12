@@ -96,13 +96,8 @@ func main() {
 	// Consumer groups
 	fmt.Println("\n--- Consumer group operations ---")
 
-	// Join a consumer group
-	if err := stream.GroupJoin("events", "processors", "worker-1", nil); err != nil {
-		log.Fatalf("GroupJoin failed: %v", err)
-	}
-	fmt.Println("Joined consumer group 'processors' as 'worker-1'")
-
-	// Read from consumer group
+	// Read from a consumer group: the records are leased to worker-1 until
+	// acked. The first read creates the group.
 	groupResult, err := stream.GroupRead("events", "processors", "worker-1", &flo.StreamGroupReadOptions{
 		Count: flo.Uint32Ptr(5),
 	})
@@ -111,23 +106,15 @@ func main() {
 	}
 	fmt.Printf("Group read: %d records\n", len(groupResult.Records))
 
-	// Acknowledge processed records
+	// Ack the records within the lease, naming the read's delivery; one not
+	// acked in time is delivered again.
 	if len(groupResult.Records) > 0 {
-		ids := make([]flo.StreamID, len(groupResult.Records))
-		for i, rec := range groupResult.Records {
-			ids[i] = rec.ID
-		}
-		if err := stream.GroupAck("events", "processors", ids, nil); err != nil {
+		report, err := stream.GroupAck("events", "processors", groupResult.Lease, groupResult.Items(), nil)
+		if err != nil {
 			log.Fatalf("GroupAck failed: %v", err)
 		}
-		fmt.Printf("Acknowledged %d records\n", len(ids))
+		fmt.Printf("Acknowledged %d records\n", report.Applied)
 	}
-
-	// Leave consumer group
-	if err := stream.GroupLeave("events", "processors", "worker-1", nil); err != nil {
-		log.Fatalf("GroupLeave failed: %v", err)
-	}
-	fmt.Println("Left consumer group")
 
 	// Trim stream (keep only last 10 records)
 	fmt.Println("\n--- Trimming stream ---")

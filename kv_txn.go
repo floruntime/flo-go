@@ -26,9 +26,12 @@ type KVTxnCASOptions struct {
 
 // KVTransaction is a per-shard KV transaction handle. All operations on the
 // transaction are buffered on the server's pinned shard until Commit or
-// Rollback is called. Every key written or read inside the transaction must
-// hash to the same partition as the routing key passed to Begin; otherwise
-// the server refuses it with ReasonWrongRoutingKey.
+// Rollback is called. A key routes by its {tag}, the part between its first
+// '{' and the '}' after it, or by the whole key when it has none. Every key
+// written or read inside the transaction must route with the key passed to
+// Begin, so give them all the same {tag}: "{user:1}:balance" and
+// "{user:1}:history". A key that routes elsewhere is refused with
+// ReasonKeysNotColocated (bad request, not run).
 //
 // The server caps a transaction at 64 ops and 256 KiB of keys and values
 // unless its operator sets otherwise; an op past either is refused with
@@ -48,7 +51,6 @@ type KVTxnCASOptions struct {
 type KVTransaction struct {
 	client     *Client
 	namespace  string
-	routingKey string
 	id         uint64
 	pinnedHash uint64
 	done       bool
@@ -60,23 +62,20 @@ func (t *KVTransaction) ID() uint64 { return t.id }
 // PinnedHash returns the partition hash this transaction is bound to.
 func (t *KVTransaction) PinnedHash() uint64 { return t.pinnedHash }
 
-// Begin opens a new per-shard transaction pinned to the partition that
-// owns routingKey, which must not be empty. Subsequent operations through
-// the returned KVTransaction must use keys that hash to the same partition.
-// A shard holding as many open transactions as it may returns a
-// ServerError with ReasonTooManyTransactions.
-func (kv *KVClient) Begin(routingKey string, opts *KVBeginOptions) (*KVTransaction, error) {
+// Begin opens a new per-shard transaction pinned to key's {tag}, or to the
+// whole key when it has none; key must not be empty. Every key the
+// transaction then names must route with it. A shard holding as many open
+// transactions as it may returns a ServerError with
+// ReasonTooManyTransactions.
+func (kv *KVClient) Begin(key string, opts *KVBeginOptions) (*KVTransaction, error) {
 	if opts == nil {
 		opts = &KVBeginOptions{}
 	}
-	if routingKey == "" {
-		return nil, errors.New("flo: a transaction needs a routing key")
-	}
-	if err := checkRoutingKey(routingKey); err != nil {
-		return nil, err
+	if key == "" {
+		return nil, errors.New("flo: a transaction is begun with a key")
 	}
 	namespace := kv.client.getNamespace(opts.Namespace)
-	resp, err := kv.client.sendAndCheck(OpKVBeginTxn, namespace, []byte(routingKey), nil, nil, false)
+	resp, err := kv.client.sendAndCheck(OpKVBeginTxn, namespace, []byte(key), nil, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -87,14 +86,13 @@ func (kv *KVClient) Begin(routingKey string, opts *KVBeginOptions) (*KVTransacti
 	return &KVTransaction{
 		client:     kv.client,
 		namespace:  namespace,
-		routingKey: routingKey,
 		id:         id,
 		pinnedHash: pinned,
 	}, nil
 }
 
 // Put buffers a put inside the transaction. Its options work as they do
-// for KVClient.Put; the routing key is the transaction's.
+// for KVClient.Put.
 func (t *KVTransaction) Put(key string, value []byte, opts *PutOptions) (PutResult, error) {
 	if t.done {
 		return PutResult{}, errTxnFinished
@@ -103,7 +101,6 @@ func (t *KVTransaction) Put(key string, value []byte, opts *PutOptions) (PutResu
 	if opts != nil {
 		o = *opts
 	}
-	o.RoutingKey = t.routingKey
 	return t.client.kvSet(t.namespace, key, value, &o, &t.id)
 }
 
@@ -113,7 +110,7 @@ func (t *KVTransaction) Get(key string) (*GetResult, error) {
 	if t.done {
 		return nil, errTxnFinished
 	}
-	return t.client.kvGet(t.namespace, key, &GetOptions{RoutingKey: t.routingKey}, &t.id)
+	return t.client.kvGet(t.namespace, key, &GetOptions{}, &t.id)
 }
 
 // Delete buffers a delete inside the transaction. Whether the key existed
@@ -125,11 +122,7 @@ func (t *KVTransaction) Delete(key string, opts *KVTxnCASOptions) error {
 	if opts == nil {
 		opts = &KVTxnCASOptions{}
 	}
-	body, err := encodeDeleteBody(opts.CASVersion, t.routingKey, &t.id)
-	if err != nil {
-		return err
-	}
-	resp, err := t.client.sendAndCheck(OpKVDelete, t.namespace, []byte(key), body, nil, false)
+	resp, err := t.client.sendAndCheck(OpKVDelete, t.namespace, []byte(key), encodeDeleteBody(opts.CASVersion, &t.id), nil, false)
 	if err != nil {
 		return err
 	}
@@ -143,11 +136,7 @@ func (t *KVTransaction) Incr(key string, delta int64) error {
 	if t.done {
 		return errTxnFinished
 	}
-	body, err := encodeIncrBody(delta, t.routingKey, &t.id)
-	if err != nil {
-		return err
-	}
-	resp, err := t.client.sendAndCheck(OpKVIncr, t.namespace, []byte(key), body, nil, false)
+	resp, err := t.client.sendAndCheck(OpKVIncr, t.namespace, []byte(key), encodeIncrBody(delta, &t.id), nil, false)
 	if err != nil {
 		return err
 	}
@@ -164,7 +153,7 @@ func (t *KVTransaction) Expire(key string, ttlMs uint64, opts *KVTxnCASOptions) 
 	if opts == nil {
 		opts = &KVTxnCASOptions{}
 	}
-	body, err := encodeExpireBody(ttlMs, opts.CASVersion, t.routingKey, &t.id)
+	body, err := encodeExpireBody(ttlMs, opts.CASVersion, &t.id)
 	if err != nil {
 		return err
 	}
@@ -181,7 +170,7 @@ func (t *KVTransaction) Exists(key string) (ExistsResult, error) {
 	if t.done {
 		return ExistsResult{}, errTxnFinished
 	}
-	return t.client.kvExists(t.namespace, key, t.routingKey, &t.id)
+	return t.client.kvExists(t.namespace, key, &t.id)
 }
 
 // Scan is not supported inside a transaction.

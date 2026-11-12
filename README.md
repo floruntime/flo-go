@@ -158,13 +158,9 @@ entries, err := client.KV.MGet([]string{"a", "b", "c"}, nil)
 for _, e := range entries {
     fmt.Printf("%s found=%v v%d %s\n", e.Key, e.Found, e.Version, e.Value)
 }
-
-// Keys written with the same routing key are all on its shard: name it and
-// they are looked up there, not each on its own key's shard.
-entries, err := client.KV.MGet([]string{"user:1:name", "user:1:email"}, &flo.KVMGetOptions{
-    RoutingKey: "user:1",
-})
 ```
+
+The keys may live on different shards: the server gathers them.
 
 #### Scan
 
@@ -250,21 +246,27 @@ put, err = client.KV.JsonDel("user:1", "$", nil)     // deletes the key; put is 
 
 #### Transactions
 
+A key routes by its `{tag}`, the part between its first `{` and the `}` after
+it, or by the whole key when it has none. Keys stored together share a tag.
+
 ```go
-// A transaction is pinned to the shard that owns its routing key; every key
-// in it must route there.
-txn, err := client.KV.Begin("user:1", nil)
+// A transaction is pinned to the {tag} of the key it is begun with; every key
+// in it must share that tag.
+txn, err := client.KV.Begin("{user:1}:name", nil)
 if err != nil {
     return err
 }
 defer txn.Rollback() // no-op after Commit
 
-txn.Put("user:1:name", []byte("Ada"), nil)
-txn.Incr("user:1:logins", 1)
-txn.Expire("user:1:session", 60_000, nil)
-txn.Delete("user:1:old", &flo.KVTxnCASOptions{CASVersion: &version})
+txn.Put("{user:1}:name", []byte("Ada"), nil)
+txn.Incr("{user:1}:logins", 1)
+txn.Expire("{user:1}:session", 60_000, nil)
+txn.Delete("{user:1}:old", &flo.KVTxnCASOptions{CASVersion: &version})
 res, err := txn.Commit()
 ```
+
+A key that routes elsewhere is refused before it is buffered:
+`flo.ErrBadRequest` with `ReasonKeysNotColocated`, ran no.
 
 Scan, MGet, History and the JSON ops are not available inside a transaction.
 The server holds a transaction to 64 ops and 256 KiB of keys and values
@@ -335,6 +337,50 @@ complete, `flo.QueueGone` means done already (a resent complete); any other
 `Why` means that delivery is over and the message was, or will be,
 delivered again.
 
+### Stream consumer groups
+
+A group reads a stream at least once. A group read leases records to its
+consumer: first those ready again (their lease ran out, or they were
+nacked), then the stream's past the group's cursor. Each record carries its
+`Deliveries`, and the read its `Lease`; ack each within the lease (or touch
+it to keep it), or nack it. A record not acked in time is ready for the next
+read; one nacked or expired `MaxDeliver` times (default 5) is dead. The first
+read of a group creates it with a 30 s lease; `GroupCreate` sets another
+(5 s to 12 h) and the attempts, which only a create sets.
+
+```go
+lease, attempts := uint32(60_000), uint8(3)
+_, err := client.Stream.GroupCreate("orders", "billing", &flo.StreamGroupCreateOptions{
+    AckTimeoutMS: &lease, MaxDeliver: &attempts,
+})
+
+block := uint32(30_000)
+read, err := client.Stream.GroupRead("orders", "billing", "worker-1", &flo.StreamGroupReadOptions{BlockMS: &block})
+for _, rec := range read.Records {
+    item := []flo.StreamGroupItem{rec.Item()}
+    if process(rec.Payload) == nil {
+        _, err = client.Stream.GroupAck("orders", "billing", read.Lease, item, nil)
+    } else {
+        _, err = client.Stream.GroupNack("orders", "billing", read.Lease, item, &flo.StreamGroupNackOptions{DelayMS: 5000})
+    }
+}
+// Keep a long one: with half its lease or less left, a touch renews it
+_, err = client.Stream.GroupTouch("orders", "billing", read.Lease, read.Items(), nil)
+```
+
+Ack, nack and touch name the read's lease (consumer, term and index) and each
+record by id and deliveries. Their answer is ok, with `Applied` and, per
+record it didn't apply to, a `StreamGroupRefusal` whose `Why` says why: a
+report naming a delivery that moved on (the lease ran out, the record was
+delivered again, or another consumer holds it) applies nothing. `GroupInfo`
+counts a group's ready, leased and dead records; `GroupPending` lists its
+leased ones. A group's leases are on the log, so a leader change keeps them.
+
+The stream worker (`client.NewStreamWorker`) reads, runs a handler per
+record, and acks it, or nacks it when the handler returns an error.
+`AutoTouch` touches each record every sixth of its group's lease while the
+handler runs; without it, call `sctx.Touch()` from long handlers.
+
 #### DLQ Operations
 
 ```go
@@ -385,6 +431,11 @@ if err != nil {
         // No leader or the shard isn't taking writes, and the client's
         // retries ran out (the message says whether an operator must act
         // first); flo.IsShardHalted(err) when the shard halted
+    } else if flo.IsLimit(err) {
+        // The node is at a limit (the reason says which: its memory budget,
+        // or as many actions, workflow definitions or runs as it keeps).
+        // Retrying won't clear it until something is deleted, the node is
+        // given more room, or the setting is raised; nothing retries it
     } else if flo.IsInternal(err) {
         // Internal server error
     }
@@ -408,10 +459,16 @@ it, this is safe for writes too. Any other refusal, or one that may have run,
 comes straight back. A new leader still applying what earlier leaders
 committed, or a node catching up after a restart, refuses reads and writes
 this way (`unavailable` with reason `leader_unknown`), so those are retried
-too; a long catch-up can outlast the retries. A stream read, group read or claim of records the
-server is reading back from disk is refused `unavailable`, ran no, too, and
-claims and delivers nothing: the stream worker sends its group reads and
-pending-drain claims again, with a backoff, past the client's own retries.
+too; a long catch-up can outlast the retries. A stream read or group read of
+records the server is reading back from disk is refused `unavailable`, ran
+no, too, and leases nothing: the stream worker sends its group reads again,
+with a backoff, past the client's own retries.
+
+A `limit` refusal (`flo.ErrLimit`) is never retried, by the client or a
+worker: it is terminal in that retrying won't clear it until something is
+deleted, the node is given more room, or the setting is raised, though it
+needn't last. A worker whose poll is refused this way logs it once per
+reason and polls again with a backoff of up to 30 s; it doesn't stop.
 
 The client never retries two refusals from a halted shard on your
 requests. `unavailable` with reason `shard_halted` (`flo.IsShardHalted`)
@@ -420,7 +477,7 @@ retry can't succeed. `outcome_pending` (`flo.IsOutcomePending`) is a write that
 committed and hasn't applied: sending it again would write it twice, or halt
 the shard again.
 
-The workers are different: their registration, group join and polls are
+The workers are different: their registration and polls are
 theirs to retry. On `shard_halted` they wait, from 100 ms up to 30 s, logging
 a warning with the server's message each time, and carry on by themselves once
 the shard is repaired; a stop or drain ends the wait. A worker started during a
@@ -452,8 +509,7 @@ request is given back after at most about 350 ms of waiting. The request goes
 again on the same connection; the server routes it afresh.
 
 The action and stream workers wait the same way between failed polls, from
-100 ms up to 5 s, starting again from 100 ms after a poll that succeeds. A
-stream worker retries a group join refused this way instead of stopping.
+100 ms up to 5 s, starting again from 100 ms after a poll that succeeds.
 
 ```go
 // Up to 8 tries, waiting at most 2 s between them

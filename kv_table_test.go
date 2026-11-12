@@ -25,13 +25,13 @@ func cat(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
 func TestPutSendsTheSetBodyFieldByField(t *testing.T) {
 	ttl, cas := uint64(90_500), uint64(7)
 	p := capturePayload(t, func(c *Client) {
-		c.KV.Put("k", []byte("v"), &PutOptions{TTLMs: &ttl, Condition: ConditionIfAbsent, CASVersion: &cas, RoutingKey: "rk"})
+		c.KV.Put("k", []byte("v"), &PutOptions{TTLMs: &ttl, Condition: ConditionIfAbsent, CASVersion: &cas})
 	})
 	_, key, body := tableBody(t, p)
 	if key != "k" {
 		t.Fatalf("key = %q", key)
 	}
-	want := cat([]byte{1, 0, 0, 0, 'v'}, []byte{1}, u64le(ttl), []byte{1, 1}, []byte{1}, u64le(cas), []byte{1, 2, 0, 'r', 'k'}, []byte{0})
+	want := cat([]byte{1, 0, 0, 0, 'v'}, []byte{1}, u64le(ttl), []byte{1, 1}, []byte{1}, u64le(cas), []byte{0})
 	if !bytes.Equal(body, want) {
 		t.Errorf("set body = % x, want % x", body, want)
 	}
@@ -41,18 +41,18 @@ func TestPutWithoutOptionsSendsDefaultsAndAbsences(t *testing.T) {
 	zero := uint64(0)
 	p := capturePayload(t, func(c *Client) { c.KV.Put("k", nil, &PutOptions{TTLMs: &zero}) })
 	_, _, body := tableBody(t, p)
-	// An empty value; a TTL of 0 is none; condition always; no cas, routing key or txn.
-	if want := []byte{0, 0, 0, 0, 0, 1, 0, 0, 0, 0}; !bytes.Equal(body, want) {
+	// An empty value; a TTL of 0 is none; condition always; no cas or txn.
+	if want := []byte{0, 0, 0, 0, 0, 1, 0, 0, 0}; !bytes.Equal(body, want) {
 		t.Errorf("set body = % x, want % x", body, want)
 	}
 }
 
 func TestGetSendsTheGetBody(t *testing.T) {
 	p := capturePayload(t, func(c *Client) {
-		c.KV.Get("k", &GetOptions{WaitMs: 5000, WaitFor: WaitForChange, RoutingKey: "rk"})
+		c.KV.Get("k", &GetOptions{WaitMs: 5000, WaitFor: WaitForChange})
 	})
 	_, _, body := tableBody(t, p)
-	want := cat([]byte{1}, u64le(5000), []byte{1, 1}, []byte{1, 2, 0, 'r', 'k'}, []byte{0})
+	want := cat([]byte{1}, u64le(5000), []byte{1, 1}, []byte{0})
 	if !bytes.Equal(body, want) {
 		t.Errorf("get body = % x, want % x", body, want)
 	}
@@ -61,20 +61,20 @@ func TestGetSendsTheGetBody(t *testing.T) {
 	}
 }
 
-func TestTransactionOpsCarryTheirTxnAndCommitNoRoutingKey(t *testing.T) {
-	txn := &KVTransaction{namespace: "ns", routingKey: "rk", id: 0x0003_0000_0000_0007}
+func TestTransactionOpsCarryTheirTxn(t *testing.T) {
+	txn := &KVTransaction{namespace: "ns", id: 0x0003_0000_0000_0007}
 	p := capturePayload(t, func(c *Client) { txn.client = c; txn.Get("k") })
 	_, _, body := tableBody(t, p)
-	want := cat([]byte{1}, u64le(0), []byte{1, 0}, []byte{1, 2, 0, 'r', 'k'}, []byte{1}, u64le(txn.id))
+	want := cat([]byte{1}, u64le(0), []byte{1, 0}, []byte{1}, u64le(txn.id))
 	if !bytes.Equal(body, want) {
 		t.Errorf("txn get body = % x, want % x", body, want)
 	}
 	p = capturePayload(t, func(c *Client) { txn.client = c; txn.Put("k", []byte("v"), nil) })
 	_, _, body = tableBody(t, p)
-	if !bytes.HasSuffix(body, cat([]byte{1, 2, 0, 'r', 'k'}, []byte{1}, u64le(txn.id))) {
-		t.Errorf("txn put body = % x: want the routing key and the txn last", body)
+	if !bytes.HasSuffix(body, cat([]byte{0, 1}, u64le(txn.id))) {
+		t.Errorf("txn put body = % x: want no cas, then the txn last", body)
 	}
-	rkTxn := cat([]byte{1, 2, 0, 'r', 'k'}, []byte{1}, u64le(txn.id))
+	rkTxn := cat([]byte{1}, u64le(txn.id))
 	for name, call := range map[string]func(){
 		"delete": func() { txn.Delete("k", nil) },
 		"incr":   func() { txn.Incr("k", 3) },
@@ -83,7 +83,7 @@ func TestTransactionOpsCarryTheirTxnAndCommitNoRoutingKey(t *testing.T) {
 	} {
 		p = capturePayload(t, func(c *Client) { txn.client = c; call() })
 		if _, key, body := tableBody(t, p); key != "k" || !bytes.HasSuffix(body, rkTxn) {
-			t.Errorf("txn %s key %q body % x: want the routing key and the txn last", name, key, body)
+			t.Errorf("txn %s key %q body % x: want the txn last", name, key, body)
 		}
 	}
 	casRkTxn := cat([]byte{1}, u64le(5), rkTxn)
@@ -93,7 +93,7 @@ func TestTransactionOpsCarryTheirTxnAndCommitNoRoutingKey(t *testing.T) {
 	} {
 		p = capturePayload(t, func(c *Client) { txn.client = c; call() })
 		if _, _, body := tableBody(t, p); !bytes.HasSuffix(body, casRkTxn) {
-			t.Errorf("txn %s with cas body % x: want cas 5, the routing key and the txn last", name, body)
+			t.Errorf("txn %s with cas body % x: want cas 5, then the txn last", name, body)
 		}
 	}
 	for name, call := range map[string]func(){

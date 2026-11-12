@@ -210,9 +210,8 @@ func streamDrainWorker(t *testing.T, addr string, d time.Duration) (*StreamWorke
 	running := make(chan struct{})
 	finished := &atomic.Bool{}
 	sw, err := NewClient(addr, WithTimeout(time.Second)).NewStreamWorker(StreamWorkerOptions{
-		Stream:                      "s",
-		RedeliverPendingOnReconnect: new(bool),
-		Logger:                      &captureLogger{},
+		Stream: "s",
+		Logger: &captureLogger{},
 	}, func(*StreamContext) error {
 		close(running)
 		time.Sleep(d)
@@ -226,11 +225,12 @@ func streamDrainWorker(t *testing.T, addr string, d time.Duration) (*StreamWorke
 	return sw, running, finished
 }
 
-// ackedBeforeLeave reports whether the server saw the ack before the leave.
-func ackedBeforeLeave(s *frameServer) bool {
+// ackedBeforeDeregister reports whether the server saw the ack before the
+// worker deregistered.
+func ackedBeforeDeregister(s *frameServer) bool {
 	order := s.arrivals()
-	ack, leave := slices.Index(order, OpStreamGroupAck), slices.Index(order, OpStreamGroupLeave)
-	return ack >= 0 && leave > ack
+	ack, gone := slices.Index(order, OpStreamGroupAck), slices.Index(order, OpWorkerDeregister)
+	return ack >= 0 && gone > ack
 }
 
 func TestStreamWorkerStartWaitsForItsHandlersOnStop(t *testing.T) {
@@ -243,12 +243,12 @@ func TestStreamWorkerStartWaitsForItsHandlersOnStop(t *testing.T) {
 	if !finished.Load() {
 		t.Error("Start returned before its record handler finished")
 	}
-	if !ackedBeforeLeave(s) {
-		t.Errorf("want the ack before the group leave, saw %v", s.arrivals())
+	if !ackedBeforeDeregister(s) {
+		t.Errorf("want the ack before the deregister, saw %v", s.arrivals())
 	}
 }
 
-func TestStreamWorkerDrainFinishesItsRecordsThenLeaves(t *testing.T) {
+func TestStreamWorkerDrainFinishesItsRecordsThenDeregisters(t *testing.T) {
 	fastHeartbeats(t)
 	s, addr := newFrameServer(t, pollOnce(OpStreamGroupRead, oneRecord, nil))
 	sw, running, finished := streamDrainWorker(t, addr, 300*time.Millisecond)
@@ -261,8 +261,8 @@ func TestStreamWorkerDrainFinishesItsRecordsThenLeaves(t *testing.T) {
 	if !finished.Load() {
 		t.Error("Start returned before its record handler finished")
 	}
-	if !ackedBeforeLeave(s) {
-		t.Errorf("want the ack before the group leave, saw %v", s.arrivals())
+	if !ackedBeforeDeregister(s) {
+		t.Errorf("want the ack before the deregister, saw %v", s.arrivals())
 	}
 	if n := len(s.got(OpWorkerDrain)); n != 1 {
 		t.Errorf("sent %d drain notices, want 1", n)
@@ -275,9 +275,8 @@ func TestStreamWorkerADrainingHeartbeatLetsHandlersFinish(t *testing.T) {
 	running := make(chan struct{})
 	var cancelled atomic.Bool
 	sw, err := NewClient(addr, WithTimeout(time.Second)).NewStreamWorker(StreamWorkerOptions{
-		Stream:                      "s",
-		RedeliverPendingOnReconnect: new(bool),
-		Logger:                      &captureLogger{},
+		Stream: "s",
+		Logger: &captureLogger{},
 	}, func(ctx *StreamContext) error {
 		close(running)
 		select {
@@ -303,8 +302,8 @@ func TestStreamWorkerADrainingHeartbeatLetsHandlersFinish(t *testing.T) {
 	if n := len(s.got(OpStreamGroupNack)); n != 0 {
 		t.Errorf("saw %d nacks, want 0", n)
 	}
-	if !ackedBeforeLeave(s) {
-		t.Errorf("want the ack before the group leave, saw %v", s.arrivals())
+	if !ackedBeforeDeregister(s) {
+		t.Errorf("want the ack before the deregister, saw %v", s.arrivals())
 	}
 }
 

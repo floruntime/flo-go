@@ -8,10 +8,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 These follow the server's wire. The server's op table changed with them, so
-`TableHash` is now `0x19075df8e1ed5f75`, the hash of flo `5213836`, which CI's
+`TableHash` is now `0xc688167b51fcc846`, the hash of flo `723fd758`, which CI's
 live tests run against; this SDK no longer talks to an older server.
 
 ### Breaking
+
+- Consumer groups lease records, at least once, and their leases are logged,
+  so a leader change keeps them. `StreamClient.GroupRead` returns a
+  `*StreamGroupReadResult`: records with their `Deliveries`, the read's
+  `Lease` (consumer, term, index) and `ExpiresAtMS`. `GroupAck` and
+  `GroupNack` name that lease and each record (`StreamGroupItem`: id and
+  deliveries) and answer a `*StreamGroupReport` with per-record refusals
+  (`GroupRefusalWhy`, the queue report's values); a report naming a delivery
+  that moved on applies nothing. `StreamGroupNackOptions` takes `DelayMS`,
+  `Dead` and `Error`; `StreamGroupAckOptions.Consumer` is gone (the lease
+  names it). A record not acked within its group's lease is ready for the
+  next read; one nacked or expired `MaxDeliver` times (default 5) is dead
+- `GroupJoin`, `GroupLeave`, `GroupClaim`, `StreamGroupJoinOptions`,
+  `StreamClaimResult`, `OpStreamGroupJoin`, `OpStreamGroupLeave`,
+  `OpStreamGroupClaim` and `OpStreamGroupConfigureSweeper` are gone: the
+  server refuses those ops. A read takes expired and nacked records before
+  new ones; a group's members are the consumers holding its records
+- `GroupPending` takes `*StreamInfoOptions` and lists up to 100 leased
+  records; `PendingEntry.DeliveryCount` is `Deliveries`. A group name is at
+  most 256 bytes (`MaxGroupNameSize`)
+- The stream worker no longer joins, leaves or claims: its
+  `RedeliverPendingOnReconnect` and `ClaimMinIdleMS` options are gone, since
+  a lease that runs out redelivers by itself. It acks and nacks naming each
+  record's delivery
+- KV's routing key is gone: `RoutingKey` is removed from `GetOptions`,
+  `PutOptions`, `DeleteOptions`, `HistoryOptions`, `KVMGetOptions`,
+  `KVIncrOptions`, `KVExpireOptions`, `KVExistsOptions` and `KVJsonOptions`.
+  A key routes by its `{tag}`, or the whole key when it has none; keys stored
+  together share a tag. `MGet` gathers keys across shards on the server
+- `KV.Begin` takes a key, and pins the transaction to its `{tag}` (the whole
+  key without one). `ReasonWrongRoutingKey` is `ReasonKeysNotColocated`
+  (18): a key in the transaction that routes elsewhere, refused as a bad
+  request that didn't run
+- `MaxKVValueSize` is 257,916 bytes and `MaxJSONDocumentSize` 256,918
 
 - Queues are leased until completed, at least once. `QueueClient.Dequeue`
   (0x181) takes `DequeueOptions.Consumer`, `LeaseMS` and `Ack`, and returns
@@ -99,13 +133,24 @@ live tests run against; this SDK no longer talks to an older server.
 
 ### Added
 
+- `StatusLimit` (15), `ErrLimit` and `IsLimit`, with `ReasonMemoryBudget`,
+  `ReasonTooManyActions`, `ReasonTooManyWorkflowDefinitions` and
+  `ReasonTooManyWorkflowRuns`: the node is at a limit. It is never retried:
+  retrying won't clear it until something is deleted, the node is given
+  more room, or the setting is raised. A worker refused this way logs it
+  once per reason and polls again with a backoff of up to 30 s
+- `StreamClient.GroupCreate` (lease 5 s to 12 h and attempts),
+  `GroupTouch`, `GroupInfo` and `GroupDelete`; `OptDead` and `OptErrorText`
+- `StreamWorkerOptions.AutoTouch`, `StreamContext.Touch` and
+  `StreamContext.Deliveries`: a touch every sixth of the group's lease, as
+  the action worker's
+
 - `EnqueueOptions.DelayMS`, which the server applies, and
   `QueueClient.Purge`
 - A full queue's refusal (`overloaded`, ran no) is retried as any other,
   then returned with the server's message
-- The stream worker sends group reads and pending-drain claims refused
-  `unavailable` (ran no), as when records are read back from disk, again
-  with a backoff; the claim loop no longer gives up until the next reconnect
+- The stream worker sends group reads refused `unavailable` (ran no), as
+  when records are read back from disk, again with a backoff
 - `Stale` also marks a read from a node blocked reading its log, or diverged
 
 - `MaxHoldMS`: the longest the server holds one delivery, 12 h, however
