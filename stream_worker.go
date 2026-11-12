@@ -174,10 +174,6 @@ type StreamWorker struct {
 	// running counts the record handlers running, for heartbeats.
 	running atomic.Int32
 
-	// leases caches each stream's group lease in ms, for AutoTouch.
-	leaseMu sync.Mutex
-	leases  map[string]uint64
-
 	// Local counters (not sent in heartbeats — server tracks authoritatively)
 	messagesProcessed uint64
 	messagesFailed    uint64
@@ -298,7 +294,6 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 		handler:     handler,
 		logger:      opts.Logger,
 		drain:       newDrainState(),
-		leases:      map[string]uint64{},
 	}, nil
 }
 
@@ -500,8 +495,22 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 			// keep their lease too.
 			touch := sw.startTouching(stream, result, time.Now())
 
-			for _, record := range result.Records {
-				sem <- struct{}{} // concurrency gate
+			for i, record := range result.Records {
+				// A record not started by a stop is handed back, not run
+				// with a cancelled context.
+				slot := false
+				select {
+				case sem <- struct{}{}: // concurrency gate
+					slot = true
+				case <-sw.ctx.Done():
+				}
+				if sw.ctx.Err() != nil {
+					if slot {
+						<-sem
+					}
+					sw.handBack(stream, result.Lease, result.Records[i:], touch)
+					break
+				}
 				sw.handlers.Add(1)
 				go func(rec StreamGroupRecord) {
 					defer sw.handlers.Done()
@@ -600,27 +609,6 @@ func (sw *StreamWorker) processRecord(stream string, lease StreamGroupLease, rec
 	sw.reportWithRetry(stream, lease, record, true, "")
 }
 
-// leaseOf returns stream's group lease in ms, looked up once with
-// GroupList. Until it is known it is the shortest a lease may be, which
-// only touches more often than needed.
-func (sw *StreamWorker) leaseOf(stream string) uint64 {
-	sw.leaseMu.Lock()
-	defer sw.leaseMu.Unlock()
-	if l, ok := sw.leases[stream]; ok {
-		return l
-	}
-	list, err := sw.ackClient.Stream.GroupList(stream, nil)
-	if err == nil {
-		for _, g := range list.Groups {
-			if g.Name == sw.config.Group {
-				sw.leases[stream] = uint64(g.AckTimeoutMS)
-				return uint64(g.AckTimeoutMS)
-			}
-		}
-	}
-	return MinGroupAckTimeoutMS
-}
-
 // readToucher keeps one read's unacked records leased: each touch names
 // the read's delivery and the records not yet acked or nacked.
 type readToucher struct {
@@ -654,9 +642,9 @@ func (t *readToucher) pending() []StreamGroupItem {
 	return out
 }
 
-// startTouching touches a read's records every touchInterval of the
-// group's lease from when they arrived, whether their handlers have started
-// or are waiting for a slot, until each is acked or nacked. The nth touch is
+// startTouching touches a read's records every touchInterval of the lease
+// the read's expiry gives, from when they arrived, whether their handlers
+// have started or are waiting for a slot, until each is acked or nacked. The nth touch is
 // due at arrival plus n intervals, a slot that passed during a slow touch
 // skipped, and never later than an interval before the lease runs out by
 // the server's last word: each touch's answer gives the expiry in the
@@ -673,17 +661,19 @@ func (sw *StreamWorker) startTouching(stream string, read *StreamGroupReadResult
 	for _, r := range read.Records {
 		t.items[r.ID] = r.Item()
 	}
-	leaseMS := sw.leaseOf(stream)
-	lease := time.Duration(leaseMS) * time.Millisecond
-	interval := touchInterval(leaseMS)
-	// serverAhead is how far the server's clock reads past this one's: the
-	// read's lease ran from the server's now, which this side saw as arrived.
-	var serverAhead time.Duration
-	localExpiry := arrived.Add(lease)
-	if read.ExpiresAtMS > 0 {
-		serverAhead = time.UnixMilli(read.ExpiresAtMS).Add(-lease).Sub(arrived)
+	// The lease is what the read's expiry leaves from arrival, within a
+	// lease's bounds. serverAhead is how far the server's clock reads past
+	// this one's, as far as the bounds show it.
+	lease := time.UnixMilli(read.ExpiresAtMS).Sub(arrived)
+	if lease <= 0 {
+		lease = MinGroupAckTimeoutMS * time.Millisecond
 	}
+	lease = min(lease, MaxGroupAckTimeoutMS*time.Millisecond)
+	interval := touchInterval(uint64(lease / time.Millisecond))
+	localExpiry := arrived.Add(lease)
+	serverAhead := time.UnixMilli(read.ExpiresAtMS).Sub(localExpiry)
 	go func() {
+		warned := map[Reason]bool{}
 		next := arrived.Add(interval)
 		timer := time.NewTimer(time.Until(next))
 		defer timer.Stop()
@@ -721,6 +711,11 @@ func (sw *StreamWorker) startTouching(stream string, read *StreamGroupReadResult
 			case IsConnectionError(err):
 				sw.logger.Printf("[%s] Touch lost: %v; reconnecting", stream, err)
 				_ = sw.reconnectAck()
+			case IsLimit(err):
+				if errors.As(err, &se) && !warned[se.Reason] {
+					warned[se.Reason] = true
+					sw.logger.Printf("[%s] Touch refused at a limit: %v; trying again", stream, err)
+				}
 			default:
 				sw.logger.Printf("[%s] Touch failed: %v; trying again", stream, err)
 			}
@@ -782,6 +777,28 @@ func (sw *StreamWorker) reportWithRetry(stream string, lease StreamGroupLease, r
 	}
 }
 
+// handBack nacks records a stop left unstarted, at once and in one
+// report: each spends an attempt, so one at its last is dead.
+func (sw *StreamWorker) handBack(stream string, lease StreamGroupLease, records []StreamGroupRecord, touch *readToucher) {
+	items := make([]StreamGroupItem, len(records))
+	for i, r := range records {
+		touch.drop(r.ID)
+		items[i] = r.Item()
+	}
+	opts := &StreamGroupNackOptions{Error: "worker stopped before handling it"}
+	for attempt := 1; ; attempt++ {
+		_, err := sw.ackClient.Stream.GroupNack(stream, sw.config.Group, lease, items, opts)
+		if err == nil {
+			sw.logger.Printf("[%s] Handed back %d records not started before the stop", stream, len(items))
+			return
+		}
+		if !resultLost(err) || attempt == 3 || sw.reconnectAck() != nil {
+			sw.logger.Printf("Error: [%s] could not hand back %d records, they come back once their lease runs out: %v", stream, len(items), err)
+			return
+		}
+	}
+}
+
 // truncateError cuts a nack's error to what the server takes.
 func truncateError(s string) string {
 	if len(s) > maxGroupNackError {
@@ -808,8 +825,8 @@ func (sw *StreamWorker) reconnectAck() error {
 	return nil
 }
 
-// Drain stops reading new records and lets running handlers finish and ack,
-// then Start leaves the groups and returns nil. The server is told; the
+// Drain stops reading new records and lets the records already read finish
+// and ack, then Start returns nil. The server is told; the
 // notice is retried while the worker is disconnected. A held GroupRead
 // doesn't hold it up: the poll connection is closed, since the server
 // doesn't answer it on a drain. A Stop during a drain still cancels the
@@ -823,7 +840,10 @@ func (sw *StreamWorker) Drain() {
 	}
 }
 
-// Stop gracefully stops the stream worker.
+// Stop stops the stream worker: it reads nothing more and cancels the
+// running handlers' contexts. Records a read took that haven't started are
+// not run: they are handed back at once with a nack, which spends one of
+// their attempts, so with MaxDeliver 1 it leaves them dead.
 func (sw *StreamWorker) Stop() {
 	sw.logger.Printf("Stopping stream worker...")
 	sw.runMu.Lock()

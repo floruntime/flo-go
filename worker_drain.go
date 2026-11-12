@@ -194,7 +194,7 @@ func (b *beater) start(interval time.Duration) (stop func()) {
 	}
 }
 
-// sendOnPoll sends a closing request (deregister, group leave) on a poll
+// sendOnPoll sends a closing request (a deregister) on a poll
 // connection that a Stop or drain may have cut, reconnecting once.
 func sendOnPoll(c *Client, closeCtx context.Context, send func() error) {
 	if err := send(); err == nil || !IsConnectionError(err) {

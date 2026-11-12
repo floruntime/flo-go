@@ -327,15 +327,6 @@ func TestAWorkerLoopWarnsOfALimitOncePerReason(t *testing.T) {
 	}
 }
 
-// groupListWith answers stream.group.list with the default group at
-// leaseMS.
-func groupListWith(leaseMS uint32) []byte {
-	list := binary.LittleEndian.AppendUint16(nil, 1)
-	list = binary.LittleEndian.AppendUint16(list, 7)
-	list = append(list, "default"...)
-	return cat(list, []byte{0, 0, 0, 0}, u64le(0), u64le(0), binary.LittleEndian.AppendUint32(nil, leaseMS), []byte{5}, u64le(0), u64le(0), []byte{0})
-}
-
 // readOf is a group read answer leasing n records, ids (1, 1..n), under
 // delivery (2, 7), expiring at expiresAt.
 func readOf(n int, expiresAt int64) []byte {
@@ -361,10 +352,8 @@ func touchItems(t *testing.T, frame []byte) int {
 func TestStreamWorkerAutoTouchesWaitingRecordsFromArrival(t *testing.T) {
 	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
 		switch {
-		case op == OpStreamGroupList:
-			return reply{body: groupListWith(600)} // touch every 100 ms
 		case op == OpStreamGroupRead && n == 0:
-			return reply{body: readOf(3, 0)}
+			return reply{body: readOf(3, time.Now().UnixMilli()+600)} // touch every 100 ms
 		case op == OpStreamGroupRead:
 			time.Sleep(20 * time.Millisecond)
 		}
@@ -398,18 +387,15 @@ func TestStreamWorkerAutoTouchesWaitingRecordsFromArrival(t *testing.T) {
 }
 
 // AutoTouch paces by the server's word: a touch answer saying the lease runs
-// out sooner than this clock expects brings the next touch forward.
+// out sooner than the schedule expects brings the next touch forward.
 func TestStreamWorkerAutoTouchRecalibratesFromTheServersExpiry(t *testing.T) {
-	const skew = -3000 // the server's clock runs 3 s behind
-	serverNow := func() int64 { return time.Now().UnixMilli() + skew }
+	serverNow := func() int64 { return time.Now().UnixMilli() }
 	var mu sync.Mutex
 	var touchedAt []time.Time
 	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
 		switch {
-		case op == OpStreamGroupList:
-			return reply{body: groupListWith(6000)} // touch every 1 s
 		case op == OpStreamGroupRead && n == 0:
-			return reply{body: readOf(1, serverNow()+6000)}
+			return reply{body: readOf(1, serverNow()+6000)} // touch every 1 s
 		case op == OpStreamGroupRead:
 			time.Sleep(20 * time.Millisecond)
 		case op == OpStreamGroupTouch:
@@ -446,10 +432,8 @@ func TestStreamWorkerAutoTouchRecalibratesFromTheServersExpiry(t *testing.T) {
 func TestStreamWorkerAutoTouchRetriesTransientErrors(t *testing.T) {
 	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
 		switch {
-		case op == OpStreamGroupList:
-			return reply{body: groupListWith(600)}
 		case op == OpStreamGroupRead && n == 0:
-			return reply{body: readOf(1, 0)}
+			return reply{body: readOf(1, time.Now().UnixMilli()+600)}
 		case op == OpStreamGroupRead:
 			time.Sleep(20 * time.Millisecond)
 		case op == OpStreamGroupTouch && n == 0:
@@ -580,5 +564,41 @@ func TestAWorkerStartWaitsOutAnOverloadedRegistration(t *testing.T) {
 		if n := len(s.got(OpWorkerRegister)); n < 3 {
 			t.Errorf("stream=%v: %d registrations, want the refused ones and one more", stream, n)
 		}
+	}
+}
+
+// A stop runs no more of a read's records: those not started are handed
+// back at once, in one nack, and Start doesn't wait for them.
+func TestStreamWorkerStopHandsBackUnstartedRecords(t *testing.T) {
+	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
+		switch {
+		case op == OpStreamGroupRead && n == 0:
+			return reply{body: readOf(3, time.Now().UnixMilli()+30000)}
+		case op == OpStreamGroupRead:
+			time.Sleep(20 * time.Millisecond)
+		}
+		return reply{}
+	})
+	started := make(chan struct{}, 3)
+	sw, err := NewClient(addr, WithTimeout(time.Second)).NewStreamWorker(StreamWorkerOptions{Stream: "s", Concurrency: 1, Logger: &captureLogger{}},
+		func(sctx *StreamContext) error { started <- struct{}{}; <-sctx.Ctx().Done(); return sctx.Ctx().Err() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sw.Close() })
+	done := startWorker(sw.Start)
+	<-started
+	sw.Stop()
+	waitStart(t, done)
+	if n := len(started); n != 0 {
+		t.Errorf("%d more handlers ran after the stop, want none", n)
+	}
+	nacks := s.got(OpStreamGroupNack)
+	if len(nacks) != 2 {
+		t.Fatalf("%d nacks, want 2: the stopped handler's, and one handing back the rest", len(nacks))
+	}
+	counts := []int{touchItems(t, nacks[0]), touchItems(t, nacks[1])}
+	if !(counts[0] == 2 && counts[1] == 1 || counts[0] == 1 && counts[1] == 2) {
+		t.Errorf("nacks named %v records, want 1 and 2", counts)
 	}
 }

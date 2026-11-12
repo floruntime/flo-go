@@ -143,8 +143,15 @@ live tests run against; this SDK no longer talks to an older server.
 - `StreamClient.GroupCreate` (lease 5 s to 12 h and attempts),
   `GroupTouch`, `GroupInfo` and `GroupDelete`; `OptDead` and `OptErrorText`
 - `StreamWorkerOptions.AutoTouch`, `StreamContext.Touch` and
-  `StreamContext.Deliveries`: a touch every sixth of the group's lease, as
-  the action worker's
+  `StreamContext.Deliveries`. AutoTouch touches a read's records from
+  arrival, waiting ones too, every sixth of the lease the read's expiry
+  gives, paced by each touch answer's expiry; it stops only on a conflict,
+  not found or bad request
+- A stopped stream worker runs none of a read's unstarted records: one nack
+  hands them back, spending an attempt each
+- A worker's registration waits out a halted shard or an overloaded or
+  unavailable refusal that didn't run; any other refusal, a limit included,
+  fails `Start` with it
 
 - `EnqueueOptions.DelayMS`, which the server applies, and
   `QueueClient.Purge`

@@ -378,8 +378,14 @@ leased ones. A group's leases are on the log, so a leader change keeps them.
 
 The stream worker (`client.NewStreamWorker`) reads, runs a handler per
 record, and acks it, or nacks it when the handler returns an error.
-`AutoTouch` touches each record every sixth of its group's lease while the
-handler runs; without it, call `sctx.Touch()` from long handlers.
+`AutoTouch` touches a read's records from when they arrive, those waiting
+for a handler slot too, every sixth of the lease the read's expiry gives,
+until each is acked or nacked. It paces by the expiry each touch answers,
+retries a touch that fails for a passing reason, and stops only on a
+conflict (a stale report), not found or bad request. Without it, call
+`sctx.Touch()` from long handlers. `Stop` runs none of a read's records not
+yet started: it hands them back with a nack, which spends one of their
+attempts (with `MaxDeliver` 1 they are dead).
 
 #### DLQ Operations
 
