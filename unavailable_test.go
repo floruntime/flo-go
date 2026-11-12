@@ -1,14 +1,12 @@
 package flo
 
 import (
-	"context"
-	"encoding/binary"
 	"strings"
 	"testing"
 	"time"
 )
 
-// notServedYet refuses as the server does a group read or claim of records
+// notServedYet refuses as the server does a group read of records
 // it is reading back from disk: unavailable, ran no.
 var notServedYet = reply{status: StatusUnavailable, body: refusalBody(ReasonUnclassified, RanNo, "unavailable: records past the warm store are being read back from disk; retry")}
 
@@ -49,42 +47,5 @@ func TestAStreamWorkerRereadsAGroupReadRefusedUnavailable(t *testing.T) {
 		if strings.Contains(line, "GroupRead error") {
 			t.Errorf("a refusal that ran nothing was logged as an error: %q", line)
 		}
-	}
-}
-
-// A pending-drain claim refused unavailable (ran no) is sent again from the
-// same cursor, not abandoned until the next reconnect.
-func TestAPendingDrainClaimRefusedUnavailableIsSentAgain(t *testing.T) {
-	done := make([]byte, 16)
-	binary.LittleEndian.PutUint64(done[0:], ^uint64(0))
-	binary.LittleEndian.PutUint64(done[8:], ^uint64(0))
-	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
-		if op == OpStreamGroupClaim {
-			if n < 6 {
-				return notServedYet
-			}
-			return reply{body: append(append([]byte{}, oneRecord...), done...)}
-		}
-		return reply{}
-	})
-	sw, running, _ := streamDrainWorker(t, addr, 0)
-	if err := sw.client.Connect(); err != nil {
-		t.Fatal(err)
-	}
-	if err := sw.ackClient.Connect(); err != nil {
-		t.Fatal(err)
-	}
-	sw.ctx, sw.cancel = context.WithCancel(context.Background())
-	sw.pollCtx = sw.ctx
-	sw.sem = make(chan struct{}, 1)
-	sw.drainPending()
-	select {
-	case <-running:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("the claimed record was never handled; %d claims", len(s.got(OpStreamGroupClaim)))
-	}
-	sw.handlers.Wait()
-	if n := len(s.got(OpStreamGroupClaim)); n != 7 {
-		t.Errorf("%d claims, want 7: six refused, then the one served", n)
 	}
 }

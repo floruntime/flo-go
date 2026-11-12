@@ -122,6 +122,15 @@ var (
 	// that was never created return it; a write creates the namespace.
 	ErrNoNamespace = &ServerError{Status: StatusNoNamespace}
 
+	// ErrLimit matches a refusal from a node at a limit it holds to: its
+	// memory budget, or as many actions, workflow definitions or workflow
+	// runs as it keeps. The error is a *ServerError whose Reason names the
+	// limit and whose Message is the server's. It is terminal: retrying
+	// won't clear it until something is deleted, the node is given more
+	// room, or the setting is raised. It doesn't mean permanent, but no
+	// retry loop in this SDK resends it. It never ran.
+	ErrLimit = &ServerError{Status: StatusLimit}
+
 	// ErrStaleReport matches a *StaleReportError.
 	ErrStaleReport = errors.New("flo: stale report")
 )
@@ -206,6 +215,11 @@ func IsNotFound(err error) bool {
 // IsNoNamespace reports a request naming a namespace that doesn't exist.
 func IsNoNamespace(err error) bool {
 	return errors.Is(err, ErrNoNamespace)
+}
+
+// IsLimit reports a refusal from a node at a limit (ErrLimit).
+func IsLimit(err error) bool {
+	return errors.Is(err, ErrLimit)
 }
 
 // IsConflict returns true if the error is a conflict error.

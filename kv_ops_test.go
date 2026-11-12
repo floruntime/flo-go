@@ -40,19 +40,17 @@ func TestKVRequestBodiesMatchTheServer(t *testing.T) {
 		got  []byte
 		want string
 	}{
-		{"delete", enc(encodeDeleteBody(&cas, "rk", nil)), "010700000000000000010200726b00"},
+		{"delete", encodeDeleteBody(&cas, nil), "01070000000000000000"},
 		{"scan", enc(encodeScanBody(2, []byte("c1"))), "010200000002006331"},
-		{"history", enc(encodeHistoryBody(2, nil, "")), "01020000000000"},
-		{"history before a version", enc(encodeHistoryBody(2, Uint64Ptr(5), "")), "0102000000010500000000000000" + "00"},
-		{"history with routing key", enc(encodeHistoryBody(2, nil, "rk")), "010200000000010200726b"},
-		{"mget", enc(encodeMGetBody([]string{"a", "b"}, "")), "020001006101006200"},
-		{"mget with routing key", enc(encodeMGetBody([]string{"a", "b"}, "rk")), "0200010061010062010200726b"},
-		{"incr", enc(encodeIncrBody(-5, "", &txn9)), "01fbffffffffffffff00010900000000000000"},
-		{"expire", enc(encodeExpireBody(60000, nil, "", nil)), "60ea000000000000000000"},
-		{"exists", enc(encodeExistsBody("", nil)), "0000"},
-		{"json_get", enc(encodeJSONPathBody("$.a", "")), "010300242e6100"},
-		{"json_set", enc(encodeJSONSetBody("$", []byte("{}"), "rk")), "01010024020000007b7d010200726b"},
-		{"json_del", enc(encodeJSONPathBody("$.b", "")), "010300242e6200"},
+		{"history", enc(encodeHistoryBody(2, nil)), "010200000000"},
+		{"history before a version", enc(encodeHistoryBody(2, Uint64Ptr(5))), "0102000000010500000000000000"},
+		{"mget", enc(encodeMGetBody([]string{"a", "b"})), "0200010061010062"},
+		{"incr", encodeIncrBody(-5, &txn9), "01fbffffffffffffff010900000000000000"},
+		{"expire", enc(encodeExpireBody(60000, nil, nil)), "60ea0000000000000000"},
+		{"exists", encodeExistsBody(nil), "00"},
+		{"json_get", enc(encodeJSONPathBody("$.a")), "010300242e61"},
+		{"json_set", enc(encodeJSONSetBody("$", []byte("{}"))), "01010024020000007b7d"},
+		{"json_del", enc(encodeJSONPathBody("$.b")), "010300242e62"},
 		{"txn_commit", encodeTxnBody(1), "0100000000000000"},
 	}
 	for _, c := range cases {
@@ -61,7 +59,7 @@ func TestKVRequestBodiesMatchTheServer(t *testing.T) {
 		}
 	}
 	// An empty path is the root.
-	if got := enc(encodeJSONPathBody("", "")); !bytes.Equal(got, hx(t, "0101002400")) {
+	if got := enc(encodeJSONPathBody("")); !bytes.Equal(got, hx(t, "01010024")) {
 		t.Errorf("root path body = %x", got)
 	}
 }
@@ -323,7 +321,7 @@ func TestMGetSplitsKeysAcrossRequestsThatFitTheFrame(t *testing.T) {
 	for i := range keys {
 		keys[i] = fmt.Sprintf("%04d", i) + string(bytes.Repeat([]byte{'k'}, 1996))
 	}
-	got, err := c.KV.MGet(keys, &KVMGetOptions{RoutingKey: "rk"})
+	got, err := c.KV.MGet(keys, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,15 +333,12 @@ func TestMGetSplitsKeysAcrossRequestsThatFitTheFrame(t *testing.T) {
 			t.Fatalf("entry %d = %q found=%v, want key %d", i, e.Key[:4], e.Found, i)
 		}
 	}
-	// 2002 bytes per key: 126 keys fit 253848 bytes, 127 don't.
-	if want := []int{126, 74}; !reflect.DeepEqual(counts, want) {
+	// 2002 bytes per key: 128 keys fit 257947 bytes, 129 don't.
+	if want := []int{128, 72}; !reflect.DeepEqual(counts, want) {
 		t.Errorf("requests carried %v keys, want %v", counts, want)
 	}
 	for i, body := range bodies {
-		if !bytes.HasSuffix(body, []byte{1, 2, 0, 'r', 'k'}) {
-			t.Errorf("request %d does not end with the routing key", i)
-		}
-		if keyBytes := len(body) - 2 - 5; keyBytes > maxMGetKeyBytes {
+		if keyBytes := len(body) - 2; keyBytes > maxMGetKeyBytes {
 			t.Errorf("request %d carries %d bytes of keys, at most %d", i, keyBytes, maxMGetKeyBytes)
 		}
 	}
@@ -400,12 +395,12 @@ func TestKVOpsSendTheirEnvelopeKey(t *testing.T) {
 			c.KV.Scan("user:", &ScanOptions{Limit: &limit, Cursor: []byte("c1")})
 		}},
 		{"scan defaults its limit", "", hx(t, "01000400000000"), func(c *Client) { c.KV.Scan("", nil) }},
-		{"history defaults its limit", "k", hx(t, "010a0000000000"), func(c *Client) { c.KV.History("k", nil) }},
-		{"incr defaults its delta", "k", cat([]byte{1}, u64le(1), []byte{0, 0}), func(c *Client) { c.KV.Incr("k", nil) }},
-		{"expire carries its cas", "k", cat(u64le(0), []byte{1}, u64le(4), []byte{0, 0}), func(c *Client) {
+		{"history defaults its limit", "k", hx(t, "010a00000000"), func(c *Client) { c.KV.History("k", nil) }},
+		{"incr defaults its delta", "k", cat([]byte{1}, u64le(1), []byte{0}), func(c *Client) { c.KV.Incr("k", nil) }},
+		{"expire carries its cas", "k", cat(u64le(0), []byte{1}, u64le(4), []byte{0}), func(c *Client) {
 			c.KV.Expire("k", 0, &KVExpireOptions{CASVersion: Uint64Ptr(4)})
 		}},
-		{"begin names the routing key", "rk", nil, func(c *Client) { c.KV.Begin("rk", nil) }},
+		{"begin names its key", "{t}a", nil, func(c *Client) { c.KV.Begin("{t}a", nil) }},
 	}
 	for _, tc := range cases {
 		_, key, body := tableBody(t, capturePayload(t, tc.call))
@@ -421,7 +416,6 @@ func TestOutOfBoundKVRequestsAreRefusedBeforeARoundTrip(t *testing.T) {
 		return StatusOK, nil
 	})
 	zero, overScan, overHistory := uint32(0), uint32(MaxScanLimit+1), uint32(MaxHistoryLimit+1)
-	longRK := string(make([]byte, maxRoutingKey+1))
 	many := make([]string, MaxMGetKeys+1)
 	refused := map[string]error{}
 	_, refused["scan limit 0"] = c.KV.Scan("", &ScanOptions{Limit: &zero})
@@ -430,18 +424,12 @@ func TestOutOfBoundKVRequestsAreRefusedBeforeARoundTrip(t *testing.T) {
 	_, refused["history limit 0"] = c.KV.History("k", &HistoryOptions{Limit: &zero})
 	_, refused["history limit over"] = c.KV.History("k", &HistoryOptions{Limit: &overHistory})
 	_, refused["mget over"] = c.KV.MGet(many, nil)
-	_, refused["mget routing key over"] = c.KV.MGet([]string{"a"}, &KVMGetOptions{RoutingKey: longRK})
 	_, refused["mget key over"] = c.KV.MGet([]string{"a", string(make([]byte, maxMGetKey+1))}, nil)
-	_, refused["history routing key over"] = c.KV.History("k", &HistoryOptions{RoutingKey: longRK})
 	refused["expire ttl over"] = c.KV.Expire("k", MaxTTLMs+1, nil)
 	_, refused["put ttl over"] = c.KV.Put("k", nil, &PutOptions{TTLMs: Uint64Ptr(MaxTTLMs + 1)})
-	_, refused["delete routing key over"] = c.KV.Delete("k", &DeleteOptions{RoutingKey: longRK})
-	_, refused["incr routing key over"] = c.KV.Incr("k", &KVIncrOptions{RoutingKey: longRK})
-	_, refused["exists routing key over"] = c.KV.Exists("k", &KVExistsOptions{RoutingKey: longRK})
 	_, refused["json path over"] = c.KV.JsonGet("k", string(make([]byte, MaxJSONPathSize+1)), nil)
 	_, refused["json document over"] = c.KV.JsonSet("k", "$", make([]byte, MaxJSONDocumentSize+1), nil)
-	_, refused["begin without routing key"] = c.KV.Begin("", nil)
-	_, refused["begin routing key over"] = c.KV.Begin(longRK, nil)
+	_, refused["begin without a key"] = c.KV.Begin("", nil)
 	for name, err := range refused {
 		if err == nil {
 			t.Errorf("%s: no error", name)
@@ -456,7 +444,7 @@ func TestOutOfBoundKVRequestsAreRefusedBeforeARoundTrip(t *testing.T) {
 }
 
 func TestOpsOutsideATransactionAreRefusedInOne(t *testing.T) {
-	txn := &KVTransaction{routingKey: "rk", id: 1}
+	txn := &KVTransaction{id: 1}
 	if _, err := txn.Scan("", nil); !errors.Is(err, ErrTxnUnsupportedOp) {
 		t.Errorf("Scan: %v", err)
 	}

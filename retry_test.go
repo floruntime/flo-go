@@ -1,11 +1,9 @@
 package flo
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -166,42 +164,11 @@ func TestAHugeMaxBackoffNeverWrapsNegative(t *testing.T) {
 	}
 }
 
-func TestStreamWorkerRetriesARefusedGroupJoin(t *testing.T) {
-	var joins atomic.Int64
-	var s scripted
-	addr := s.serve(t, func(_ int, id uint64) []byte {
-		if joins.Add(1) <= 3 {
-			return refusalFrame(id, StatusOverloaded, RanNo)
-		}
-		return fakeReply(id, "")
-	})
-	sw, err := NewClient(addr, WithRetry(RetryPolicy{MaxAttempts: 1})).NewStreamWorker(StreamWorkerOptions{
-		Stream:                      "s",
-		RedeliverPendingOnReconnect: new(bool),
-	}, func(*StreamContext) error { return nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { sw.Close() })
-	sw.ctx, sw.cancel = context.WithCancel(context.Background())
-	sw.pollCtx = sw.ctx
-	if err := sw.client.Connect(); err != nil {
-		t.Fatal(err)
-	}
-	if err := sw.joinGroups(); err != nil {
-		t.Fatalf("join: %v", err)
-	}
-	if n := joins.Load(); n != 4 {
-		t.Fatalf("joined after %d tries, want 4", n)
-	}
-}
-
 func TestWorkerConnectionsKeepTheClientsRetryPolicy(t *testing.T) {
 	p := RetryPolicy{MaxAttempts: 7, InitialBackoff: 3 * time.Millisecond, MaxBackoff: 9 * time.Millisecond}
 	addr := serveAll(t, func(id uint64) []byte { return fakeReply(id, "") }).Addr().String()
 	sw, err := NewClient(addr, WithRetry(p)).NewStreamWorker(StreamWorkerOptions{
-		Stream:                      "s",
-		RedeliverPendingOnReconnect: new(bool),
+		Stream: "s",
 	}, func(*StreamContext) error { return nil })
 	if err != nil {
 		t.Fatal(err)

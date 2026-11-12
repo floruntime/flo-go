@@ -60,8 +60,12 @@ func fakeServer(t *testing.T, answer func(op OpCode) []byte) string {
 	return ln.Addr().String()
 }
 
-// oneRecord is a GroupRead body carrying a single record.
+// oneRecord is a GroupRead body leasing a single record: delivery (2, 7),
+// first delivery.
 var oneRecord = []byte{
+	2, 0, 0, 0, 0, 0, 0, 0, // term
+	7, 0, 0, 0, 0, 0, 0, 0, // index
+	0, 0, 0, 0, 0, 0, 0, 0, // expires_at_ms
 	1, 0, 0, 0, // count
 	1, 0, 0, 0, 0, 0, 0, 0, // sequence
 	1, 0, 0, 0, 0, 0, 0, 0, // timestamp_ms
@@ -70,6 +74,7 @@ var oneRecord = []byte{
 	0,               // key_present
 	1, 0, 0, 0, 'x', // payload
 	0, 0, 0, 0, // header count
+	1, 0, 0, 0, // deliveries
 }
 
 // countingEmpty answers every request empty at once, as the server does to a
@@ -97,9 +102,8 @@ func newTestActionWorker(t *testing.T, addr string) *ActionWorker {
 func newTestStreamWorker(t *testing.T, addr string, blockMS uint32, handler StreamRecordHandler) *StreamWorker {
 	t.Helper()
 	sw, err := NewClient(addr).NewStreamWorker(StreamWorkerOptions{
-		Stream:                      "s",
-		BlockMS:                     blockMS,
-		RedeliverPendingOnReconnect: new(bool),
+		Stream:  "s",
+		BlockMS: blockMS,
 	}, handler)
 	if err != nil {
 		t.Fatal(err)

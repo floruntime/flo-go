@@ -13,19 +13,9 @@ import (
 	"time"
 )
 
-// oneRecordGroupRead is a GroupRead body carrying a single record.
+// oneRecordGroupRead is a GroupRead body leasing a single record.
 func oneRecordGroupRead() []byte {
-	b := make([]byte, 0, 64)
-	b = binary.LittleEndian.AppendUint32(b, 1) // count
-	b = binary.LittleEndian.AppendUint64(b, 1) // sequence
-	b = binary.LittleEndian.AppendUint64(b, 1) // timestamp_ms
-	b = append(b, 0)                           // tier
-	b = binary.LittleEndian.AppendUint32(b, 0) // partition
-	b = append(b, 0)                           // key_present
-	b = binary.LittleEndian.AppendUint32(b, 1) // payload length
-	b = append(b, 'x')                         // payload
-	b = binary.LittleEndian.AppendUint32(b, 0) // header count
-	return b
+	return append([]byte(nil), oneRecord...)
 }
 
 func writeFakeResponse(conn net.Conn, requestID uint64, data []byte) error {
@@ -103,9 +93,8 @@ func TestStreamWorkerAckDoesNotWaitForPoll(t *testing.T) {
 		return nil
 	}
 	sw, err := c.NewStreamWorker(StreamWorkerOptions{
-		Stream:                      "s",
-		BlockMS:                     uint32(block / time.Millisecond),
-		RedeliverPendingOnReconnect: new(bool),
+		Stream:  "s",
+		BlockMS: uint32(block / time.Millisecond),
 	}, handler)
 	if err != nil {
 		t.Fatal(err)
@@ -259,10 +248,17 @@ func newSplitWorker(t *testing.T, poll, ack *opServer, logger Logger) *StreamWor
 
 var testID = StreamID{TimestampMS: 7, Sequence: 1}
 
+// testLease is the delivery testGroupRecord came in.
+var testLease = StreamGroupLease{Consumer: "c", Term: 2, Index: 7}
+
+func testGroupRecord() StreamGroupRecord {
+	return StreamGroupRecord{StreamRecord: StreamRecord{ID: testID}, Deliveries: 1}
+}
+
 func TestStreamWorkerNackUsesAckConnection(t *testing.T) {
 	poll, ack := newOpServer(t, false), newOpServer(t, false)
 	sw := newSplitWorker(t, poll, ack, &captureLogger{})
-	sw.ackWithRetry("s", testID, false)
+	sw.reportWithRetry("s", testLease, testGroupRecord(), false, "failed")
 	ack.expectOp(t, OpStreamGroupNack)
 }
 
@@ -273,7 +269,7 @@ func TestStreamWorkerReconnectsAckConnection(t *testing.T) {
 	sw := newSplitWorker(t, poll, ack, &captureLogger{})
 	before := poll.accepted.Load()
 	sw.ackClient.Close()
-	sw.ackWithRetry("s", testID, true)
+	sw.reportWithRetry("s", testLease, testGroupRecord(), true, "")
 	ack.expectOp(t, OpStreamGroupAck)
 	if n := poll.accepted.Load() - before; n != 0 {
 		t.Errorf("poll server accepted %d new connections, want 0", n)
@@ -304,7 +300,7 @@ func TestStreamWorkerStopKeepsAcksCloseInterrupts(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		sw.ackWithRetry("s", testID, true)
+		sw.reportWithRetry("s", testLease, testGroupRecord(), true, "")
 	}()
 	ack.expectOp(t, OpStreamGroupAck)
 
@@ -344,7 +340,7 @@ func TestStreamWorkerLogsFailedAck(t *testing.T) {
 			logger := &captureLogger{}
 			sw := newSplitWorker(t, poll, ack, logger)
 			setup(t, sw)
-			sw.ackWithRetry("s", testID, true)
+			sw.reportWithRetry("s", testLease, testGroupRecord(), true, "")
 			if !logger.has("Error: [s] dropped ack for " + testID.String()) {
 				t.Errorf("no error naming %s in %q", testID, logger.lines)
 			}

@@ -118,7 +118,7 @@ func newHaltedBackoff() backoff {
 
 // waitIfHalted reports whether err is a halted shard's refusal of a request
 // it didn't run, and if so warns and waits the next backoff, or until ctx
-// ends. A worker's registration, group join and polls are retried this way
+// ends. A worker's registration and polls are retried this way
 // until the shard is repaired, unlike a client's own requests, which return
 // the refusal. An outcome_pending is not waited on: that request committed,
 // and resending it would write it twice, or halt the shard again.
@@ -133,6 +133,23 @@ func waitIfHalted(ctx context.Context, logger Logger, what string, err error, b 
 	return true
 }
 
+// waitAtStart reports whether a worker's registration refused with err is
+// waited out: a halted shard's refusal, with the halted backoff, or one
+// that didn't run and may pass (overloaded or unavailable, ran no), with
+// the worker backoff. Any other refusal fails the start.
+func waitAtStart(ctx context.Context, logger Logger, err error, halted, refused *backoff) bool {
+	if waitIfHalted(ctx, logger, "worker registration", err, halted) {
+		return true
+	}
+	if !isRefusedUnrun(err) {
+		return false
+	}
+	d := refused.next()
+	logger.Printf("Warning: worker registration refused: %v; retrying in %v", err, d)
+	sleepCtx(ctx, d)
+	return true
+}
+
 // sleepCtx waits d, or until ctx is done.
 func sleepCtx(ctx context.Context, d time.Duration) {
 	t := time.NewTimer(d)
@@ -141,4 +158,38 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 	case <-ctx.Done():
 	case <-t.C:
 	}
+}
+
+// limitNotice backs a worker loop off a limit refusal (ErrLimit), which no
+// retry clears until an operator or the application acts: it warns once
+// per distinct reason, not on every wait, and waits with the halted
+// backoff, so the loop neither spins nor stops.
+type limitNotice struct {
+	b      backoff
+	warned map[Reason]bool
+}
+
+// wait reports whether err is a limit refusal, and if so warns the first
+// time its reason is seen and waits the next backoff, or until ctx ends.
+func (n *limitNotice) wait(ctx context.Context, logger Logger, what string, err error) bool {
+	var se *ServerError
+	if !errors.As(err, &se) || se.Status != StatusLimit {
+		return false
+	}
+	if n.warned == nil {
+		n.warned = map[Reason]bool{}
+		n.b = newHaltedBackoff()
+	}
+	if !n.warned[se.Reason] {
+		n.warned[se.Reason] = true
+		logger.Printf("Warning: %s refused at a limit (%s): %s; retrying with backoff until it clears", what, se.Reason, se.Message)
+	}
+	sleepCtx(ctx, n.b.next())
+	return true
+}
+
+// reset follows a request that succeeded: a limit seen again is warned of
+// again.
+func (n *limitNotice) reset() {
+	n.warned = nil
 }

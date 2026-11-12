@@ -33,7 +33,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0x19075df8e1ed5f75
+	TableHash uint64 = 0xc688167b51fcc846
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -105,20 +105,16 @@ const (
 	OpStreamDelete OpCode = 0x140
 
 	// ── Stream Consumer Groups (0x150 – 0x16F) ──
-	OpStreamGroupCreate           OpCode = 0x150
-	OpStreamGroupJoin             OpCode = 0x151
-	OpStreamGroupLeave            OpCode = 0x152
-	OpStreamGroupRead             OpCode = 0x153
-	OpStreamGroupAck              OpCode = 0x154
-	OpStreamGroupClaim            OpCode = 0x155
-	OpStreamGroupPending          OpCode = 0x156
-	OpStreamGroupConfigureSweeper OpCode = 0x157
-	OpStreamGroupNack             OpCode = 0x159
-	OpStreamGroupTouch            OpCode = 0x15A
-	OpStreamGroupInfo             OpCode = 0x15B
-	OpStreamGroupDelete           OpCode = 0x15C
-	OpStreamGroupList             OpCode = 0x15D
-	OpStreamGroupMembers          OpCode = 0x15E
+	OpStreamGroupCreate  OpCode = 0x150
+	OpStreamGroupRead    OpCode = 0x153
+	OpStreamGroupAck     OpCode = 0x154
+	OpStreamGroupPending OpCode = 0x156
+	OpStreamGroupNack    OpCode = 0x159
+	OpStreamGroupTouch   OpCode = 0x15A
+	OpStreamGroupInfo    OpCode = 0x15B
+	OpStreamGroupDelete  OpCode = 0x15C
+	OpStreamGroupList    OpCode = 0x15D
+	OpStreamGroupMembers OpCode = 0x15E
 
 	// ── Queues (0x170 – 0x19F) ──
 	OpQueueEnqueue    OpCode = 0x170
@@ -210,6 +206,9 @@ const (
 	// StatusNoNamespace: the namespace the request names doesn't exist.
 	// Not StatusNotFound, which is a missing key.
 	StatusNoNamespace StatusCode = 14
+	// StatusLimit: the node is at a limit it holds to (ErrLimit). The
+	// reason names which; it never ran.
+	StatusLimit StatusCode = 15
 )
 
 // ResponseStale is the answer flag on a read served by a shard that can't
@@ -250,6 +249,8 @@ func (s StatusCode) String() string {
 		return "Committed, not applied: its shard halted; don't resend it unchanged"
 	case StatusNoNamespace:
 		return "No such namespace"
+	case StatusLimit:
+		return "At a limit: delete something, give the node more room, or raise the setting"
 	default:
 		return fmt.Sprintf("Unknown status %d", uint8(s))
 	}
@@ -281,8 +282,10 @@ const (
 	OptForce         OptionTag = 0x2C // void: Allow a destructive op, e.g. deleting a non-empty stream
 
 	// Consumer Group Options (0x30 - 0x3F)
-	OptAckTimeoutMS OptionTag = 0x30 // u32: Time before unacked message auto-redelivers
-	OptMaxDeliver   OptionTag = 0x31 // u8: Max delivery attempts before DLQ (default: 10)
+	OptAckTimeoutMS OptionTag = 0x30 // u32: A group's lease: a record not acked this long is delivered again (5 s to 12 h)
+	OptMaxDeliver   OptionTag = 0x31 // u8: A group's attempts: a record nacked or expired this many times is dead (1 to 255)
+	OptDead         OptionTag = 0x32 // void: A nack dead-letters its records now
+	OptErrorText    OptionTag = 0x33 // string: Why a nack's records failed
 
 	// Time-Series Options (0x60 - 0x6F)
 	OptTSFromMS      OptionTag = 0x60 // i64: Start of time range (inclusive, unix ms)
@@ -386,10 +389,6 @@ type MGetEntry struct {
 // KVMGetOptions contains options for KV MGet operations.
 type KVMGetOptions struct {
 	Namespace string
-	// RoutingKey, when set, is the routing key every key was written with:
-	// all are looked up on its shard. Without it each key is looked up on
-	// its own.
-	RoutingKey string
 }
 
 // Message is a dequeued queue message. With its dequeue's QueueLease, Seq
@@ -496,8 +495,6 @@ type GetOptions struct {
 	// WaitFor is what a wait waits for: the key to exist (the default), or
 	// its next version.
 	WaitFor WaitFor
-	// RoutingKey routes the request in place of the key.
-	RoutingKey string
 }
 
 // WaitFor is what a Get with WaitMs waits for.
@@ -521,8 +518,6 @@ type PutOptions struct {
 	Condition Condition
 	// CASVersion, when set, must be the key's version; 0 means it doesn't exist.
 	CASVersion *uint64
-	// RoutingKey routes the request in place of the key.
-	RoutingKey string
 }
 
 // Condition says when a Put may write.
@@ -540,8 +535,6 @@ type DeleteOptions struct {
 	// CASVersion, when set, must be the key's version: only the owner
 	// deletes a lock or lease.
 	CASVersion *uint64
-	// RoutingKey routes the request in place of the key.
-	RoutingKey string
 }
 
 // ScanOptions contains options for KV scan operations.
@@ -562,8 +555,6 @@ type HistoryOptions struct {
 	// BeforeVersion, when set, returns only versions older than it: the
 	// previous page's last version reads the next page.
 	BeforeVersion *uint64
-	// RoutingKey routes the request in place of the key.
-	RoutingKey string
 }
 
 // EnqueueOptions contains options for queue enqueue operations.
@@ -769,23 +760,13 @@ type StreamReadResult struct {
 	Records []StreamRecord
 }
 
-// PendingEntry describes one entry in a consumer group's Pending Entry List
-// (delivered-but-unacked message).
+// PendingEntry is one of a consumer group's leased records, as
+// GroupPending lists it.
 type PendingEntry struct {
-	ID            StreamID
-	Consumer      string
-	DeliveryCount uint32
-}
-
-// StreamClaimResult is one page of a GroupClaim cursor scan.
-//
-// Records carry payload + headers (same shape as GroupRead). NextCursor is the
-// start_id to pass on the next GroupClaim call; when Done is true the PEL has
-// been fully scanned and the loop should stop.
-type StreamClaimResult struct {
-	Records    []StreamRecord
-	NextCursor StreamID
-	Done       bool
+	ID       StreamID
+	Consumer string
+	// Deliveries counts the record's deliveries, this one included.
+	Deliveries uint32
 }
 
 // StreamAppendResult represents the result of a stream append operation.
@@ -848,13 +829,19 @@ type StreamInfoOptions struct {
 
 // StreamGroup is one consumer group, as GroupList shows it.
 type StreamGroup struct {
-	Name    string
+	Name string
+	// Members counts the consumers holding its records now.
 	Members uint32
-	// Pending counts the entries delivered and not yet acked.
-	Pending          uint64
-	CreatedAtMS      int64
-	AckTimeoutMS     uint32
-	MaxDeliver       uint8
+	// Pending counts its records ready or leased, not yet acked.
+	Pending     uint64
+	CreatedAtMS int64
+	// AckTimeoutMS is its lease.
+	AckTimeoutMS uint32
+	// MaxDeliver is how many times a record is nacked or expires before
+	// it is dead.
+	MaxDeliver uint8
+	// LastDeliveredMS and LastDeliveredSeq are its cursor: the last of the
+	// stream's records it has delivered.
 	LastDeliveredMS  uint64
 	LastDeliveredSeq uint64
 }
@@ -866,15 +853,18 @@ type StreamGroupList struct {
 	More bool
 }
 
-// StreamGroupMember is one member of a consumer group.
+// StreamGroupMember is one member of a consumer group: a consumer holding
+// its records now. One with nothing leased isn't a member.
 type StreamGroupMember struct {
 	ID string
-	// Leaving is set on a member that has left and still holds pending entries.
+	// Leaving is a state the answer can carry; the server sends members
+	// active.
 	Leaving bool
-	// Pending counts the entries delivered to it and not yet acked.
-	Pending    uint32
+	// Pending counts the records leased to it.
+	Pending uint32
+	// JoinedAtMS is when the earliest of them was delivered.
 	JoinedAtMS int64
-	// LastActiveMS is nil until the server records the member active.
+	// LastActiveMS is when the latest of them was delivered.
 	LastActiveMS *int64
 }
 
@@ -885,28 +875,125 @@ type StreamGroupMembers struct {
 	More bool
 }
 
-// StreamGroupJoinOptions contains options for consumer group join.
-type StreamGroupJoinOptions struct {
+// StreamGroupCreateOptions contains options for GroupCreate.
+type StreamGroupCreateOptions struct {
 	Namespace string
+	// AckTimeoutMS is the group's lease, MinGroupAckTimeoutMS to
+	// MaxGroupAckTimeoutMS; nil takes the server's 30 s.
+	AckTimeoutMS *uint32
+	// MaxDeliver is how many times a record is nacked or expires before it
+	// is dead, 1 to 255; nil takes the server's 5.
+	MaxDeliver *uint8
 }
 
 // StreamGroupReadOptions contains options for consumer group read.
 type StreamGroupReadOptions struct {
 	Namespace string
-	Count     *uint32
-	BlockMS   *uint32 // Long-poll wait (nil or 0 = don't wait, max 300000)
+	// Count is the most records to lease; nil, 0 or past MaxGroupBatch
+	// leases up to MaxGroupBatch.
+	Count   *uint32
+	BlockMS *uint32 // Long-poll wait (nil or 0 = don't wait, max 300000)
 }
 
-// StreamGroupAckOptions contains options for consumer group ack.
+// StreamGroupLease names a group read's delivery: the consumer that took
+// the records and the log position the delivery was made at. A report
+// names the same.
+type StreamGroupLease struct {
+	Consumer string
+	Term     uint64
+	Index    uint64
+}
+
+// StreamGroupRecord is a record a group read leased.
+type StreamGroupRecord struct {
+	StreamRecord
+	// Deliveries counts the record's deliveries, this one included.
+	Deliveries uint32
+}
+
+// Item is how a report names the record: its id and the deliveries it was
+// read with.
+func (r StreamGroupRecord) Item() StreamGroupItem {
+	return StreamGroupItem{ID: r.ID, Deliveries: r.Deliveries}
+}
+
+// StreamGroupItem names one leased record in a report.
+type StreamGroupItem struct {
+	ID         StreamID
+	Deliveries uint32
+}
+
+// StreamGroupReadResult is what a group read leased: its records, until
+// acked, nacked or expired.
+type StreamGroupReadResult struct {
+	Records []StreamGroupRecord
+	Lease   StreamGroupLease
+	// ExpiresAtMS is when the lease runs out without a touch, in Unix
+	// milliseconds; 0 when nothing was leased.
+	ExpiresAtMS int64
+}
+
+// Items names every record leased, for a report on all of them.
+func (r *StreamGroupReadResult) Items() []StreamGroupItem {
+	items := make([]StreamGroupItem, len(r.Records))
+	for i, rec := range r.Records {
+		items[i] = rec.Item()
+	}
+	return items
+}
+
+// GroupRefusalWhy says why a group report applied nothing to a record. The
+// values are a queue report's: QueueGone (no such record in the group:
+// acked already, or never leased), QueueDeliveredAgain, QueueOtherHolder,
+// QueueExpired, QueueReleased (nacked) and QueueNotHeld.
+type GroupRefusalWhy = QueueRefusalWhy
+
+// StreamGroupRefusal is a record a group report applied nothing to.
+type StreamGroupRefusal struct {
+	ID  StreamID
+	Why GroupRefusalWhy
+}
+
+// StreamGroupReport is an ack's, nack's or touch's answer: per record, the
+// server applies it or says why not, in an ok answer. A stale report (one
+// naming a delivery that moved on) applies nothing and is answered so.
+type StreamGroupReport struct {
+	Applied uint32
+	Refused []StreamGroupRefusal
+	// ExpiresAtMS, for a touch, is when the lease runs out without another.
+	ExpiresAtMS int64
+}
+
+// StreamGroupAckOptions contains options for consumer group ack and touch.
 type StreamGroupAckOptions struct {
 	Namespace string
-	Consumer  string // Consumer ID; sent, but the server doesn't check it: any consumer can ack an entry
 }
 
 // StreamGroupNackOptions contains options for consumer group nack.
 type StreamGroupNackOptions struct {
 	Namespace string
-	Consumer  string // Consumer ID; sent, but the server doesn't check it: any consumer can nack an entry
+	// DelayMS is how long before the records are ready again, at most
+	// MaxQueueDelayMS.
+	DelayMS uint64
+	// Dead makes them dead now, whatever attempts are left.
+	Dead bool
+	// Error says why they failed, at most 255 bytes.
+	Error string
+}
+
+// StreamGroupInfo is a consumer group's counts. Ready, Leased, Dead and
+// Trimmed add up to what the group holds; Trimmed counts records at or
+// below a stream trim that the server hasn't removed yet.
+type StreamGroupInfo struct {
+	// Pending is Ready plus Leased.
+	Pending uint64
+	// Holders counts the consumers holding its records now.
+	Holders     uint32
+	CreatedAtNS uint64
+	Ready       uint64
+	Leased      uint64
+	Dead        uint64
+	Trimmed     uint64
 }
 
 // =============================================================================
@@ -1515,9 +1602,10 @@ const (
 	ReasonConditionFailed Reason = 16
 	// ReasonNoSuchTransaction: no open transaction has this id here.
 	ReasonNoSuchTransaction Reason = 17
-	// ReasonWrongRoutingKey: the request's routing key (its key, when it gives
-	// none) isn't the one its transaction was begun with.
-	ReasonWrongRoutingKey Reason = 18
+	// ReasonKeysNotColocated: the key routes elsewhere than the key the
+	// transaction was begun with. Give every key in a transaction the same
+	// {tag}.
+	ReasonKeysNotColocated Reason = 18
 	// ReasonTxnTooLarge: the transaction holds as many ops or bytes as it may.
 	ReasonTxnTooLarge Reason = 19
 	// ReasonTooManyWaiters: the shard holds as many waiting reads as it may.
@@ -1553,6 +1641,18 @@ const (
 	// ReasonJobRunning: a processing job that is still running can't be
 	// removed; stop or cancel it first.
 	ReasonJobRunning Reason = 31
+	// ReasonMemoryBudget (with StatusLimit): the node's memory budget is
+	// spent. The message names the node.
+	ReasonMemoryBudget Reason = 32
+	// ReasonTooManyActions (with StatusLimit): the node holds as many
+	// actions as it registers; delete one first.
+	ReasonTooManyActions Reason = 33
+	// ReasonTooManyWorkflowDefinitions (with StatusLimit): the node holds as
+	// many workflow definitions as it keeps; delete one first.
+	ReasonTooManyWorkflowDefinitions Reason = 34
+	// ReasonTooManyWorkflowRuns (with StatusLimit): the node holds as many
+	// workflow runs as it keeps; let some finish or delete them first.
+	ReasonTooManyWorkflowRuns Reason = 35
 )
 
 var reasonNames = map[Reason]string{
@@ -1562,11 +1662,13 @@ var reasonNames = map[Reason]string{
 	ReasonCommittedNotApplied: "committed_not_applied", ReasonAnswerLost: "answer_lost", ReasonUnclassified: "unclassified",
 	ReasonNotFound: "not_found", ReasonReservedKey: "reserved_key", ReasonCASMismatch: "cas_mismatch",
 	ReasonConditionFailed: "condition_failed", ReasonNoSuchTransaction: "no_such_transaction",
-	ReasonWrongRoutingKey: "wrong_routing_key", ReasonTxnTooLarge: "txn_too_large", ReasonTooManyWaiters: "too_many_waiters",
+	ReasonKeysNotColocated: "keys_not_colocated", ReasonTxnTooLarge: "txn_too_large", ReasonTooManyWaiters: "too_many_waiters",
 	ReasonConflictingFields: "conflicting_fields", ReasonWritesStopped: "writes_stopped", ReasonTooManyProposals: "too_many_proposals",
 	ReasonWrongType: "wrong_type", ReasonTooManyTransactions: "too_many_transactions",
 	ReasonStaleReport: "stale_report", ReasonWorkerUnhealthy: "worker_unhealthy", ReasonWorkerDraining: "worker_draining",
 	ReasonShardHalted: "shard_halted", ReasonAdminOnly: "admin_only", ReasonJobRunning: "job_running",
+	ReasonMemoryBudget: "memory_budget", ReasonTooManyActions: "too_many_actions",
+	ReasonTooManyWorkflowDefinitions: "too_many_workflow_definitions", ReasonTooManyWorkflowRuns: "too_many_workflow_runs",
 }
 
 func (r Reason) String() string {

@@ -46,12 +46,21 @@ var noTask = []byte{0}
 // okBody is what the fakes answer an op with when a test gives no body: the
 // server's empty answer, which for an await is no task, and for a touch an
 // expiry.
+// groupReportBody1 is a group report's answer applying its one record.
+var groupReportBody1 = []byte{1, 0, 0, 0, 0, 0, 0, 0}
+
 func okBody(op OpCode) []byte {
 	switch op {
 	case OpActionAwait:
 		return noTask
 	case OpActionTouch:
 		return binary.LittleEndian.AppendUint64(nil, 1)
+	case OpStreamGroupRead:
+		return make([]byte, 28) // leased nothing
+	case OpStreamGroupAck, OpStreamGroupNack:
+		return groupReportBody1
+	case OpStreamGroupTouch:
+		return append(binary.LittleEndian.AppendUint64(nil, 1), groupReportBody1...)
 	}
 	return nil
 }

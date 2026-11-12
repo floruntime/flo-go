@@ -3,6 +3,7 @@ package flo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -52,19 +53,12 @@ type StreamWorkerOptions struct {
 	// parent client's timeout (it is NOT tied to MessageTimeout).
 	NetworkTimeout time.Duration
 
-	// RedeliverPendingOnReconnect controls whether the worker drains its
-	// consumer's pending (delivered-but-unacked) entries via GroupClaim after
-	// a reconnect, before resuming normal GroupRead. Defaults to true —
-	// bare GroupRead only returns records past last_delivered_id and will NOT
-	// re-surface in-flight work after a crash/reconnect, so this is required
-	// for at-least-once delivery across reconnects. Set false for at-most-once.
-	RedeliverPendingOnReconnect *bool
-
-	// ClaimMinIdleMS is the minimum idle time (ms) an entry must have before
-	// the reconnect drain claims it. Default 0 — drain everything this
-	// consumer already owns. Set > 0 to additionally steal entries abandoned
-	// by other (dead) consumers that have been idle at least this long.
-	ClaimMinIdleMS uint32
+	// AutoTouch touches each record every sixth of its group's lease while
+	// its handler runs; a touch renews the lease once half of it is gone.
+	// Off by default: a handler that runs past the lease without calling
+	// StreamContext.Touch has its record delivered again. However often it
+	// is touched, the server holds a record at most MaxHoldMS.
+	AutoTouch bool
 
 	// Logger for worker output (optional, defaults to log.Printf).
 	Logger Logger
@@ -79,11 +73,13 @@ type StreamRecordHandler func(sctx *StreamContext) error
 // and the parent context without requiring manual json.Unmarshal.
 type StreamContext struct {
 	ctx       context.Context
-	record    StreamRecord
+	record    StreamGroupRecord
+	lease     StreamGroupLease
 	namespace string
 	stream    string
 	group     string
 	consumer  string
+	ack       *Client
 }
 
 // Ctx returns the context for this record processing.
@@ -93,7 +89,17 @@ func (sc *StreamContext) Ctx() context.Context { return sc.ctx }
 func (sc *StreamContext) Context() context.Context { return sc.ctx }
 
 // Record returns the underlying StreamRecord.
-func (sc *StreamContext) Record() StreamRecord { return sc.record }
+func (sc *StreamContext) Record() StreamRecord { return sc.record.StreamRecord }
+
+// Deliveries counts the record's deliveries, this one included.
+func (sc *StreamContext) Deliveries() uint32 { return sc.record.Deliveries }
+
+// Touch keeps this record's lease, so a long handler doesn't have it
+// delivered again. The report says whether it applied; a refusal means the
+// delivery moved on.
+func (sc *StreamContext) Touch() (*StreamGroupReport, error) {
+	return sc.ack.Stream.GroupTouch(sc.stream, sc.group, sc.lease, []StreamGroupItem{sc.record.Item()}, nil)
+}
 
 // StreamID returns the record's StreamID (timestamp + sequence).
 func (sc *StreamContext) StreamID() StreamID { return sc.record.ID }
@@ -134,9 +140,9 @@ type StreamWorker struct {
 	client  *Client
 	handler StreamRecordHandler
 
-	// ackClient carries acks and nacks. client is held by a blocking
-	// GroupRead for up to BlockMS, which can outlast the server's ack timeout
-	// and get finished records redelivered.
+	// ackClient carries acks, nacks and touches. client is held by a
+	// blocking GroupRead for up to BlockMS, which can outlast the group's
+	// lease and get finished records redelivered.
 	ackClient        *Client
 	ackReconnectMu   sync.Mutex
 	lastAckReconnect time.Time
@@ -153,8 +159,8 @@ type StreamWorker struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	drain  drainState
-	// pollCtx is ctx that also ends on a drain; reads, joins and their
-	// reconnects use it.
+	// pollCtx is ctx that also ends on a drain; reads and their reconnects
+	// use it.
 	pollCtx context.Context
 	// wg covers the poll loops, handlers the record handlers Start waits for.
 	wg       sync.WaitGroup
@@ -165,8 +171,6 @@ type StreamWorker struct {
 	reconnectMu   sync.Mutex
 	lastReconnect time.Time
 
-	// Shared concurrency gate (set in Start); reused by the reconnect PEL drain.
-	sem chan struct{}
 	// running counts the record handlers running, for heartbeats.
 	running atomic.Int32
 
@@ -227,12 +231,6 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 		// Inherit the parent client's timeout — NOT MessageTimeout, which is
 		// the handler execution budget and unrelated to the network deadline.
 		opts.NetworkTimeout = c.timeout
-	}
-	if opts.RedeliverPendingOnReconnect == nil {
-		// Default true: at-least-once across reconnects requires draining the
-		// PEL, since GroupRead alone only returns records past last_delivered_id.
-		dflt := true
-		opts.RedeliverPendingOnReconnect = &dflt
 	}
 	if opts.Logger == nil {
 		opts.Logger = &streamStdLogger{}
@@ -299,7 +297,11 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 	}, nil
 }
 
-// Start begins consuming stream records from all configured streams.
+// Start begins consuming stream records from all configured streams. Its
+// registration waits out a halted shard, and an overloaded or unavailable
+// refusal that didn't run, with a backoff; any other refusal fails Start
+// with that error. Start fails with the limit error; a limit hit while
+// running is logged and backed off.
 func (sw *StreamWorker) Start(ctx context.Context) error {
 	sw.runMu.Lock()
 	sw.ctx, sw.cancel = context.WithCancel(ctx)
@@ -317,17 +319,7 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 	sw.logger.Printf("Starting stream worker (id=%s, streams=%v, group=%s, consumer=%s)",
 		sw.config.WorkerID, sw.streams, sw.config.Group, sw.config.Consumer)
 
-	// Semaphore must exist before joinGroups: a connection error during join
-	// calls handleReconnect → drainPending, which acquires sw.sem.
-	sw.sem = make(chan struct{}, sw.config.Concurrency)
-	sem := sw.sem
-
-	// Join consumer group on each stream. Connection errors here (a stalled
-	// or dropped connection at startup) are retried with reconnect rather
-	// than killing the worker — mirroring the poll loop and ackWithRetry.
-	if err := sw.joinGroups(); err != nil {
-		return err
-	}
+	sem := make(chan struct{}, sw.config.Concurrency)
 
 	// Register in worker registry with a process entry per stream
 	wc := sw.client.workerClient(sw.config.WorkerID)
@@ -350,23 +342,28 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 	// Whatever the registration's answer: one whose answer was lost, or a
 	// drain's reconnect, still registers the worker.
 	defer sendOnPoll(sw.client, sw.closeCtx, func() error { return wc.Deregister(nil) })
-	// A halted shard holds the start until it's repaired, or a stop or
-	// drain ends the wait.
+	// A halted shard, or a refusal that didn't run and may pass, holds the
+	// start until it clears, or a stop or drain ends the wait. Any other
+	// refusal fails Start.
 	halted := newHaltedBackoff()
+	refused := newWorkerBackoff()
 	for {
 		err := wc.Register(regOpts)
 		if err == nil {
 			break
 		}
-		if waitIfHalted(sw.pollCtx, sw.logger, "worker registration", err, &halted) {
+		if waitAtStart(sw.pollCtx, sw.logger, err, &halted, &refused) {
 			if sw.pollCtx.Err() == nil {
 				continue
 			}
 			break
 		}
-		if IsOutcomePending(err) {
-			return err
+		var se *ServerError
+		if errors.As(err, &se) {
+			return fmt.Errorf("failed to register stream worker: %w", err)
 		}
+		// A lost connection: the poll loop reconnects, and registers again
+		// when it does.
 		sw.logger.Printf("Warning: failed to register in worker registry: %v", err)
 		break
 	}
@@ -399,7 +396,7 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 	}
 
 	// Wait for all poll loops to finish, then for the records they handed
-	// out: leaving the group first would orphan their acks.
+	// out, so their acks are sent.
 	sw.wg.Wait()
 	drained := false
 	if sw.drain.active() && sw.ctx.Err() == nil {
@@ -415,13 +412,6 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 		drained = sw.drain.finish(sw.ctx, &sw.handlers, sw.logger, sw.client.IsConnected, func() error { return wc.Drain(nil) }, reconnect) == nil
 	}
 	sw.handlers.Wait()
-
-	// Leave consumer groups
-	for _, stream := range sw.streams {
-		sendOnPoll(sw.client, sw.closeCtx, func() error {
-			return sw.client.Stream.GroupLeave(stream, sw.config.Group, sw.config.Consumer, nil)
-		})
-	}
 	if drained {
 		sw.logger.Printf("Stream worker drained")
 		return nil
@@ -438,53 +428,12 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 	return sw.ctx.Err()
 }
 
-// joinGroups joins the consumer group on every configured stream.
-//
-// A connection error (a stalled or dropped connection at startup) triggers a
-// reconnect-and-retry instead of failing the worker — handleReconnect retries
-// with backoff until the context is cancelled. A join the server refused
-// without running it (overloaded or unavailable, past the client's own
-// retries) is tried again with the worker backoff. Other errors (e.g. an
-// invalid request) remain fatal and are returned immediately.
-func (sw *StreamWorker) joinGroups() error {
-	for _, stream := range sw.streams {
-		failed := newWorkerBackoff()
-		halted := newHaltedBackoff()
-		for {
-			if sw.pollCtx.Err() != nil {
-				return sw.ctx.Err()
-			}
-			err := sw.client.Stream.GroupJoin(stream, sw.config.Group, sw.config.Consumer, nil)
-			if err == nil {
-				break
-			}
-			if waitIfHalted(sw.pollCtx, sw.logger, "["+stream+"] group join", err, &halted) {
-				continue
-			}
-			if isRefusedUnrun(err) {
-				d := failed.next()
-				sw.logger.Printf("[%s] Group join refused: %v, retrying in %v...", stream, err, d)
-				sleepCtx(sw.pollCtx, d)
-				continue
-			}
-			if !IsConnectionError(err) {
-				return fmt.Errorf("failed to join consumer group on stream %s: %w", stream, err)
-			}
-			sw.logger.Printf("[%s] Connection lost during group join: %v, reconnecting...", stream, err)
-			if reconErr := sw.handleReconnect(); reconErr != nil && sw.pollCtx.Err() != nil {
-				return sw.ctx.Err()
-			}
-			sleepCtx(sw.pollCtx, time.Second)
-		}
-	}
-	return nil
-}
-
 // pollStream runs a single stream's poll loop.
 func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 	var backoff emptyPollBackoff
 	failed := newWorkerBackoff()
 	halted := newHaltedBackoff()
+	var limited limitNotice
 	for {
 		select {
 		case <-sw.ctx.Done():
@@ -519,11 +468,12 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 					sw.logger.Printf("Error: [%s] group read committed but not applied, stopping: %v", stream, err)
 					sw.cancel()
 					return err
-				} else if !waitIfHalted(sw.pollCtx, sw.logger, "["+stream+"] group read", err, &halted) {
+				} else if !waitIfHalted(sw.pollCtx, sw.logger, "["+stream+"] group read", err, &halted) &&
+					!limited.wait(sw.pollCtx, sw.logger, "["+stream+"] group read", err) {
 					d := failed.next()
 					if isRefusedUnrun(err) {
 						// Routine, e.g. records being read back from disk: the
-						// read claimed and delivered nothing, so it's sent again.
+						// read leased nothing, so it's sent again.
 						sw.logger.Printf("[%s] GroupRead not served yet: %v, retrying in %v...", stream, err, d)
 					} else {
 						sw.logger.Printf("[%s] GroupRead error: %v, retrying in %v...", stream, err, d)
@@ -534,27 +484,45 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 			}
 			failed.reset()
 			halted.reset()
+			limited.reset()
 
 			if result == nil || len(result.Records) == 0 {
 				backoff.afterEmpty(sw.pollCtx, polled, sw.config.BlockMS)
 				continue
 			}
 			backoff.reset()
+			// Touched from arrival, so records waiting for a handler slot
+			// keep their lease too.
+			touch := sw.startTouching(stream, result, time.Now())
 
-			for _, record := range result.Records {
-				sem <- struct{}{} // concurrency gate
+			for i, record := range result.Records {
+				// A record not started by a stop is handed back, not run
+				// with a cancelled context.
+				slot := false
+				select {
+				case sem <- struct{}{}: // concurrency gate
+					slot = true
+				case <-sw.ctx.Done():
+				}
+				if sw.ctx.Err() != nil {
+					if slot {
+						<-sem
+					}
+					sw.handBack(stream, result.Lease, result.Records[i:], touch)
+					break
+				}
 				sw.handlers.Add(1)
-				go func(rec StreamRecord) {
+				go func(rec StreamGroupRecord) {
 					defer sw.handlers.Done()
 					defer func() { <-sem }()
-					sw.processRecord(stream, rec)
+					sw.processRecord(stream, result.Lease, rec, touch)
 				}(record)
 			}
 		}
 	}
 }
 
-// handleReconnect reconnects the client and re-joins consumer groups.
+// handleReconnect reconnects the client and registers the worker again.
 // Safe to call from multiple goroutines — only one reconnection happens at a time.
 func (sw *StreamWorker) handleReconnect() error {
 	sw.reconnectMu.Lock()
@@ -572,13 +540,6 @@ func (sw *StreamWorker) handleReconnect() error {
 		return err
 	}
 	sw.lastReconnect = time.Now()
-
-	// Re-join consumer groups
-	for _, stream := range sw.streams {
-		if err := sw.client.Stream.GroupJoin(stream, sw.config.Group, sw.config.Consumer, nil); err != nil {
-			sw.logger.Printf("Warning: failed to re-join group on %s: %v", stream, err)
-		}
-	}
 
 	// Re-register in worker registry
 	wc := sw.client.workerClient(sw.config.WorkerID)
@@ -601,94 +562,22 @@ func (sw *StreamWorker) handleReconnect() error {
 		sw.logger.Printf("Warning: failed to re-register: %v", err)
 	}
 
-	// Redeliver this consumer's pending (delivered-but-unacked) entries before
-	// resuming normal reads. GroupRead only returns records past
-	// last_delivered_id, so without this an in-flight record at crash time is
-	// never re-surfaced. See RedeliverPendingOnReconnect.
-	if sw.config.RedeliverPendingOnReconnect != nil && *sw.config.RedeliverPendingOnReconnect {
-		sw.drainPending()
-	}
-
 	sw.logger.Printf("Reconnected, resuming work")
 	return nil
 }
 
-// drainPending re-processes this consumer's pending (delivered-but-unacked)
-// entries via a GroupClaim cursor loop, for every subscribed stream, before
-// normal GroupRead resumes. Records go through the same processRecord path
-// (and concurrency gate) as live reads, so a handler that succeeds will ack
-// and clear the entry from the PEL. Bounded per stream by a max page count so
-// a pathological backlog can't wedge the reconnect indefinitely; remaining
-// entries are picked up on the next reconnect or by GroupRead once acked.
-func (sw *StreamWorker) drainPending() {
-	if sw.sem == nil {
-		// Start has not initialized the concurrency gate yet.
-		return
-	}
-
-	const maxPagesPerStream = 1000 // safety cap: maxPages * BatchSize entries
-	// maxClaimRetries bounds the resends of one refused claim, backing off
-	// up to 5 s each, so a long refusal ends the drain, not the worker.
-	const maxClaimRetries = 20
-
-	for _, stream := range sw.streams {
-		cursor := StreamID{} // MIN — scan from the start of the PEL
-		pages := 0
-		claimRetries := 0
-		wait := newWorkerBackoff()
-		for {
-			if sw.pollCtx.Err() != nil {
-				return
-			}
-			res, err := sw.client.Stream.GroupClaim(
-				stream, sw.config.Group, sw.config.Consumer,
-				sw.config.ClaimMinIdleMS, cursor, sw.config.BatchSize, nil,
-			)
-			if err != nil {
-				// A claim refused unrun, e.g. while records are read back from
-				// disk, claimed nothing: it's sent again from the same cursor.
-				if isRefusedUnrun(err) && claimRetries < maxClaimRetries {
-					claimRetries++
-					d := wait.next()
-					sw.logger.Printf("[%s] pending drain claim not served yet: %v, retrying in %v...", stream, err, d)
-					sleepCtx(sw.pollCtx, d)
-					continue
-				}
-				// Don't fail the reconnect on a drain error; normal reads resume.
-				sw.logger.Printf("[%s] pending drain claim failed: %v", stream, err)
-				break
-			}
-			claimRetries = 0
-			wait.reset()
-			for _, record := range res.Records {
-				sw.sem <- struct{}{} // same concurrency gate as live reads
-				sw.handlers.Add(1)
-				// Pass stream + record explicitly: under Go 1.21 the range
-				// variables are shared across iterations.
-				go func(st string, rec StreamRecord) {
-					defer sw.handlers.Done()
-					defer func() { <-sw.sem }()
-					sw.processRecord(st, rec)
-				}(stream, record)
-			}
-			pages++
-			if res.Done || len(res.Records) == 0 || pages >= maxPagesPerStream {
-				break
-			}
-			cursor = res.NextCursor
-		}
-	}
-}
-
-// processRecord handles a single record with ack/nack.
-func (sw *StreamWorker) processRecord(stream string, record StreamRecord) {
+// processRecord handles a single record, then stops touching it and acks
+// or nacks it. touch may be nil.
+func (sw *StreamWorker) processRecord(stream string, lease StreamGroupLease, record StreamGroupRecord, touch *readToucher) {
 	sw.running.Add(1)
 	defer sw.running.Add(-1)
+	defer touch.drop(record.ID)
 	defer func() {
 		if r := recover(); r != nil {
 			sw.logger.Printf("[%s] Stream handler panicked on id %s: %v", stream, record.ID, r)
 			atomic.AddUint64(&sw.messagesFailed, 1)
-			sw.ackWithRetry(stream, record.ID, false)
+			touch.drop(record.ID)
+			sw.reportWithRetry(stream, lease, record, false, fmt.Sprintf("handler panicked: %v", r))
 		}
 	}()
 
@@ -698,39 +587,178 @@ func (sw *StreamWorker) processRecord(stream string, record StreamRecord) {
 	sctx := &StreamContext{
 		ctx:       ctx,
 		record:    record,
+		lease:     lease,
 		namespace: sw.client.Namespace(),
 		stream:    stream,
 		group:     sw.config.Group,
 		consumer:  sw.config.Consumer,
+		ack:       sw.ackClient,
 	}
 
-	if err := sw.handler(sctx); err != nil {
+	err := sw.handler(sctx)
+	if err != nil {
 		atomic.AddUint64(&sw.messagesFailed, 1)
 		sw.logger.Printf("[%s] Stream record %s failed: %v", stream, record.ID, err)
-		sw.ackWithRetry(stream, record.ID, false)
+		touch.drop(record.ID)
+		sw.reportWithRetry(stream, lease, record, false, err.Error())
 		return
 	}
 
 	atomic.AddUint64(&sw.messagesProcessed, 1)
-	sw.ackWithRetry(stream, record.ID, true)
+	touch.drop(record.ID)
+	sw.reportWithRetry(stream, lease, record, true, "")
 }
 
-// ackWithRetry sends an ack (or nack) to the server, reconnecting if the
-// connection was lost while the record was being processed.
-func (sw *StreamWorker) ackWithRetry(stream string, id StreamID, ack bool) {
+// readToucher keeps one read's unacked records leased: each touch names
+// the read's delivery and the records not yet acked or nacked.
+type readToucher struct {
+	mu    sync.Mutex
+	items map[StreamID]StreamGroupItem
+	done  chan struct{}
+	once  sync.Once
+}
+
+// drop stops touching id; with none left, touching ends. Safe on nil.
+func (t *readToucher) drop(id StreamID) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	delete(t.items, id)
+	empty := len(t.items) == 0
+	t.mu.Unlock()
+	if empty {
+		t.once.Do(func() { close(t.done) })
+	}
+}
+
+func (t *readToucher) pending() []StreamGroupItem {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]StreamGroupItem, 0, len(t.items))
+	for _, it := range t.items {
+		out = append(out, it)
+	}
+	return out
+}
+
+// startTouching touches a read's records every touchInterval of the lease
+// the read's expiry gives, from when they arrived, whether their handlers
+// have started or are waiting for a slot, until each is acked or nacked. The nth touch is
+// due at arrival plus n intervals, a slot that passed during a slow touch
+// skipped, and never later than an interval before the lease runs out by
+// the server's last word: each touch's answer gives the expiry in the
+// server's clock, read through the offset the read's own expiry showed, so a
+// skewed clock doesn't let a lease lapse. A record a touch refuses (its
+// delivery moved on) is dropped; a stale, conflict, not found or bad request
+// refusal ends touching; anything else (overloaded, unavailable, a lost
+// connection) is tried again next interval. Nil without AutoTouch.
+func (sw *StreamWorker) startTouching(stream string, read *StreamGroupReadResult, arrived time.Time) *readToucher {
+	if !sw.config.AutoTouch || len(read.Records) == 0 {
+		return nil
+	}
+	t := &readToucher{items: make(map[StreamID]StreamGroupItem, len(read.Records)), done: make(chan struct{})}
+	for _, r := range read.Records {
+		t.items[r.ID] = r.Item()
+	}
+	// The lease is what the read's expiry leaves from arrival, within a
+	// lease's bounds. serverAhead is how far the server's clock reads past
+	// this one's, as far as the bounds show it.
+	lease := time.UnixMilli(read.ExpiresAtMS).Sub(arrived)
+	if lease <= 0 {
+		lease = MinGroupAckTimeoutMS * time.Millisecond
+	}
+	lease = min(lease, MaxGroupAckTimeoutMS*time.Millisecond)
+	interval := touchInterval(uint64(lease / time.Millisecond))
+	localExpiry := arrived.Add(lease)
+	serverAhead := time.UnixMilli(read.ExpiresAtMS).Sub(localExpiry)
+	go func() {
+		warned := map[Reason]bool{}
+		next := arrived.Add(interval)
+		timer := time.NewTimer(time.Until(next))
+		defer timer.Stop()
+		for {
+			select {
+			case <-t.done:
+				return
+			case <-sw.closeCtx.Done():
+				return
+			case <-timer.C:
+			}
+			items := t.pending()
+			if len(items) == 0 {
+				return
+			}
+			rep, err := sw.ackClient.Stream.GroupTouch(stream, sw.config.Group, read.Lease, items, nil)
+			var se *ServerError
+			switch {
+			case err == nil:
+				for _, f := range rep.Refused {
+					if f.Why == QueueGone {
+						// Acked or nacked as this touch went out.
+						t.drop(f.ID)
+						continue
+					}
+					sw.logger.Printf("[%s] Touch for %s was refused (%s), no longer touching it", stream, f.ID, f.Why)
+					t.drop(f.ID)
+				}
+				if rep.ExpiresAtMS > 0 {
+					localExpiry = time.UnixMilli(rep.ExpiresAtMS).Add(-serverAhead)
+				}
+			case errors.As(err, &se) && (se.Status == StatusConflict || se.Status == StatusNotFound || se.Status == StatusBadRequest):
+				sw.logger.Printf("[%s] Touch was refused, stopping: %v", stream, err)
+				return
+			case IsConnectionError(err):
+				sw.logger.Printf("[%s] Touch lost: %v; reconnecting", stream, err)
+				_ = sw.reconnectAck()
+			case IsLimit(err):
+				if errors.As(err, &se) && !warned[se.Reason] {
+					warned[se.Reason] = true
+					sw.logger.Printf("[%s] Touch refused at a limit: %v; trying again", stream, err)
+				}
+			default:
+				sw.logger.Printf("[%s] Touch failed: %v; trying again", stream, err)
+			}
+			now := time.Now()
+			for !next.After(now) {
+				next = next.Add(interval)
+			}
+			if latest := localExpiry.Add(-interval); next.After(latest) {
+				next = latest
+			}
+			if earliest := now.Add(minTouchInterval); next.Before(earliest) {
+				next = earliest
+			}
+			timer.Reset(time.Until(next))
+		}
+	}()
+	return t
+}
+
+// reportWithRetry acks (or nacks, with why) a record, reconnecting if the
+// connection was lost while the record was being processed and sending the
+// same report again: one that already applied is refused, never applied
+// twice.
+func (sw *StreamWorker) reportWithRetry(stream string, lease StreamGroupLease, record StreamGroupRecord, ack bool, why string) {
 	op := "ack"
 	if !ack {
 		op = "nack"
 	}
+	id := record.ID
+	items := []StreamGroupItem{record.Item()}
 	const maxAttempts = 3
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		var rep *StreamGroupReport
 		var err error
 		if ack {
-			err = sw.ackClient.Stream.GroupAck(stream, sw.config.Group, []StreamID{id}, nil)
+			rep, err = sw.ackClient.Stream.GroupAck(stream, sw.config.Group, lease, items, nil)
 		} else {
-			err = sw.ackClient.Stream.GroupNack(stream, sw.config.Group, []StreamID{id}, nil)
+			rep, err = sw.ackClient.Stream.GroupNack(stream, sw.config.Group, lease, items, &StreamGroupNackOptions{Error: truncateError(why)})
 		}
 		if err == nil {
+			if len(rep.Refused) > 0 && attempt == 1 {
+				sw.logger.Printf("[%s] %s for %s applied nothing (%s): the record's delivery moved on", stream, op, id, rep.Refused[0].Why)
+			}
 			return
 		}
 		if !resultLost(err) {
@@ -747,6 +775,36 @@ func (sw *StreamWorker) ackWithRetry(stream string, id StreamID, ack bool) {
 			return
 		}
 	}
+}
+
+// handBack nacks records a stop left unstarted, at once and in one
+// report: each spends an attempt, so one at its last is dead.
+func (sw *StreamWorker) handBack(stream string, lease StreamGroupLease, records []StreamGroupRecord, touch *readToucher) {
+	items := make([]StreamGroupItem, len(records))
+	for i, r := range records {
+		touch.drop(r.ID)
+		items[i] = r.Item()
+	}
+	opts := &StreamGroupNackOptions{Error: "worker stopped before handling it"}
+	for attempt := 1; ; attempt++ {
+		_, err := sw.ackClient.Stream.GroupNack(stream, sw.config.Group, lease, items, opts)
+		if err == nil {
+			sw.logger.Printf("[%s] Handed back %d records not started before the stop", stream, len(items))
+			return
+		}
+		if !resultLost(err) || attempt == 3 || sw.reconnectAck() != nil {
+			sw.logger.Printf("Error: [%s] could not hand back %d records, they come back once their lease runs out: %v", stream, len(items), err)
+			return
+		}
+	}
+}
+
+// truncateError cuts a nack's error to what the server takes.
+func truncateError(s string) string {
+	if len(s) > maxGroupNackError {
+		return s[:maxGroupNackError]
+	}
+	return s
 }
 
 // reconnectAck reconnects the ack connection. Concurrent handlers that hit
@@ -767,8 +825,8 @@ func (sw *StreamWorker) reconnectAck() error {
 	return nil
 }
 
-// Drain stops reading new records and lets running handlers finish and ack,
-// then Start leaves the groups and returns nil. The server is told; the
+// Drain stops reading new records and lets the records already read finish
+// and ack, then Start returns nil. The server is told; the
 // notice is retried while the worker is disconnected. A held GroupRead
 // doesn't hold it up: the poll connection is closed, since the server
 // doesn't answer it on a drain. A Stop during a drain still cancels the
@@ -782,7 +840,10 @@ func (sw *StreamWorker) Drain() {
 	}
 }
 
-// Stop gracefully stops the stream worker.
+// Stop stops the stream worker: it reads nothing more and cancels the
+// running handlers' contexts. Records a read took that haven't started are
+// not run: they are handed back at once with a nack, which spends one of
+// their attempts, so with MaxDeliver 1 it leaves them dead.
 func (sw *StreamWorker) Stop() {
 	sw.logger.Printf("Stopping stream worker...")
 	sw.runMu.Lock()
