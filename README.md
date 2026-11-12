@@ -467,8 +467,9 @@ with a backoff, past the client's own retries.
 A `limit` refusal (`flo.ErrLimit`) is never retried, by the client or a
 worker: it is terminal in that retrying won't clear it until something is
 deleted, the node is given more room, or the setting is raised, though it
-needn't last. A worker whose poll is refused this way logs it once per
-reason and polls again with a backoff of up to 30 s; it doesn't stop.
+needn't last. Start fails with the limit error; a limit hit while running is
+logged and backed off: once per reason, polling again with a backoff of up
+to 30 s.
 
 The client never retries two refusals from a halted shard on your
 requests. `unavailable` with reason `shard_halted` (`flo.IsShardHalted`)

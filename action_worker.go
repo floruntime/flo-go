@@ -203,7 +203,8 @@ func (w *ActionWorker) MustRegisterAction(actionName string, handler ActionHandl
 	}
 }
 
-// Start begins polling and executing actions.
+// Start begins polling and executing actions. Start fails with the limit
+// error; a limit hit while running is logged and backed off.
 func (w *ActionWorker) Start(ctx context.Context) error {
 	w.runMu.Lock()
 	w.ctx, w.cancel = context.WithCancel(ctx)

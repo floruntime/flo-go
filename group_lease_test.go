@@ -363,3 +363,35 @@ func TestStreamWorkerAutoTouchesOnItsGroupsLease(t *testing.T) {
 		t.Errorf("the ack wasn't last: %v", order)
 	}
 }
+
+// Start fails with the limit error, after one registration: a limit isn't
+// waited out at start.
+func TestAWorkerStartRefusedAtALimitFails(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		s, addr := newFrameServer(t, func(op OpCode, n int) reply {
+			if op == OpWorkerRegister {
+				return reply{status: StatusLimit, body: refusalBody(ReasonTooManyActions, RanNo, "limit: actions")}
+			}
+			return reply{}
+		})
+		var done <-chan error
+		if stream {
+			sw, _, _ := streamDrainWorker(t, addr, 0)
+			done = startWorker(sw.Start)
+		} else {
+			done = startWorker(drainTestWorker(t, addr, succeed).Start)
+		}
+		var err error
+		select {
+		case err = <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("stream=%v: Start still running at a limit", stream)
+		}
+		if !errors.Is(err, ErrLimit) {
+			t.Errorf("stream=%v: Start = %v, want ErrLimit", stream, err)
+		}
+		if n := len(s.got(OpWorkerRegister)); n != 1 {
+			t.Errorf("stream=%v: %d registrations, want 1", stream, n)
+		}
+	}
+}

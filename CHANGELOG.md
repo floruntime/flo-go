@@ -137,8 +137,9 @@ live tests run against; this SDK no longer talks to an older server.
   `ReasonTooManyActions`, `ReasonTooManyWorkflowDefinitions` and
   `ReasonTooManyWorkflowRuns`: the node is at a limit. It is never retried:
   retrying won't clear it until something is deleted, the node is given
-  more room, or the setting is raised. A worker refused this way logs it
-  once per reason and polls again with a backoff of up to 30 s
+  more room, or the setting is raised. A worker's Start fails with the limit
+  error; a limit hit while running is logged and backed off, once per
+  reason, polling again with a backoff of up to 30 s
 - `StreamClient.GroupCreate` (lease 5 s to 12 h and attempts),
   `GroupTouch`, `GroupInfo` and `GroupDelete`; `OptDead` and `OptErrorText`
 - `StreamWorkerOptions.AutoTouch`, `StreamContext.Touch` and

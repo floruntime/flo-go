@@ -302,7 +302,9 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 	}, nil
 }
 
-// Start begins consuming stream records from all configured streams.
+// Start begins consuming stream records from all configured streams. Start
+// fails with the limit error; a limit hit while running is logged and backed
+// off.
 func (sw *StreamWorker) Start(ctx context.Context) error {
 	sw.runMu.Lock()
 	sw.ctx, sw.cancel = context.WithCancel(ctx)
@@ -359,6 +361,10 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 		}
 		if IsOutcomePending(err) {
 			return err
+		}
+		// A start refused at a limit fails: the caller decides what to do.
+		if IsLimit(err) {
+			return fmt.Errorf("failed to register stream worker: %w", err)
 		}
 		sw.logger.Printf("Warning: failed to register in worker registry: %v", err)
 		break
