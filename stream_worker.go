@@ -302,9 +302,11 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 	}, nil
 }
 
-// Start begins consuming stream records from all configured streams. Start
-// fails with the limit error; a limit hit while running is logged and backed
-// off.
+// Start begins consuming stream records from all configured streams. Its
+// registration waits out a halted shard, and an overloaded or unavailable
+// refusal that didn't run, with a backoff; any other refusal fails Start
+// with that error. Start fails with the limit error; a limit hit while
+// running is logged and backed off.
 func (sw *StreamWorker) Start(ctx context.Context) error {
 	sw.runMu.Lock()
 	sw.ctx, sw.cancel = context.WithCancel(ctx)
@@ -345,27 +347,28 @@ func (sw *StreamWorker) Start(ctx context.Context) error {
 	// Whatever the registration's answer: one whose answer was lost, or a
 	// drain's reconnect, still registers the worker.
 	defer sendOnPoll(sw.client, sw.closeCtx, func() error { return wc.Deregister(nil) })
-	// A halted shard holds the start until it's repaired, or a stop or
-	// drain ends the wait.
+	// A halted shard, or a refusal that didn't run and may pass, holds the
+	// start until it clears, or a stop or drain ends the wait. Any other
+	// refusal fails Start.
 	halted := newHaltedBackoff()
+	refused := newWorkerBackoff()
 	for {
 		err := wc.Register(regOpts)
 		if err == nil {
 			break
 		}
-		if waitIfHalted(sw.pollCtx, sw.logger, "worker registration", err, &halted) {
+		if waitAtStart(sw.pollCtx, sw.logger, err, &halted, &refused) {
 			if sw.pollCtx.Err() == nil {
 				continue
 			}
 			break
 		}
-		if IsOutcomePending(err) {
-			return err
-		}
-		// A start refused at a limit fails: the caller decides what to do.
-		if IsLimit(err) {
+		var se *ServerError
+		if errors.As(err, &se) {
 			return fmt.Errorf("failed to register stream worker: %w", err)
 		}
+		// A lost connection: the poll loop reconnects, and registers again
+		// when it does.
 		sw.logger.Printf("Warning: failed to register in worker registry: %v", err)
 		break
 	}

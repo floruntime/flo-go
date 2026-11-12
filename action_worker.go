@@ -203,8 +203,10 @@ func (w *ActionWorker) MustRegisterAction(actionName string, handler ActionHandl
 	}
 }
 
-// Start begins polling and executing actions. Start fails with the limit
-// error; a limit hit while running is logged and backed off.
+// Start begins polling and executing actions. Its registration waits out a
+// halted shard, and an overloaded or unavailable refusal that didn't run,
+// with a backoff; any other refusal fails Start with that error. Start fails
+// with the limit error; a limit hit while running is logged and backed off.
 func (w *ActionWorker) Start(ctx context.Context) error {
 	w.runMu.Lock()
 	w.ctx, w.cancel = context.WithCancel(ctx)
@@ -270,12 +272,13 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 	// Before registering: a registration whose answer was lost still counts.
 	defer sendOnPoll(w.client, w.closeCtx, func() error { return workerClient.Deregister(nil) })
 	halted := newHaltedBackoff()
+	refused := newWorkerBackoff()
 	for {
 		err := workerClient.Register(regOpts)
 		if err == nil {
 			break
 		}
-		if waitIfHalted(pollCtx, w.logger, "worker registration", err, &halted) && pollCtx.Err() == nil {
+		if waitAtStart(pollCtx, w.logger, err, &halted, &refused) && pollCtx.Err() == nil {
 			continue
 		}
 		if w.drain.active() {

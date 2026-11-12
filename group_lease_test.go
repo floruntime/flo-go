@@ -395,3 +395,76 @@ func TestAWorkerStartRefusedAtALimitFails(t *testing.T) {
 		}
 	}
 }
+
+// A registration refused for good fails Start with that refusal, after one
+// request, and the worker reads nothing.
+func TestAWorkerStartRefusedAsABadRequestFails(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		s, addr := newFrameServer(t, func(op OpCode, n int) reply {
+			if op == OpWorkerRegister {
+				return reply{status: StatusBadRequest, body: refusalBody(ReasonFieldTooLong, RanNo, "bad request: machine id too long")}
+			}
+			return reply{}
+		})
+		var done <-chan error
+		if stream {
+			sw, _, _ := streamDrainWorker(t, addr, 0)
+			done = startWorker(sw.Start)
+		} else {
+			done = startWorker(drainTestWorker(t, addr, succeed).Start)
+		}
+		var err error
+		select {
+		case err = <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("stream=%v: Start still running after a bad request", stream)
+		}
+		var se *ServerError
+		if !IsBadRequest(err) || !errors.As(err, &se) || se.Reason != ReasonFieldTooLong {
+			t.Errorf("stream=%v: Start = %v, want the bad request", stream, err)
+		}
+		if n := len(s.got(OpWorkerRegister)); n != 1 {
+			t.Errorf("stream=%v: %d registrations, want 1", stream, n)
+		}
+		if n := len(s.got(OpActionAwait)) + len(s.got(OpStreamGroupRead)); n != 0 {
+			t.Errorf("stream=%v: %d polls after a failed start, want none", stream, n)
+		}
+	}
+}
+
+// A registration refused overloaded, ran no, is waited out, then the worker
+// starts.
+func TestAWorkerStartWaitsOutAnOverloadedRegistration(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		poll := OpActionAwait
+		if stream {
+			poll = OpStreamGroupRead
+		}
+		s, addr := newFrameServer(t, func(op OpCode, n int) reply {
+			switch {
+			case op == OpWorkerRegister && n < 2:
+				return reply{status: StatusOverloaded, body: refusalBody(ReasonShardBusy, RanNo, "overloaded")}
+			case op == poll:
+				time.Sleep(10 * time.Millisecond)
+			}
+			return reply{}
+		})
+		var done <-chan error
+		var stop func()
+		if stream {
+			sw, _, _ := streamDrainWorker(t, addr, 0)
+			stop = sw.Stop
+			done = startWorker(sw.Start)
+		} else {
+			w := drainTestWorker(t, addr, succeed)
+			stop = w.Stop
+			done = startWorker(w.Start)
+		}
+		waitFor(t, "polls after the refusals", func() bool { return len(s.got(poll)) > 0 })
+		stop()
+		waitStart(t, done)
+		if n := len(s.got(OpWorkerRegister)); n < 3 {
+			t.Errorf("stream=%v: %d registrations, want the refused ones and one more", stream, n)
+		}
+	}
+}

@@ -133,6 +133,23 @@ func waitIfHalted(ctx context.Context, logger Logger, what string, err error, b 
 	return true
 }
 
+// waitAtStart reports whether a worker's registration refused with err is
+// waited out: a halted shard's refusal, with the halted backoff, or one
+// that didn't run and may pass (overloaded or unavailable, ran no), with
+// the worker backoff. Any other refusal fails the start.
+func waitAtStart(ctx context.Context, logger Logger, err error, halted, refused *backoff) bool {
+	if waitIfHalted(ctx, logger, "worker registration", err, halted) {
+		return true
+	}
+	if !isRefusedUnrun(err) {
+		return false
+	}
+	d := refused.next()
+	logger.Printf("Warning: worker registration refused: %v; retrying in %v", err, d)
+	sleepCtx(ctx, d)
+	return true
+}
+
 // sleepCtx waits d, or until ctx is done.
 func sleepCtx(ctx context.Context, d time.Duration) {
 	t := time.NewTimer(d)
