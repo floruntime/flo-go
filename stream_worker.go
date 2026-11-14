@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // StreamWorkerOptions holds stream worker configuration.
@@ -567,7 +568,8 @@ func (sw *StreamWorker) handleReconnect() error {
 }
 
 // processRecord handles a single record, then stops touching it and acks
-// or nacks it. touch may be nil.
+// or nacks it, or abandons it if the worker's stop cut it short. touch may
+// be nil.
 func (sw *StreamWorker) processRecord(stream string, lease StreamGroupLease, record StreamGroupRecord, touch *readToucher) {
 	sw.running.Add(1)
 	defer sw.running.Add(-1)
@@ -596,6 +598,14 @@ func (sw *StreamWorker) processRecord(stream string, lease StreamGroupLease, rec
 	}
 
 	err := sw.handler(sctx)
+	if err != nil && sw.ctx.Err() != nil {
+		// The worker's own stop cancelled it, whatever error the handler
+		// made of that: not a failure, so it mustn't spend an attempt (a
+		// rolling restart would dead-letter every record in flight).
+		sw.logger.Printf("[%s] Stream record %s cut short by the stop: %v", stream, record.ID, err)
+		sw.handBack(stream, lease, []StreamGroupRecord{record}, touch)
+		return
+	}
 	if err != nil {
 		atomic.AddUint64(&sw.messagesFailed, 1)
 		sw.logger.Printf("[%s] Stream record %s failed: %v", stream, record.ID, err)
@@ -761,6 +771,11 @@ func (sw *StreamWorker) reportWithRetry(stream string, lease StreamGroupLease, r
 			}
 			return
 		}
+		if IsNotFound(err) {
+			// Not the record's refusal: the group is gone, and its records with it.
+			sw.logger.Printf("Error: [%s] %s for %s refused, group %q not found: %v", stream, op, id, sw.config.Group, err)
+			return
+		}
 		if !resultLost(err) {
 			sw.logger.Printf("Error: [%s] dropped %s for %s, the record will be redelivered: %v", stream, op, id, err)
 			return
@@ -777,19 +792,24 @@ func (sw *StreamWorker) reportWithRetry(stream string, lease StreamGroupLease, r
 	}
 }
 
-// handBack nacks records a stop left unstarted, at once and in one
-// report: each spends an attempt, so one at its last is dead.
+// handBack abandons records a stop left unstarted or cut short, at once
+// and in one report: ready again for another consumer, with no failure
+// counted, so a stop never dead-letters them.
 func (sw *StreamWorker) handBack(stream string, lease StreamGroupLease, records []StreamGroupRecord, touch *readToucher) {
 	items := make([]StreamGroupItem, len(records))
 	for i, r := range records {
 		touch.drop(r.ID)
 		items[i] = r.Item()
 	}
-	opts := &StreamGroupNackOptions{Error: "worker stopped before handling it"}
+	opts := &StreamGroupNackOptions{Abandon: true}
 	for attempt := 1; ; attempt++ {
 		_, err := sw.ackClient.Stream.GroupNack(stream, sw.config.Group, lease, items, opts)
 		if err == nil {
-			sw.logger.Printf("[%s] Handed back %d records not started before the stop", stream, len(items))
+			sw.logger.Printf("[%s] Handed back %d records the stop left unfinished", stream, len(items))
+			return
+		}
+		if IsNotFound(err) {
+			sw.logger.Printf("Error: [%s] could not hand back %d records, group %q not found: its records are gone with it", stream, len(items), sw.config.Group)
 			return
 		}
 		if !resultLost(err) || attempt == 3 || sw.reconnectAck() != nil {
@@ -799,12 +819,17 @@ func (sw *StreamWorker) handBack(stream string, lease StreamGroupLease, records 
 	}
 }
 
-// truncateError cuts a nack's error to what the server takes.
+// truncateError cuts a nack's error to what the server takes, at a
+// character's start.
 func truncateError(s string) string {
-	if len(s) > maxGroupNackError {
-		return s[:maxGroupNackError]
+	if len(s) <= MaxGroupNackError {
+		return s
 	}
-	return s
+	n := MaxGroupNackError
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // reconnectAck reconnects the ack connection. Concurrent handlers that hit
@@ -842,8 +867,11 @@ func (sw *StreamWorker) Drain() {
 
 // Stop stops the stream worker: it reads nothing more and cancels the
 // running handlers' contexts. Records a read took that haven't started are
-// not run: they are handed back at once with a nack, which spends one of
-// their attempts, so with MaxDeliver 1 it leaves them dead.
+// not run, and a handler that returns an error once the stop cancelled it
+// isn't counted as failing: both are abandoned, handed back ready at once
+// with no failure counted, so stopping never dead-letters them. A handler
+// error while the worker isn't stopping is nacked: only a nack's failures
+// dead-letter a record that always fails.
 func (sw *StreamWorker) Stop() {
 	sw.logger.Printf("Stopping stream worker...")
 	sw.runMu.Lock()

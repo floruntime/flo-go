@@ -12,9 +12,10 @@ import (
 // it is sent again. Only a refusal whose status is overloaded or
 // unavailable and whose Ran is RanNo is retried: the server says it never
 // ran, so resending is safe for any operation, writes included. Each retry
-// is a new request with a new id; the server routes it afresh. An
-// unavailable with ReasonShardHalted is not retried: the shard stays halted
-// until an operator repairs it.
+// is a new request with a new id; the server routes it afresh. Two are not
+// retried: an unavailable with ReasonShardHalted, since the shard stays
+// halted until an operator repairs it, and an overloaded with
+// ReasonGroupHeldFull, since resending the read won't free the group.
 type RetryPolicy struct {
 	// MaxAttempts counts the first try; 1 (or less) turns retrying off.
 	MaxAttempts int
@@ -59,13 +60,16 @@ func refusedUnrun(resp *rawResponse) bool {
 }
 
 // isRefusedUnrun reports whether err is a refusal the server says it didn't
-// run, of a kind worth trying again later.
+// run, of a kind worth trying again later. A halted shard stays halted
+// until an operator acts, and a full group stays full until records leave
+// it (or, at the shard's cap, other groups and queues drain).
 func isRefusedUnrun(err error) bool {
 	var se *ServerError
 	if !errors.As(err, &se) {
 		return false
 	}
-	return (se.Status == StatusOverloaded || se.Status == StatusUnavailable) && se.Ran == RanNo && se.Reason != ReasonShardHalted
+	return (se.Status == StatusOverloaded || se.Status == StatusUnavailable) && se.Ran == RanNo &&
+		se.Reason != ReasonShardHalted && se.Reason != ReasonGroupHeldFull
 }
 
 // backoff is a capped, doubling, fully jittered wait.
@@ -160,10 +164,11 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 	}
 }
 
-// limitNotice backs a worker loop off a limit refusal (ErrLimit), which no
-// retry clears until an operator or the application acts: it warns once
-// per distinct reason, not on every wait, and waits with the halted
-// backoff, so the loop neither spins nor stops.
+// limitNotice backs a worker loop off a refusal no retry clears until the
+// application acts: a limit (ErrLimit), or a group whose consumers hold too
+// many records (ErrGroupHeldFull). It warns once per distinct reason, not
+// on every wait, and waits with the halted backoff, so the loop neither
+// spins nor stops.
 type limitNotice struct {
 	b      backoff
 	warned map[Reason]bool
@@ -173,7 +178,7 @@ type limitNotice struct {
 // time its reason is seen and waits the next backoff, or until ctx ends.
 func (n *limitNotice) wait(ctx context.Context, logger Logger, what string, err error) bool {
 	var se *ServerError
-	if !errors.As(err, &se) || se.Status != StatusLimit {
+	if !errors.As(err, &se) || (se.Status != StatusLimit && !errors.Is(err, ErrGroupHeldFull)) {
 		return false
 	}
 	if n.warned == nil {
@@ -182,7 +187,11 @@ func (n *limitNotice) wait(ctx context.Context, logger Logger, what string, err 
 	}
 	if !n.warned[se.Reason] {
 		n.warned[se.Reason] = true
-		logger.Printf("Warning: %s refused at a limit (%s): %s; retrying with backoff until it clears", what, se.Reason, se.Message)
+		why := "at a limit"
+		if se.Status != StatusLimit {
+			why = "with the group or its shard full"
+		}
+		logger.Printf("Warning: %s refused %s (%s): %s; retrying with backoff until it clears", what, why, se.Reason, se.Message)
 	}
 	sleepCtx(ctx, n.b.next())
 	return true

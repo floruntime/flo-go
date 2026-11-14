@@ -33,7 +33,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0xc688167b51fcc846
+	TableHash uint64 = 0xc1f93eb0ed86a281
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -206,7 +206,7 @@ const (
 	// StatusNoNamespace: the namespace the request names doesn't exist.
 	// Not StatusNotFound, which is a missing key.
 	StatusNoNamespace StatusCode = 14
-	// StatusLimit: the node is at a limit it holds to (ErrLimit). The
+	// StatusLimit: the node is at a limit built into it (ErrLimit). The
 	// reason names which; it never ran.
 	StatusLimit StatusCode = 15
 )
@@ -250,7 +250,7 @@ func (s StatusCode) String() string {
 	case StatusNoNamespace:
 		return "No such namespace"
 	case StatusLimit:
-		return "At a limit: delete something, give the node more room, or raise the setting"
+		return "At a limit: delete something first, or give the node more memory"
 	default:
 		return fmt.Sprintf("Unknown status %d", uint8(s))
 	}
@@ -285,7 +285,7 @@ const (
 	OptAckTimeoutMS OptionTag = 0x30 // u32: A group's lease: a record not acked this long is delivered again (5 s to 12 h)
 	OptMaxDeliver   OptionTag = 0x31 // u8: A group's attempts: a record nacked or expired this many times is dead (1 to 255)
 	OptDead         OptionTag = 0x32 // void: A nack dead-letters its records now
-	OptErrorText    OptionTag = 0x33 // string: Why a nack's records failed
+	OptAbandon      OptionTag = 0x34 // void: A nack hands its records back unstarted: ready at once, no attempt spent
 
 	// Time-Series Options (0x60 - 0x6F)
 	OptTSFromMS      OptionTag = 0x60 // i64: Start of time range (inclusive, unix ms)
@@ -628,9 +628,10 @@ type DeadLetter struct {
 	Size         uint32
 	Payload      []byte
 	EnqueuedAtMS int64
-	Attempts     uint32
-	Priority     uint8
-	MovedAtMS    int64
+	// Deliveries counts the times it was delivered.
+	Deliveries uint32
+	Priority   uint8
+	MovedAtMS  int64
 }
 
 // DLQPage is one page of a queue's dead letters, oldest first.
@@ -654,9 +655,10 @@ const MaxPeekLimit = 100
 
 // PeekedMessage is a ready message, as Peek shows it.
 type PeekedMessage struct {
-	Seq          uint64
-	Priority     uint32
-	Attempts     uint32
+	Seq      uint64
+	Priority uint32
+	// Deliveries counts the times it was delivered.
+	Deliveries   uint32
 	EnqueuedAtMS int64
 	// Size is the payload's whole length; Payload holds at most its first
 	// 4 KiB.
@@ -977,8 +979,14 @@ type StreamGroupNackOptions struct {
 	DelayMS uint64
 	// Dead makes them dead now, whatever attempts are left.
 	Dead bool
-	// Error says why they failed, at most 255 bytes.
+	// Error says why they failed, at most MaxGroupNackError bytes.
 	Error string
+	// Abandon hands the records back unstarted: ready again at once, the
+	// delivery counted but no failure, so it never dead-letters them. Use
+	// it only for records the consumer never started (it is stopping); a
+	// consumer that abandons on errors cycles a poison record forever.
+	// It takes no DelayMS, Dead or Error.
+	Abandon bool
 }
 
 // StreamGroupInfo is a consumer group's counts. Ready, Leased, Dead and
@@ -1644,8 +1652,9 @@ const (
 	// ReasonMemoryBudget (with StatusLimit): the node's memory budget is
 	// spent. The message names the node.
 	ReasonMemoryBudget Reason = 32
-	// ReasonTooManyActions (with StatusLimit): the node holds as many
-	// actions as it registers; delete one first.
+	// ReasonTooManyActions (with StatusLimit): the shard the action's name
+	// routes to holds as many actions as it registers, a number built into
+	// the server; delete one first.
 	ReasonTooManyActions Reason = 33
 	// ReasonTooManyWorkflowDefinitions (with StatusLimit): the node holds as
 	// many workflow definitions as it keeps; delete one first.
@@ -1653,6 +1662,17 @@ const (
 	// ReasonTooManyWorkflowRuns (with StatusLimit): the node holds as many
 	// workflow runs as it keeps; let some finish or delete them first.
 	ReasonTooManyWorkflowRuns Reason = 35
+	// ReasonQueueFull (with StatusOverloaded): the queue holds as many
+	// messages or bytes as its caps allow, or the shard's queues and groups
+	// together do. It drains as messages are acked, so it is retried like
+	// any overloaded refusal that didn't run (ErrQueueFull).
+	ReasonQueueFull Reason = 36
+	// ReasonGroupHeldFull (with StatusOverloaded): a group read took
+	// nothing new because the group is at its caps, counting its ready,
+	// leased and dead records, or the shard's queues and groups together
+	// are at the shard's. Reading again won't help, so it is not retried
+	// (ErrGroupHeldFull).
+	ReasonGroupHeldFull Reason = 37
 )
 
 var reasonNames = map[Reason]string{
@@ -1669,6 +1689,14 @@ var reasonNames = map[Reason]string{
 	ReasonShardHalted: "shard_halted", ReasonAdminOnly: "admin_only", ReasonJobRunning: "job_running",
 	ReasonMemoryBudget: "memory_budget", ReasonTooManyActions: "too_many_actions",
 	ReasonTooManyWorkflowDefinitions: "too_many_workflow_definitions", ReasonTooManyWorkflowRuns: "too_many_workflow_runs",
+	ReasonQueueFull: "queue_full", ReasonGroupHeldFull: "group_held_full",
+}
+
+// Known reports whether this SDK knows the reason. A newer server's reason
+// is kept as its number, with the server's message.
+func (r Reason) Known() bool {
+	_, ok := reasonNames[r]
+	return ok
 }
 
 func (r Reason) String() string {

@@ -229,9 +229,8 @@ const (
 	// MinGroupAckTimeoutMS and MaxGroupAckTimeoutMS bound a group's lease.
 	MinGroupAckTimeoutMS = 5000
 	MaxGroupAckTimeoutMS = 12 * 60 * 60 * 1000
-	// maxGroupNackError is the longest error a nack carries: the server
-	// takes 1024 bytes, but it travels as an option, whose length is a u8.
-	maxGroupNackError = 255
+	// MaxGroupNackError is the longest error a nack carries, in bytes.
+	MaxGroupNackError = 1024
 )
 
 // groupValue codes a group request's value: [group_len:u16][group] and,
@@ -387,11 +386,11 @@ func parseGroupReadResponse(data []byte) (*StreamGroupReadResult, error) {
 
 // groupReportBody codes a report's value: group, consumer, term, index,
 // then each record's id and deliveries.
-func groupReportBody(group string, lease StreamGroupLease, items []StreamGroupItem) (*bodyWriter, error) {
+func groupReportBody(group string, lease StreamGroupLease, items []StreamGroupItem, extra int) (*bodyWriter, error) {
 	if len(items) == 0 || len(items) > MaxGroupBatch {
 		return nil, fmt.Errorf("flo: a group report names 1..%d records, got %d", MaxGroupBatch, len(items))
 	}
-	w, err := groupValue(group, &lease.Consumer, 8+8+4+20*len(items))
+	w, err := groupValue(group, &lease.Consumer, 8+8+4+20*len(items)+extra)
 	if err != nil {
 		return nil, err
 	}
@@ -410,12 +409,14 @@ func groupReportBody(group string, lease StreamGroupLease, items []StreamGroupIt
 // is ok with, per record, applied or refused and why. A refusal means the
 // record's delivery moved on (its lease ran out, it was delivered again, or
 // another consumer holds it): nothing was applied to it, and resending
-// won't change that. A resent ack whose first applied is refused gone.
+// won't change that. A resent ack whose first applied is refused gone. A
+// report to a group that isn't there (deleted, say) is ErrNotFound, not a
+// refusal per record.
 func (s *StreamClient) GroupAck(stream, group string, lease StreamGroupLease, items []StreamGroupItem, opts *StreamGroupAckOptions) (*StreamGroupReport, error) {
 	if opts == nil {
 		opts = &StreamGroupAckOptions{}
 	}
-	w, err := groupReportBody(group, lease, items)
+	w, err := groupReportBody(group, lease, items, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -428,7 +429,10 @@ func (s *StreamClient) GroupAck(stream, group string, lease StreamGroupLease, it
 
 // GroupNack hands leased records back: ready for the next read after
 // DelayMS, or dead once nacked or expired MaxDeliver times (at once with
-// Dead). Refusals come per record, as for GroupAck.
+// Dead). With Abandon they are handed back unstarted instead: ready at
+// once, no failure counted, never dead-lettered; abandon only records the
+// consumer never started, never on an error. Refusals come per record, as
+// for GroupAck; a group that isn't there is ErrNotFound.
 func (s *StreamClient) GroupNack(stream, group string, lease StreamGroupLease, items []StreamGroupItem, opts *StreamGroupNackOptions) (*StreamGroupReport, error) {
 	if opts == nil {
 		opts = &StreamGroupNackOptions{}
@@ -436,13 +440,17 @@ func (s *StreamClient) GroupNack(stream, group string, lease StreamGroupLease, i
 	if opts.DelayMS > MaxQueueDelayMS {
 		return nil, fmt.Errorf("flo: nack delay %d ms, at most %d", opts.DelayMS, MaxQueueDelayMS)
 	}
-	if len(opts.Error) > maxGroupNackError {
-		return nil, fmt.Errorf("flo: nack error is %d bytes, at most %d", len(opts.Error), maxGroupNackError)
+	if len(opts.Error) > MaxGroupNackError {
+		return nil, fmt.Errorf("flo: nack error is %d bytes, at most %d", len(opts.Error), MaxGroupNackError)
 	}
-	w, err := groupReportBody(group, lease, items)
+	if opts.Abandon && (opts.Dead || opts.DelayMS > 0 || opts.Error != "") {
+		return nil, errors.New("flo: an abandoning nack hands records back unstarted, so it takes no Dead, DelayMS or Error")
+	}
+	w, err := groupReportBody(group, lease, items, 2+len(opts.Error))
 	if err != nil {
 		return nil, err
 	}
+	w.bytes16([]byte(opts.Error))
 	builder := NewOptionsBuilder()
 	if opts.DelayMS > 0 {
 		builder.AddU64(OptDelayMS, opts.DelayMS)
@@ -450,8 +458,8 @@ func (s *StreamClient) GroupNack(stream, group string, lease StreamGroupLease, i
 	if opts.Dead {
 		builder.AddFlag(OptDead)
 	}
-	if opts.Error != "" {
-		builder.AddBytes(OptErrorText, []byte(opts.Error))
+	if opts.Abandon {
+		builder.AddFlag(OptAbandon)
 	}
 	resp, err := s.client.sendAndCheck(OpStreamGroupNack, s.client.getNamespace(opts.Namespace), []byte(stream), w.buf, builder.Build(), false)
 	if err != nil {
@@ -468,7 +476,7 @@ func (s *StreamClient) GroupTouch(stream, group string, lease StreamGroupLease, 
 	if opts == nil {
 		opts = &StreamGroupAckOptions{}
 	}
-	w, err := groupReportBody(group, lease, items)
+	w, err := groupReportBody(group, lease, items, 0)
 	if err != nil {
 		return nil, err
 	}

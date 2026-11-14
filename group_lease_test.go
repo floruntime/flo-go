@@ -2,6 +2,7 @@ package flo
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"strings"
@@ -87,9 +88,23 @@ func TestGroupReportsNameTheDeliveryAndEachRecord(t *testing.T) {
 	if _, err := c.Stream.GroupNack("s", "g", lease, items, &StreamGroupNackOptions{DelayMS: 10, Dead: true, Error: "e"}); err != nil {
 		t.Fatal(err)
 	}
-	wantOpts := cat([]byte{byte(OptDelayMS), 8}, u64le(10), []byte{byte(OptDead), 0, byte(OptErrorText), 1, 'e'})
-	if !bytes.Equal(value, want) || !bytes.Equal(options, wantOpts) {
-		t.Errorf("nack value % x options % x, want % x and % x", value, options, want, wantOpts)
+	// The error ends the body, [error_len:u16][error]; it isn't an option.
+	wantNack := cat(want, []byte{1, 0, 'e'})
+	wantOpts := cat([]byte{byte(OptDelayMS), 8}, u64le(10), []byte{byte(OptDead), 0})
+	if !bytes.Equal(value, wantNack) || !bytes.Equal(options, wantOpts) {
+		t.Errorf("nack value % x options % x, want % x and % x", value, options, wantNack, wantOpts)
+	}
+	if _, err := c.Stream.GroupNack("s", "g", lease, items, nil); err != nil {
+		t.Fatal(err)
+	}
+	if wantBare := cat(want, []byte{0, 0}); !bytes.Equal(value, wantBare) || len(options) != 0 {
+		t.Errorf("bare nack value % x options % x, want % x and none", value, options, wantBare)
+	}
+	if _, err := c.Stream.GroupNack("s", "g", lease, items, &StreamGroupNackOptions{Abandon: true}); err != nil {
+		t.Fatal(err)
+	}
+	if wantAbandon := []byte{byte(OptAbandon), 0}; !bytes.Equal(value, cat(want, []byte{0, 0})) || !bytes.Equal(options, wantAbandon) {
+		t.Errorf("abandon value % x options % x, want % x and % x", value, options, cat(want, []byte{0, 0}), wantAbandon)
 	}
 	rep, err := c.Stream.GroupTouch("s", "g", lease, items, nil)
 	if err != nil || rep.ExpiresAtMS != 4242 || rep.Applied != 1 {
@@ -98,7 +113,7 @@ func TestGroupReportsNameTheDeliveryAndEachRecord(t *testing.T) {
 	if !bytes.Equal(value, want) {
 		t.Errorf("touch value % x, want % x", value, want)
 	}
-	if want := []OpCode{OpStreamGroupAck, OpStreamGroupNack, OpStreamGroupTouch}; !equalOps(ops, want) {
+	if want := []OpCode{OpStreamGroupAck, OpStreamGroupNack, OpStreamGroupNack, OpStreamGroupNack, OpStreamGroupTouch}; !equalOps(ops, want) {
 		t.Errorf("ops %v, want %v", ops, want)
 	}
 }
@@ -179,7 +194,7 @@ func TestGroupRequestsOutOfBoundsAreRefusedBeforeARoundTrip(t *testing.T) {
 	_, refused["read group over"] = c.Stream.GroupRead("s", strings.Repeat("g", MaxGroupNameSize+1), "c", nil)
 	_, refused["ack of none"] = c.Stream.GroupAck("s", "g", lease, nil, nil)
 	_, refused["ack of too many"] = c.Stream.GroupAck("s", "g", lease, make([]StreamGroupItem, MaxGroupBatch+1), nil)
-	_, refused["nack error over"] = c.Stream.GroupNack("s", "g", lease, one, &StreamGroupNackOptions{Error: strings.Repeat("e", 256)})
+	_, refused["nack error over"] = c.Stream.GroupNack("s", "g", lease, one, &StreamGroupNackOptions{Error: strings.Repeat("e", MaxGroupNackError+1)})
 	_, refused["nack delay over"] = c.Stream.GroupNack("s", "g", lease, one, &StreamGroupNackOptions{DelayMS: MaxQueueDelayMS + 1})
 	_, refused["create lease under"] = c.Stream.GroupCreate("s", "g", &StreamGroupCreateOptions{AckTimeoutMS: Uint32Ptr(MinGroupAckTimeoutMS - 1)})
 	_, refused["create lease over"] = c.Stream.GroupCreate("s", "g", &StreamGroupCreateOptions{AckTimeoutMS: Uint32Ptr(MaxGroupAckTimeoutMS + 1)})
@@ -568,7 +583,9 @@ func TestAWorkerStartWaitsOutAnOverloadedRegistration(t *testing.T) {
 }
 
 // A stop runs no more of a read's records: those not started are handed
-// back at once, in one nack, and Start doesn't wait for them.
+// back at once, in one abandoning nack, and Start doesn't wait for them.
+// The handler the stop cut short is abandoned too, though it returned an
+// error: the worker's own stop cancelled it.
 func TestStreamWorkerStopHandsBackUnstartedRecords(t *testing.T) {
 	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
 		switch {
@@ -597,8 +614,52 @@ func TestStreamWorkerStopHandsBackUnstartedRecords(t *testing.T) {
 	if len(nacks) != 2 {
 		t.Fatalf("%d nacks, want 2: the stopped handler's, and one handing back the rest", len(nacks))
 	}
-	counts := []int{touchItems(t, nacks[0]), touchItems(t, nacks[1])}
-	if !(counts[0] == 2 && counts[1] == 1 || counts[0] == 1 && counts[1] == 2) {
+	counts := map[int]bool{}
+	for _, f := range nacks {
+		counts[touchItems(t, f)] = true
+		if !abandons(t, f) {
+			t.Errorf("a nack of %d records isn't a bare abandon", touchItems(t, f))
+		}
+	}
+	if !counts[1] || !counts[2] {
 		t.Errorf("nacks named %v records, want 1 and 2", counts)
+	}
+}
+
+// abandons reports whether a group nack frame is an abandon with no error.
+func abandons(t *testing.T, frame []byte) bool {
+	t.Helper()
+	_, value, options := requestParts(t, frame[HeaderSize:])
+	return bytes.Equal(options, []byte{byte(OptAbandon), 0}) && bytes.HasSuffix(value, []byte{0, 0})
+}
+
+// A handler's own error while the worker isn't stopping is a failure: a
+// plain nack carrying it, not an abandon.
+func TestStreamWorkerNacksAHandlerErrorWhenNotStopping(t *testing.T) {
+	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
+		switch {
+		case op == OpStreamGroupRead && n == 0:
+			return reply{body: readOf(1, time.Now().UnixMilli()+30000)}
+		case op == OpStreamGroupRead:
+			time.Sleep(20 * time.Millisecond)
+		}
+		return reply{}
+	})
+	sw, err := NewClient(addr, WithTimeout(time.Second)).NewStreamWorker(StreamWorkerOptions{Stream: "s", Logger: &captureLogger{}},
+		func(*StreamContext) error { return context.Canceled })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sw.Close() })
+	done := startWorker(sw.Start)
+	waitFor(t, "the nack", func() bool { return len(s.got(OpStreamGroupNack)) > 0 })
+	sw.Stop()
+	waitStart(t, done)
+	nacks := s.got(OpStreamGroupNack)
+	if len(nacks) != 1 || abandons(t, nacks[0]) {
+		t.Fatalf("%d nacks, abandon %v; want one plain nack", len(nacks), len(nacks) > 0 && abandons(t, nacks[0]))
+	}
+	if _, value, _ := requestParts(t, nacks[0][HeaderSize:]); !bytes.HasSuffix(value, []byte("context canceled")) {
+		t.Errorf("nack value ends % x, want the handler's error", value[len(value)-8:])
 	}
 }

@@ -33,7 +33,7 @@ func TestPeekAnswerIsDecodedWhole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := &PeekResult{Messages: []PeekedMessage{{Seq: 7, Priority: 2, Attempts: 1, EnqueuedAtMS: 1700, Size: 5000, Payload: []byte("head")}}, More: true}
+	want := &PeekResult{Messages: []PeekedMessage{{Seq: 7, Priority: 2, Deliveries: 1, EnqueuedAtMS: 1700, Size: 5000, Payload: []byte("head")}}, More: true}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
@@ -83,7 +83,7 @@ func TestDLQPageIsDecodedWhole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := &DLQPage{Messages: []DeadLetter{{Seq: 9, Size: 3, Payload: []byte("abc"), EnqueuedAtMS: 1700, Attempts: 4, Priority: 2, MovedAtMS: 1800}},
+	want := &DLQPage{Messages: []DeadLetter{{Seq: 9, Size: 3, Payload: []byte("abc"), EnqueuedAtMS: 1700, Deliveries: 4, Priority: 2, MovedAtMS: 1800}},
 		Total: 30, HasMore: true, LastSeq: 9}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)

@@ -288,7 +288,7 @@ const maxPeekPayload = 4096
 
 // decodeDLQPage reads a DLQ list answer:
 // [count:u32]([seq:u64][size:u32][len:u32][payload][enqueued_at_ms:i64]
-// [attempts:u32][priority:u8][moved_at_ms:i64])*[total:u64][has_more:u8][last_seq:u64].
+// [deliveries:u32][priority:u8][moved_at_ms:i64])*[total:u64][has_more:u8][last_seq:u64].
 func decodeDLQPage(data []byte) (*DLQPage, error) {
 	r := bodyReader{buf: data}
 	n := r.u32()
@@ -299,7 +299,7 @@ func decodeDLQPage(data []byte) (*DLQPage, error) {
 	for i := uint32(0); i < n && !r.bad; i++ {
 		d := DeadLetter{Seq: r.u64(), Size: r.u32(), Payload: r.bytes32()}
 		d.EnqueuedAtMS = int64(r.u64())
-		d.Attempts = r.u32()
+		d.Deliveries = r.u32()
 		d.Priority = r.u8()
 		d.MovedAtMS = int64(r.u64())
 		if len(d.Payload) > maxPeekPayload {
@@ -349,7 +349,7 @@ func decodePeekAnswer(data []byte) (*PeekResult, error) {
 	}
 	got := &PeekResult{Messages: make([]PeekedMessage, 0, n)}
 	for i := 0; i < n && !r.bad; i++ {
-		m := PeekedMessage{Seq: r.u64(), Priority: r.u32(), Attempts: r.u32(), EnqueuedAtMS: int64(r.u64()), Size: r.u32(), Payload: r.bytes16()}
+		m := PeekedMessage{Seq: r.u64(), Priority: r.u32(), Deliveries: r.u32(), EnqueuedAtMS: int64(r.u64()), Size: r.u32(), Payload: r.bytes16()}
 		if len(m.Payload) > maxPeekPayload {
 			r.bad = true
 		}

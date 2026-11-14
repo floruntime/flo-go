@@ -202,3 +202,117 @@ func TestLiveKVTransactionOverATag(t *testing.T) {
 		t.Fatalf("put of an untagged key: %v, want keys_not_colocated", err)
 	}
 }
+
+// An abandoned record is ready again at once with no failure counted: with
+// MaxDeliver 1, abandoning it more times than that leaves it alive, each
+// delivery counted. A 1024-byte nack error is taken whole, and a report to
+// a deleted group is not found.
+func TestLiveGroupAbandonNackErrorAndMissingGroup(t *testing.T) {
+	c := liveClient(t)
+	one := uint8(1)
+	if _, err := c.Stream.GroupCreate("s", "g", &StreamGroupCreateOptions{MaxDeliver: &one}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Stream.Append("s", []byte("x"), nil); err != nil {
+		t.Fatal(err)
+	}
+	for want := uint32(1); want <= 3; want++ {
+		got, err := c.Stream.GroupRead("s", "g", "c1", nil)
+		if err != nil || len(got.Records) != 1 || got.Records[0].Deliveries != want {
+			t.Fatalf("read %d: %+v, %v; want x, deliveries %d", want, got, err, want)
+		}
+		rep, err := c.Stream.GroupNack("s", "g", got.Lease, got.Items(), &StreamGroupNackOptions{Abandon: true})
+		if err != nil || rep.Applied != 1 {
+			t.Fatalf("abandon %d: %+v, %v", want, rep, err)
+		}
+	}
+	info, err := c.Stream.GroupInfo("s", "g", nil)
+	if err != nil || info.Dead != 0 || info.Ready != 1 {
+		t.Fatalf("info after three abandons at MaxDeliver 1: %+v, %v; want one ready, none dead", info, err)
+	}
+
+	got, err := c.Stream.GroupRead("s", "g", "c1", nil)
+	if err != nil || len(got.Records) != 1 {
+		t.Fatalf("read: %+v, %v", got, err)
+	}
+	why := strings.Repeat("e", MaxGroupNackError)
+	if rep, err := c.Stream.GroupNack("s", "g", got.Lease, got.Items(), &StreamGroupNackOptions{Error: why}); err != nil || rep.Applied != 1 {
+		t.Fatalf("nack with a 1024-byte error: %+v, %v", rep, err)
+	}
+	if info, err := c.Stream.GroupInfo("s", "g", nil); err != nil || info.Dead != 1 {
+		t.Fatalf("info after the nack at MaxDeliver 1: %+v, %v; want it dead", info, err)
+	}
+
+	if _, err := c.Stream.Append("s", []byte("y"), nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err = c.Stream.GroupRead("s", "g", "c1", nil)
+	if err != nil || len(got.Records) != 1 {
+		t.Fatalf("read y: %+v, %v", got, err)
+	}
+	if _, err := c.Stream.GroupDelete("s", "g", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Stream.GroupAck("s", "g", got.Lease, got.Items(), nil); !IsNotFound(err) {
+		t.Errorf("ack to a deleted group: %v, want not found", err)
+	}
+	if _, err := c.Stream.GroupNack("s", "g", got.Lease, got.Items(), &StreamGroupNackOptions{Abandon: true}); !IsNotFound(err) {
+		t.Errorf("abandon to a deleted group: %v, want not found", err)
+	}
+}
+
+// A stream worker stopped mid-read abandons the records it hadn't started
+// and the one whose handler the stop cut short: all three come back with
+// deliveries 2 and none is dead, even at MaxDeliver 1.
+func TestLiveStreamWorkerStopAbandonsUnstartedRecords(t *testing.T) {
+	c := liveClient(t)
+	one := uint8(1)
+	if _, err := c.Stream.GroupCreate("jobs", "w", &StreamGroupCreateOptions{MaxDeliver: &one}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"1", "2", "3"} {
+		if _, err := c.Stream.Append("jobs", []byte(p), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	started := make(chan struct{}, 3)
+	sw, err := c.NewStreamWorker(StreamWorkerOptions{Stream: "jobs", Group: "w", Concurrency: 1, BatchSize: 3, BlockMS: 500, Logger: &captureLogger{}},
+		func(sctx *StreamContext) error { started <- struct{}{}; <-sctx.Ctx().Done(); return sctx.Ctx().Err() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sw.Close()
+	done := make(chan error, 1)
+	go func() { done <- sw.Start(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no handler started")
+	}
+	sw.Stop()
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v", err)
+	}
+	// The cut-short handler's abandon goes out as its handler returns.
+	var info *StreamGroupInfo
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		info, err = c.Stream.GroupInfo("jobs", "w", nil)
+		if err == nil && info.Ready == 3 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err != nil || info.Dead != 0 || info.Ready != 3 || info.Leased != 0 {
+		t.Fatalf("info after the stop: %+v, %v; want all three ready, none dead", info, err)
+	}
+	got, err := c.Stream.GroupRead("jobs", "w", "c2", nil)
+	if err != nil || len(got.Records) != 3 {
+		t.Fatalf("read after the stop: %+v, %v; want all three", got, err)
+	}
+	for _, r := range got.Records {
+		if r.Deliveries != 2 {
+			t.Errorf("record %s: deliveries %d, want 2", r.ID, r.Deliveries)
+		}
+	}
+}
