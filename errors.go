@@ -75,10 +75,12 @@ func (e *ServerError) Error() string {
 	return fmt.Sprintf("flo: server error: %s", codes)
 }
 
-// Is implements error matching for errors.Is().
+// Is implements error matching for errors.Is(): a target matches on its
+// status, and on its reason too when it names one (ErrQueueFull,
+// ErrGroupHeldFull).
 func (e *ServerError) Is(target error) bool {
 	if t, ok := target.(*ServerError); ok {
-		return e.Status == t.Status
+		return e.Status == t.Status && (t.Reason == 0 || e.Reason == t.Reason)
 	}
 	return false
 }
@@ -122,14 +124,29 @@ var (
 	// that was never created return it; a write creates the namespace.
 	ErrNoNamespace = &ServerError{Status: StatusNoNamespace}
 
-	// ErrLimit matches a refusal from a node at a limit it holds to: its
-	// memory budget, or as many actions, workflow definitions or workflow
-	// runs as it keeps. The error is a *ServerError whose Reason names the
-	// limit and whose Message is the server's. It is terminal: retrying
-	// won't clear it until something is deleted, the node is given more
-	// room, or the setting is raised. It doesn't mean permanent, but no
-	// retry loop in this SDK resends it. It never ran.
+	// ErrLimit matches a refusal from a node at a limit built into the
+	// server: its memory budget, or as many actions (counted per shard),
+	// workflow definitions or workflow runs as it keeps. The error is a
+	// *ServerError whose Reason names the limit and whose Message is the
+	// server's. No setting raises these limits: retrying won't clear one
+	// until something is deleted, or the node is given more memory. It
+	// doesn't mean permanent, but no retry loop in this SDK resends it. It
+	// never ran.
 	ErrLimit = &ServerError{Status: StatusLimit}
+
+	// ErrQueueFull matches an enqueue refused because the queue, or the
+	// shard's queues and groups together, are at their caps. It is also
+	// ErrOverloaded: it drains as messages are acked, so the client retries
+	// it as any overloaded refusal that didn't run, and a producer whose
+	// retries ran out backs off and sends again.
+	ErrQueueFull = &ServerError{Status: StatusOverloaded, Reason: ReasonQueueFull}
+
+	// ErrGroupHeldFull matches a group read that took nothing new because
+	// the group's consumers hold too many records they haven't acked (or it
+	// holds dead ones). It is also ErrOverloaded, but reading again won't
+	// help until they ack or nack, so no read retries it; the stream worker
+	// logs it once and backs off, as for ErrLimit.
+	ErrGroupHeldFull = &ServerError{Status: StatusOverloaded, Reason: ReasonGroupHeldFull}
 
 	// ErrStaleReport matches a *StaleReportError.
 	ErrStaleReport = errors.New("flo: stale report")
@@ -153,15 +170,17 @@ func IsStaleReport(err error) bool {
 	return errors.Is(err, ErrStaleReport)
 }
 
-// newServerError reads a refusal's body: [reason:u16][ran:u8][message].
+// newServerError reads a refusal's body: [reason:u16][ran:u8][message]. A
+// reason this SDK doesn't know is kept as its number (Reason.Known), and a
+// ran it doesn't know reads as RanUnknown, so nothing retries it.
 func newServerError(status StatusCode, data []byte) error {
 	if len(data) < 3 {
 		return fmt.Errorf("%w: a refusal body of %d bytes", ErrIncompleteResponse, len(data))
 	}
 	reason := Reason(binary.LittleEndian.Uint16(data[0:2]))
 	ran := Ran(data[2])
-	if _, ok := reasonNames[reason]; !ok || ran > RanUnknown {
-		return fmt.Errorf("%w: a refusal with reason %d and ran %d", ErrIncompleteResponse, reason, ran)
+	if ran > RanUnknown {
+		ran = RanUnknown
 	}
 	se := &ServerError{
 		Status:  status,
@@ -220,6 +239,18 @@ func IsNoNamespace(err error) bool {
 // IsLimit reports a refusal from a node at a limit (ErrLimit).
 func IsLimit(err error) bool {
 	return errors.Is(err, ErrLimit)
+}
+
+// IsQueueFull reports an enqueue refused at its queue's or shard's caps
+// (ErrQueueFull).
+func IsQueueFull(err error) bool {
+	return errors.Is(err, ErrQueueFull)
+}
+
+// IsGroupHeldFull reports a group read refused because the group's
+// consumers hold too many records (ErrGroupHeldFull).
+func IsGroupHeldFull(err error) bool {
+	return errors.Is(err, ErrGroupHeldFull)
 }
 
 // IsConflict returns true if the error is a conflict error.

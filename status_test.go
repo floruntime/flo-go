@@ -140,7 +140,7 @@ func TestRequestsCarryTheTableHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data[22] != 3 || binary.LittleEndian.Uint64(data[24:32]) != 0xc688167b51fcc846 {
+	if data[22] != 3 || binary.LittleEndian.Uint64(data[24:32]) != 0xc1f93eb0ed86a281 {
 		t.Fatalf("header version %d table 0x%016x, want 3 and the pinned table", data[22], binary.LittleEndian.Uint64(data[24:32]))
 	}
 }
@@ -160,12 +160,54 @@ func TestRefusalCarriesReasonAndRan(t *testing.T) {
 	if strings.Contains(unclassified.Error(), "unclassified") {
 		t.Errorf("error %q names an unclassified reason", unclassified)
 	}
-	// A reason past one byte (0x0101) must be read as a u16, not as its low
-	// byte (1, which would pass as unknown_op).
-	for _, body := range [][]byte{{1, 0}, {0xff, 0xff, 0}, {1, 0, 9}, {0x01, 0x01, 0}} {
+	for _, body := range [][]byte{nil, {1, 0}} {
 		if err := checkStatus(StatusBadRequest, body, false); !errors.Is(err, ErrIncompleteResponse) {
 			t.Errorf("body %v: got %v, want a malformed refusal", body, err)
 		}
+	}
+}
+
+// A newer server's reason, or ran, is read, not refused: the reason keeps
+// its number (read as a u16, so 0x0101 isn't taken for unknown_op) and the
+// message is the server's; an unknown ran reads as may-have-run.
+func TestUnknownReasonIsKeptWithItsNumberAndMessage(t *testing.T) {
+	err := checkStatus(StatusBadRequest, refusalBody(Reason(0x0101), RanNo, "a newer refusal"), false)
+	var se *ServerError
+	if !errors.As(err, &se) || se.Reason != 0x0101 || se.Ran != RanNo || se.Message != "a newer refusal" || !IsBadRequest(err) {
+		t.Fatalf("got %#v, want bad_request with reason 257 and the message", err)
+	}
+	if se.Reason.Known() || !strings.Contains(err.Error(), "reason(257)") {
+		t.Errorf("error %q: want reason(257), unknown", err)
+	}
+	err = checkStatus(StatusOverloaded, refusalBody(ReasonUnclassified, Ran(9), "x"), false)
+	if !errors.As(err, &se) || se.Ran != RanUnknown || isRefusedUnrun(err) {
+		t.Errorf("ran 9: got %#v, want RanUnknown and not retried", err)
+	}
+
+	// Over the wire: an unknown reason under a known status and under an
+	// unknown one, each answered whole, the connection kept.
+	var n atomic.Int32
+	ln := serveAll(t, func(id uint64) []byte {
+		if n.Add(1) == 1 {
+			return statusFrame(id, StatusNotFound, refusalBody(Reason(999), RanNo, "gone, newly"))
+		}
+		return statusFrame(id, StatusCode(77), refusalBody(Reason(1000), RanNo, "newer still"))
+	})
+	c := NewClient(ln.Addr().String(), WithTimeout(time.Second), WithRetry(RetryPolicy{MaxAttempts: 1}))
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, err = c.KV.Put("k", []byte("v"), nil)
+	if !errors.As(err, &se) || se.Status != StatusNotFound || se.Reason != 999 || se.Message != "gone, newly" || !IsNotFound(err) {
+		t.Fatalf("first: got %#v, want not_found, reason 999 and its message", err)
+	}
+	_, err = c.KV.Put("k", []byte("v"), nil)
+	if !errors.As(err, &se) || se.Status != 77 || se.Reason != 1000 || se.Message != "newer still" {
+		t.Fatalf("second: got %#v, want status 77, reason 1000 and its message", err)
+	}
+	if !c.IsConnected() {
+		t.Error("an unknown refusal dropped the connection")
 	}
 }
 

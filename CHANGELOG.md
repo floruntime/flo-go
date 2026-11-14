@@ -8,11 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 These follow the server's wire. The server's op table changed with them, so
-`TableHash` is now `0xc688167b51fcc846`, the hash of flo `723fd758`, which CI's
+`TableHash` is now `0xc1f93eb0ed86a281`, the hash of flo `fd771c1d`, which CI's
 live tests run against; this SDK no longer talks to an older server.
 
 ### Breaking
 
+- A group nack's error travels in its body, up to 1024 bytes
+  (`MaxGroupNackError`); `OptErrorText` is gone. A report (ack, nack or
+  touch) to a group that isn't there is `ErrNotFound`, not a refusal per
+  record
+- `PeekedMessage.Attempts` and `DeadLetter.Attempts` are `Deliveries`
+- A refusal with a reason this SDK doesn't know is a `*ServerError` keeping
+  the reason's number (`Reason.Known` says which) and the server's message;
+  it used to be `ErrIncompleteResponse`. An unknown ran reads as
+  `RanUnknown`
+- `ServerError.Is` matches a target's reason too when the target names one,
+  so `ErrQueueFull` and `ErrGroupHeldFull` match only their reason;
+  `ErrOverloaded` still matches both
 - Consumer groups lease records, at least once, and their leases are logged,
   so a leader change keeps them. `StreamClient.GroupRead` returns a
   `*StreamGroupReadResult`: records with their `Deliveries`, the read's
@@ -135,28 +147,40 @@ live tests run against; this SDK no longer talks to an older server.
 
 - `StatusLimit` (15), `ErrLimit` and `IsLimit`, with `ReasonMemoryBudget`,
   `ReasonTooManyActions`, `ReasonTooManyWorkflowDefinitions` and
-  `ReasonTooManyWorkflowRuns`: the node is at a limit. It is never retried:
-  retrying won't clear it until something is deleted, the node is given
-  more room, or the setting is raised. A worker's Start fails with the limit
+  `ReasonTooManyWorkflowRuns`: the node is at a limit built into the
+  server, which no setting raises (actions are counted per shard). It is
+  never retried: retrying won't clear it until something is deleted or the
+  node is given more memory. A worker's Start fails with the limit
   error; a limit hit while running is logged and backed off, once per
   reason, polling again with a backoff of up to 30 s
 - `StreamClient.GroupCreate` (lease 5 s to 12 h and attempts),
-  `GroupTouch`, `GroupInfo` and `GroupDelete`; `OptDead` and `OptErrorText`
+  `GroupTouch`, `GroupInfo` and `GroupDelete`; `OptDead`
 - `StreamWorkerOptions.AutoTouch`, `StreamContext.Touch` and
   `StreamContext.Deliveries`. AutoTouch touches a read's records from
   arrival, waiting ones too, every sixth of the lease the read's expiry
   gives, paced by each touch answer's expiry; it stops only on a conflict,
   not found or bad request
-- A stopped stream worker runs none of a read's unstarted records: one nack
-  hands them back, spending an attempt each
+- `StreamGroupNackOptions.Abandon` (`OptAbandon`, 0x34): hands records back
+  unstarted, ready at once, the delivery counted but no failure, so it never
+  dead-letters them. It takes no `DelayMS`, `Dead` or `Error`. Abandon only
+  records never started: a consumer that abandons on errors cycles a poison
+  record forever
+- A stopped stream worker runs none of a read's unstarted records: one
+  abandoning nack hands them back, spending none of their attempts
+- `ReasonQueueFull` (36), `ErrQueueFull` and `IsQueueFull`: an enqueue at its
+  queue's or shard's caps, under `overloaded`. It drains as messages are
+  acked, so the client retries it like any overloaded refusal that didn't
+  run
+- `ReasonGroupHeldFull` (37), `ErrGroupHeldFull` and `IsGroupHeldFull`: a
+  group read that took nothing new because the group's consumers hold too
+  many records. No read retries it; the stream worker logs it once and
+  backs off, as for a limit
 - A worker's registration waits out a halted shard or an overloaded or
   unavailable refusal that didn't run; any other refusal, a limit included,
   fails `Start` with it
 
 - `EnqueueOptions.DelayMS`, which the server applies, and
   `QueueClient.Purge`
-- A full queue's refusal (`overloaded`, ran no) is retried as any other,
-  then returned with the server's message
 - The stream worker sends group reads refused `unavailable` (ran no), as
   when records are read back from disk, again with a backoff
 - `Stale` also marks a read from a node blocked reading its log, or diverged

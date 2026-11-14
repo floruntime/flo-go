@@ -384,8 +384,19 @@ until each is acked or nacked. It paces by the expiry each touch answers,
 retries a touch that fails for a passing reason, and stops only on a
 conflict (a stale report), not found or bad request. Without it, call
 `sctx.Touch()` from long handlers. `Stop` runs none of a read's records not
-yet started: it hands them back with a nack, which spends one of their
-attempts (with `MaxDeliver` 1 they are dead).
+yet started: it abandons them, handing them back ready at once with no
+failure counted, so a stop never dead-letters them.
+
+`GroupNack` with `Abandon: true` does the same by hand. Abandon never
+dead-letters, so use it only for records the consumer never started (it is
+stopping); nack records that failed, or a poison record cycles forever. A
+nack's `Error` is at most 1024 bytes. An ack, nack or touch to a group that
+isn't there (deleted, say) is `flo.ErrNotFound`.
+
+A read refused with `flo.ErrGroupHeldFull` took nothing new: the group's
+consumers hold too many records they haven't acked (or it holds dead ones).
+Reading again won't help until they ack or nack, so no read retries it; the
+stream worker logs it once and polls again with a backoff.
 
 #### DLQ Operations
 
@@ -427,6 +438,12 @@ if err != nil {
         // Invalid request parameters
     } else if flo.IsUnauthorized(err) {
         // Authentication failed
+    } else if flo.IsQueueFull(err) {
+        // The queue (or the shard's queues and groups) is at its caps, and
+        // the client's retries ran out: it drains as messages are acked,
+        // so back off and send again
+    } else if flo.IsGroupHeldFull(err) {
+        // A group read took nothing: its consumers must ack or nack first
     } else if flo.IsOverloaded(err) {
         // Server is overloaded, and the client's retries ran out
     } else if flo.IsOutcomePending(err) {
@@ -438,10 +455,11 @@ if err != nil {
         // retries ran out (the message says whether an operator must act
         // first); flo.IsShardHalted(err) when the shard halted
     } else if flo.IsLimit(err) {
-        // The node is at a limit (the reason says which: its memory budget,
-        // or as many actions, workflow definitions or runs as it keeps).
-        // Retrying won't clear it until something is deleted, the node is
-        // given more room, or the setting is raised; nothing retries it
+        // The node is at a limit built into the server (the reason says
+        // which: its memory budget, or as many actions per shard, workflow
+        // definitions or runs as it keeps). No setting raises it: retrying
+        // won't clear it until something is deleted or the node is given
+        // more memory; nothing retries it
     } else if flo.IsInternal(err) {
         // Internal server error
     }
@@ -470,10 +488,14 @@ records the server is reading back from disk is refused `unavailable`, ran
 no, too, and leases nothing: the stream worker sends its group reads again,
 with a backoff, past the client's own retries.
 
+A full queue (`flo.ErrQueueFull`) is `overloaded`, ran no, and drains as
+messages are acked, so the client retries it as above; `flo.ErrGroupHeldFull`
+is not retried, since only the group's consumers can clear it.
+
 A `limit` refusal (`flo.ErrLimit`) is never retried, by the client or a
 worker: it is terminal in that retrying won't clear it until something is
-deleted, the node is given more room, or the setting is raised, though it
-needn't last. Start fails with the limit error; a limit hit while running is
+deleted or the node is given more memory (the limits are built into the
+server, not settings), though it needn't last. Start fails with the limit error; a limit hit while running is
 logged and backed off: once per reason, polling again with a backoff of up
 to 30 s.
 

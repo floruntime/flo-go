@@ -59,13 +59,16 @@ func refusedUnrun(resp *rawResponse) bool {
 }
 
 // isRefusedUnrun reports whether err is a refusal the server says it didn't
-// run, of a kind worth trying again later.
+// run, of a kind worth trying again later. A halted shard stays halted
+// until an operator acts, and a group whose consumers hold too many records
+// stays full until they ack or nack.
 func isRefusedUnrun(err error) bool {
 	var se *ServerError
 	if !errors.As(err, &se) {
 		return false
 	}
-	return (se.Status == StatusOverloaded || se.Status == StatusUnavailable) && se.Ran == RanNo && se.Reason != ReasonShardHalted
+	return (se.Status == StatusOverloaded || se.Status == StatusUnavailable) && se.Ran == RanNo &&
+		se.Reason != ReasonShardHalted && se.Reason != ReasonGroupHeldFull
 }
 
 // backoff is a capped, doubling, fully jittered wait.
@@ -160,10 +163,11 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 	}
 }
 
-// limitNotice backs a worker loop off a limit refusal (ErrLimit), which no
-// retry clears until an operator or the application acts: it warns once
-// per distinct reason, not on every wait, and waits with the halted
-// backoff, so the loop neither spins nor stops.
+// limitNotice backs a worker loop off a refusal no retry clears until the
+// application acts: a limit (ErrLimit), or a group whose consumers hold too
+// many records (ErrGroupHeldFull). It warns once per distinct reason, not
+// on every wait, and waits with the halted backoff, so the loop neither
+// spins nor stops.
 type limitNotice struct {
 	b      backoff
 	warned map[Reason]bool
@@ -173,7 +177,7 @@ type limitNotice struct {
 // time its reason is seen and waits the next backoff, or until ctx ends.
 func (n *limitNotice) wait(ctx context.Context, logger Logger, what string, err error) bool {
 	var se *ServerError
-	if !errors.As(err, &se) || se.Status != StatusLimit {
+	if !errors.As(err, &se) || (se.Status != StatusLimit && !errors.Is(err, ErrGroupHeldFull)) {
 		return false
 	}
 	if n.warned == nil {
@@ -182,7 +186,11 @@ func (n *limitNotice) wait(ctx context.Context, logger Logger, what string, err 
 	}
 	if !n.warned[se.Reason] {
 		n.warned[se.Reason] = true
-		logger.Printf("Warning: %s refused at a limit (%s): %s; retrying with backoff until it clears", what, se.Reason, se.Message)
+		why := "at a limit"
+		if se.Status != StatusLimit {
+			why = "until the group's consumers ack or nack"
+		}
+		logger.Printf("Warning: %s refused %s (%s): %s; retrying with backoff until it clears", what, why, se.Reason, se.Message)
 	}
 	sleepCtx(ctx, n.b.next())
 	return true
