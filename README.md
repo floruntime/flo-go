@@ -384,8 +384,11 @@ until each is acked or nacked. It paces by the expiry each touch answers,
 retries a touch that fails for a passing reason, and stops only on a
 conflict (a stale report), not found or bad request. Without it, call
 `sctx.Touch()` from long handlers. `Stop` runs none of a read's records not
-yet started: it abandons them, handing them back ready at once with no
-failure counted, so a stop never dead-letters them.
+yet started, and cancels the running handlers' contexts. It abandons the
+unstarted records, and those whose handler returns an error after the stop
+cancelled it, handing them back ready at once with no failure counted, so a
+stop never dead-letters them. A handler error while the worker isn't
+stopping is nacked as usual.
 
 `GroupNack` with `Abandon: true` does the same by hand. Abandon never
 dead-letters, so use it only for records the consumer never started (it is
@@ -393,10 +396,14 @@ stopping); nack records that failed, or a poison record cycles forever. A
 nack's `Error` is at most 1024 bytes. An ack, nack or touch to a group that
 isn't there (deleted, say) is `flo.ErrNotFound`.
 
-A read refused with `flo.ErrGroupHeldFull` took nothing new: the group's
-consumers hold too many records they haven't acked (or it holds dead ones).
-Reading again won't help until they ack or nack, so no read retries it; the
-stream worker logs it once and polls again with a backoff.
+A read refused with `flo.ErrGroupHeldFull` took nothing new, for one of two
+reasons; the message says which. The group may be at its caps, which count
+its ready, leased and dead records: acks and nacks free leased ones, but
+dead ones stay until the group is deleted or a stream trim passes them. Or
+the shard's queues and groups together may be at the shard's cap, which
+clears as other groups and queues drain. Reading again won't help, so no
+read retries it; the stream worker logs it once and polls again with a
+backoff.
 
 #### DLQ Operations
 
@@ -443,7 +450,8 @@ if err != nil {
         // the client's retries ran out: it drains as messages are acked,
         // so back off and send again
     } else if flo.IsGroupHeldFull(err) {
-        // A group read took nothing: its consumers must ack or nack first
+        // A group read took nothing: the group (dead records count) or its
+        // shard is full; see the message
     } else if flo.IsOverloaded(err) {
         // Server is overloaded, and the client's retries ran out
     } else if flo.IsOutcomePending(err) {
@@ -490,7 +498,7 @@ with a backoff, past the client's own retries.
 
 A full queue (`flo.ErrQueueFull`) is `overloaded`, ran no, and drains as
 messages are acked, so the client retries it as above; `flo.ErrGroupHeldFull`
-is not retried, since only the group's consumers can clear it.
+is not retried, since resending the read can't clear it.
 
 A `limit` refusal (`flo.ErrLimit`) is never retried, by the client or a
 worker: it is terminal in that retrying won't clear it until something is

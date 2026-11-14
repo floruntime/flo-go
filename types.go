@@ -1668,9 +1668,10 @@ const (
 	// any overloaded refusal that didn't run (ErrQueueFull).
 	ReasonQueueFull Reason = 36
 	// ReasonGroupHeldFull (with StatusOverloaded): a group read took
-	// nothing new because the group's consumers hold too many records they
-	// haven't acked, or it holds dead ones. Reading again won't help until
-	// they ack or nack, so it is not retried (ErrGroupHeldFull).
+	// nothing new because the group is at its caps, counting its ready,
+	// leased and dead records, or the shard's queues and groups together
+	// are at the shard's. Reading again won't help, so it is not retried
+	// (ErrGroupHeldFull).
 	ReasonGroupHeldFull Reason = 37
 )
 

@@ -2,6 +2,7 @@ package flo
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"strings"
@@ -583,7 +584,8 @@ func TestAWorkerStartWaitsOutAnOverloadedRegistration(t *testing.T) {
 
 // A stop runs no more of a read's records: those not started are handed
 // back at once, in one abandoning nack, and Start doesn't wait for them.
-// The handler the stop cut short is nacked: it started.
+// The handler the stop cut short is abandoned too, though it returned an
+// error: the worker's own stop cancelled it.
 func TestStreamWorkerStopHandsBackUnstartedRecords(t *testing.T) {
 	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
 		switch {
@@ -612,21 +614,52 @@ func TestStreamWorkerStopHandsBackUnstartedRecords(t *testing.T) {
 	if len(nacks) != 2 {
 		t.Fatalf("%d nacks, want 2: the stopped handler's, and one handing back the rest", len(nacks))
 	}
+	counts := map[int]bool{}
 	for _, f := range nacks {
-		_, value, options := requestParts(t, f[HeaderSize:])
-		errLen := binary.LittleEndian.Uint16(value[len(value)-2:])
-		abandons := bytes.Equal(options, []byte{byte(OptAbandon), 0})
-		switch touchItems(t, f) {
-		case 2:
-			if !abandons || errLen != 0 {
-				t.Errorf("hand-back options % x, value ends % x; want abandon and no error", options, value[len(value)-2:])
-			}
-		case 1:
-			if abandons || bytes.HasSuffix(value, []byte{0, 0}) {
-				t.Errorf("the cut-short handler's nack: options % x; want a plain nack with its error", options)
-			}
-		default:
-			t.Errorf("a nack named %d records, want 1 or 2", touchItems(t, f))
+		counts[touchItems(t, f)] = true
+		if !abandons(t, f) {
+			t.Errorf("a nack of %d records isn't a bare abandon", touchItems(t, f))
 		}
+	}
+	if !counts[1] || !counts[2] {
+		t.Errorf("nacks named %v records, want 1 and 2", counts)
+	}
+}
+
+// abandons reports whether a group nack frame is an abandon with no error.
+func abandons(t *testing.T, frame []byte) bool {
+	t.Helper()
+	_, value, options := requestParts(t, frame[HeaderSize:])
+	return bytes.Equal(options, []byte{byte(OptAbandon), 0}) && bytes.HasSuffix(value, []byte{0, 0})
+}
+
+// A handler's own error while the worker isn't stopping is a failure: a
+// plain nack carrying it, not an abandon.
+func TestStreamWorkerNacksAHandlerErrorWhenNotStopping(t *testing.T) {
+	s, addr := newFrameServer(t, func(op OpCode, n int) reply {
+		switch {
+		case op == OpStreamGroupRead && n == 0:
+			return reply{body: readOf(1, time.Now().UnixMilli()+30000)}
+		case op == OpStreamGroupRead:
+			time.Sleep(20 * time.Millisecond)
+		}
+		return reply{}
+	})
+	sw, err := NewClient(addr, WithTimeout(time.Second)).NewStreamWorker(StreamWorkerOptions{Stream: "s", Logger: &captureLogger{}},
+		func(*StreamContext) error { return context.Canceled })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sw.Close() })
+	done := startWorker(sw.Start)
+	waitFor(t, "the nack", func() bool { return len(s.got(OpStreamGroupNack)) > 0 })
+	sw.Stop()
+	waitStart(t, done)
+	nacks := s.got(OpStreamGroupNack)
+	if len(nacks) != 1 || abandons(t, nacks[0]) {
+		t.Fatalf("%d nacks, abandon %v; want one plain nack", len(nacks), len(nacks) > 0 && abandons(t, nacks[0]))
+	}
+	if _, value, _ := requestParts(t, nacks[0][HeaderSize:]); !bytes.HasSuffix(value, []byte("context canceled")) {
+		t.Errorf("nack value ends % x, want the handler's error", value[len(value)-8:])
 	}
 }

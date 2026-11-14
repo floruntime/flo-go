@@ -12,9 +12,10 @@ import (
 // it is sent again. Only a refusal whose status is overloaded or
 // unavailable and whose Ran is RanNo is retried: the server says it never
 // ran, so resending is safe for any operation, writes included. Each retry
-// is a new request with a new id; the server routes it afresh. An
-// unavailable with ReasonShardHalted is not retried: the shard stays halted
-// until an operator repairs it.
+// is a new request with a new id; the server routes it afresh. Two are not
+// retried: an unavailable with ReasonShardHalted, since the shard stays
+// halted until an operator repairs it, and an overloaded with
+// ReasonGroupHeldFull, since resending the read won't free the group.
 type RetryPolicy struct {
 	// MaxAttempts counts the first try; 1 (or less) turns retrying off.
 	MaxAttempts int
@@ -60,8 +61,8 @@ func refusedUnrun(resp *rawResponse) bool {
 
 // isRefusedUnrun reports whether err is a refusal the server says it didn't
 // run, of a kind worth trying again later. A halted shard stays halted
-// until an operator acts, and a group whose consumers hold too many records
-// stays full until they ack or nack.
+// until an operator acts, and a full group stays full until records leave
+// it (or, at the shard's cap, other groups and queues drain).
 func isRefusedUnrun(err error) bool {
 	var se *ServerError
 	if !errors.As(err, &se) {
@@ -188,7 +189,7 @@ func (n *limitNotice) wait(ctx context.Context, logger Logger, what string, err 
 		n.warned[se.Reason] = true
 		why := "at a limit"
 		if se.Status != StatusLimit {
-			why = "until the group's consumers ack or nack"
+			why = "with the group or its shard full"
 		}
 		logger.Printf("Warning: %s refused %s (%s): %s; retrying with backoff until it clears", what, why, se.Reason, se.Message)
 	}

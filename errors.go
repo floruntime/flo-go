@@ -142,10 +142,14 @@ var (
 	ErrQueueFull = &ServerError{Status: StatusOverloaded, Reason: ReasonQueueFull}
 
 	// ErrGroupHeldFull matches a group read that took nothing new because
-	// the group's consumers hold too many records they haven't acked (or it
-	// holds dead ones). It is also ErrOverloaded, but reading again won't
-	// help until they ack or nack, so no read retries it; the stream worker
-	// logs it once and backs off, as for ErrLimit.
+	// the group is at its caps, or the shard's queues and groups together
+	// are at the shard's; the message says which. A group's cap counts its
+	// ready, leased and dead records: acks and nacks free leased ones, but
+	// dead ones stay until the group is deleted or a stream trim passes
+	// them. The shard's cap clears as other groups and queues drain. It is
+	// also ErrOverloaded, but reading again won't clear either, so no read
+	// retries it; the stream worker logs it once and backs off, as for
+	// ErrLimit.
 	ErrGroupHeldFull = &ServerError{Status: StatusOverloaded, Reason: ReasonGroupHeldFull}
 
 	// ErrStaleReport matches a *StaleReportError.

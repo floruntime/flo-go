@@ -165,16 +165,19 @@ live tests run against; this SDK no longer talks to an older server.
   dead-letters them. It takes no `DelayMS`, `Dead` or `Error`. Abandon only
   records never started: a consumer that abandons on errors cycles a poison
   record forever
-- A stopped stream worker runs none of a read's unstarted records: one
-  abandoning nack hands them back, spending none of their attempts
+- A stopped stream worker runs none of a read's unstarted records, and
+  abandons them with one nack, spending none of their attempts. A handler
+  that returns an error once the stop cancelled it is abandoned too; only
+  an error while the worker isn't stopping is nacked
 - `ReasonQueueFull` (36), `ErrQueueFull` and `IsQueueFull`: an enqueue at its
   queue's or shard's caps, under `overloaded`. It drains as messages are
   acked, so the client retries it like any overloaded refusal that didn't
   run
 - `ReasonGroupHeldFull` (37), `ErrGroupHeldFull` and `IsGroupHeldFull`: a
-  group read that took nothing new because the group's consumers hold too
-  many records. No read retries it; the stream worker logs it once and
-  backs off, as for a limit
+  group read that took nothing new because the group is at its caps (its
+  dead records count until the group is deleted or a trim passes them), or
+  its shard's queues and groups are at the shard's. No read retries it; the
+  stream worker logs it once and backs off, as for a limit
 - A worker's registration waits out a halted shard or an overloaded or
   unavailable refusal that didn't run; any other refusal, a limit included,
   fails `Start` with it

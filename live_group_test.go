@@ -261,9 +261,9 @@ func TestLiveGroupAbandonNackErrorAndMissingGroup(t *testing.T) {
 	}
 }
 
-// A stream worker stopped mid-read abandons the records it hadn't started:
-// they come back with deliveries 2 and aren't dead, even at MaxDeliver 1.
-// The handler the stop cut short is nacked, which at MaxDeliver 1 kills it.
+// A stream worker stopped mid-read abandons the records it hadn't started
+// and the one whose handler the stop cut short: all three come back with
+// deliveries 2 and none is dead, even at MaxDeliver 1.
 func TestLiveStreamWorkerStopAbandonsUnstartedRecords(t *testing.T) {
 	c := liveClient(t)
 	one := uint8(1)
@@ -293,22 +293,22 @@ func TestLiveStreamWorkerStopAbandonsUnstartedRecords(t *testing.T) {
 	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Start = %v", err)
 	}
-	// The cut-short handler's nack goes out as its handler returns.
+	// The cut-short handler's abandon goes out as its handler returns.
 	var info *StreamGroupInfo
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		info, err = c.Stream.GroupInfo("jobs", "w", nil)
-		if err == nil && info.Dead == 1 && info.Ready == 2 || time.Now().After(deadline) {
+		if err == nil && info.Ready == 3 || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if err != nil || info.Dead != 1 || info.Ready != 2 || info.Leased != 0 {
-		t.Fatalf("info after the stop: %+v, %v; want two ready, the started one dead", info, err)
+	if err != nil || info.Dead != 0 || info.Ready != 3 || info.Leased != 0 {
+		t.Fatalf("info after the stop: %+v, %v; want all three ready, none dead", info, err)
 	}
 	got, err := c.Stream.GroupRead("jobs", "w", "c2", nil)
-	if err != nil || len(got.Records) != 2 {
-		t.Fatalf("read after the stop: %+v, %v; want the two unstarted", got, err)
+	if err != nil || len(got.Records) != 3 {
+		t.Fatalf("read after the stop: %+v, %v; want all three", got, err)
 	}
 	for _, r := range got.Records {
 		if r.Deliveries != 2 {
