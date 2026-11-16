@@ -447,8 +447,9 @@ for _, msg := range result.Messages {
 ### Time series
 
 A point has a measurement, a field (`"value"` unless named), tags that pick
-its series, a value and a time. Every time is an `int64` of Unix
-nanoseconds; `TSPoint.Time()` and `TSWriteResult.Time()` give a
+its series, a value and a time. Every time in the TS API is an `int64` of
+Unix nanoseconds, and a query's window a `time.Duration`, also exact to the
+nanosecond. `Time()` on points, buckets and write results gives a
 `time.Time`, and `t.UnixNano()` goes the other way.
 
 ```go
@@ -481,10 +482,27 @@ never written, and a filter that matches nothing, are `flo.ErrNotFound`,
 not empty, and end a `ReadAll` walk with that error. A matching series with
 no points in the range is ok and empty.
 
-`client.TS.FloQL(query, nil)` runs a FloQL query; its points' times are ns
-too, for now whole milliseconds. An answer of more than 4096 raw points is refused as a bad
-request with the server's text: aggregate them, narrow the query, or page
-through them with `Read`.
+`client.TS.Query` aggregates a field into epoch-aligned windows:
+
+```go
+series, err := client.TS.Query("cpu", &flo.TSQueryOptions{
+    FromNS: from, ToNS: at, Window: 5 * time.Minute, Aggregation: flo.TSMax,
+})
+// series[i].Buckets[j].StartNS is each window's start, in ns
+```
+
+A zero `FromNS` or `ToNS` leaves that end open, and a zero `Window` is a
+minute. Only windows that hold points are answered, at most 1024; more is
+refused as a bad request with the server's text, so widen the window or
+narrow the range. `client.TS.Info` summarizes a measurement: its series,
+fields, points, and its oldest and newest points' times in ns
+(`OldestNS`, `NewestNS`); one with no series is `flo.ErrNotFound`.
+
+`client.TS.FloQL(query, nil)` runs a FloQL query; its points' times are ns.
+In the query text, a bare number in a range is Unix milliseconds, and
+durations (`5m`, `30s`) are as written. An answer of more than 4096 raw
+points is refused as a bad request with the server's text: aggregate them,
+narrow the query, or page through them with `Read`.
 
 ## Error Handling
 

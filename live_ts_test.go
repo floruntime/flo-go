@@ -126,9 +126,12 @@ func TestLiveTSReadPagesEveryPointOnceBothWays(t *testing.T) {
 	series, err := c.TS.FloQL("paged{host=h1}[2h]", nil)
 	if err != nil || len(series) != 1 || len(series[0].Points) != len(h1) {
 		t.Errorf("FloQL of one series: %d series, %v", len(series), err)
-	} else if want := h1[0].TimeNS / 1e6 * 1e6; series[0].Points[0].TimeNS != want {
-		// FloQL answers whole ms for now.
-		t.Errorf("FloQL time %d ns, want %d", series[0].Points[0].TimeNS, want)
+	} else {
+		for i, p := range series[0].Points {
+			if p.TimeNS != h1[i].TimeNS || p.Value != h1[i].Value {
+				t.Fatalf("FloQL point %d is %+v, want the written %+v", i, p, h1[i])
+			}
+		}
 	}
 }
 
@@ -262,5 +265,58 @@ func TestLiveStreamWorkerCloseSendsTheHandBackOfARecordInFlight(t *testing.T) {
 	info, err := c.Stream.GroupInfo("closing", "w", nil)
 	if err != nil || info.Ready != 1 || info.Leased != 0 || info.Dead != 0 {
 		t.Fatalf("info after Close: %+v, %v; want the record ready again", info, err)
+	}
+}
+
+// A query's from, to and window are ns: points at known ns times land in
+// the buckets those give, each with its start in ns. Info's oldest and
+// newest are the first and last writes, to the nanosecond.
+func TestLiveTSQueryAndInfoAreNanoseconds(t *testing.T) {
+	c := liveClient(t)
+	const window = 1500 * time.Microsecond
+	// On a window's start, so each pair below shares a window.
+	const base = int64(1_700_000_000_000_000_000) / int64(window) * int64(window)
+	// Two points per 1.5 ms window, the first not on a whole ms.
+	var times []int64
+	for i := 0; i < 6; i++ {
+		at := base + int64(i/2)*int64(window) + 123_457 + int64(i%2)*1000
+		times = append(times, at)
+		if _, err := c.TS.Write("q", float64(i), &TSWriteOptions{TimeNS: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := c.TS.Info("q", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Points != 6 || info.OldestNS == nil || *info.OldestNS != times[0] || info.NewestNS == nil || *info.NewestNS != times[5] {
+		t.Errorf("info %+v; want oldest %d newest %d", info, times[0], times[5])
+	}
+
+	// From the second window on: buckets start where the epoch-aligned
+	// 1.5 ms windows do.
+	series, err := c.TS.Query("q", &TSQueryOptions{FromNS: times[2], ToNS: times[5], Window: window, Aggregation: TSSum})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(series) != 1 || len(series[0].Buckets) != 2 {
+		t.Fatalf("query %+v; want one series of two buckets", series)
+	}
+	for i, b := range series[0].Buckets {
+		start := times[2+2*i] / int64(window) * int64(window)
+		if b.StartNS != start || b.Value != float64(2+2*i)+float64(3+2*i) {
+			t.Errorf("bucket %d %+v; want start %d, sum %v", i, b, start, float64(5+4*i))
+		}
+	}
+
+	// More than 1024 windows holding points is refused with the server's text.
+	for i := 0; i < 1100; i++ {
+		if _, err := c.TS.Write("wide", 1, &TSWriteOptions{TimeNS: base + int64(i)*1000}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.TS.Query("wide", &TSQueryOptions{Window: time.Microsecond}); !IsBadRequest(err) ||
+		!strings.Contains(err.Error(), "widen the window (it is in nanoseconds)") {
+		t.Errorf("a query of 1100 windows: %v", err)
 	}
 }

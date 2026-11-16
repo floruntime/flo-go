@@ -288,9 +288,9 @@ const (
 	OptAbandon      OptionTag = 0x34 // void: A nack hands its records back unstarted: ready at once, no attempt spent
 
 	// Time-Series Options (0x60 - 0x6F)
-	OptTSFromMS      OptionTag = 0x60 // i64: Start of time range (inclusive, unix ms)
-	OptTSToMS        OptionTag = 0x61 // i64: End of time range (inclusive, 0 = now)
-	OptTSWindowMS    OptionTag = 0x62 // i64: Aggregation window size (ms)
+	OptTSFromNS      OptionTag = 0x60 // i64: A query's earliest time, inclusive, in Unix ns (0 = none)
+	OptTSToNS        OptionTag = 0x61 // i64: A query's latest time, inclusive, in Unix ns (0 = none)
+	OptTSWindowNS    OptionTag = 0x62 // i64: A query's window width in ns (absent = a minute; 0 refused)
 	OptTSAggregation OptionTag = 0x63 // string: Aggregation function name (avg, sum, count, min, max)
 	OptTSField       OptionTag = 0x64 // string: Field name filter (empty = "value")
 	OptTSTags        OptionTag = 0x65 // string: Comma-separated tag filters "key=val,key2=val2"

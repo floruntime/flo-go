@@ -297,12 +297,12 @@ func TestFloQLDecodesSeriesAndSurfacesTheCap(t *testing.T) {
 	ans = binary.LittleEndian.AppendUint32(ans, 5)
 	ans = append(ans, "value"...)
 	ans = binary.LittleEndian.AppendUint32(ans, 1)
-	ans = cat(ans, u64le(1000), u64le(math.Float64bits(2.5)))
+	ans = cat(ans, u64le(1_700_000_000_123_456_789), u64le(math.Float64bits(2.5)))
 	got, err := decodeFloQLAnswer(ans)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []FloQLSeries{{Key: "cpu", Field: "value", Points: []FloQLPoint{{1_000_000_000, 2.5}}}}; !reflect.DeepEqual(got, want) {
+	if want := []FloQLSeries{{Key: "cpu", Field: "value", Points: []FloQLPoint{{1_700_000_000_123_456_789, 2.5}}}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v", got)
 	}
 
@@ -319,5 +319,99 @@ func TestFloQLDecodesSeriesAndSurfacesTheCap(t *testing.T) {
 	}
 	if key != "" || string(value) != "cpu[1h]" {
 		t.Errorf("sent key %q value %q; the query goes in the value", key, value)
+	}
+}
+
+// A query's times and window go out as i64 ns, to the nanosecond; a zero
+// time or window is left out.
+func TestTSQuerySendsItsTimesAndWindowInNanoseconds(t *testing.T) {
+	const from, to = int64(1_700_000_000_123_456_789), int64(1_700_000_100_000_000_001)
+	p := capturePayload(t, func(c *Client) {
+		c.TS.Query("cpu", &TSQueryOptions{FromNS: from, ToNS: to, Window: 1500*time.Microsecond + 7,
+			Aggregation: TSMax, Field: "load", Tags: "host=a"})
+	})
+	key, value, options := requestParts(t, p)
+	if key != "cpu" || len(value) != 0 {
+		t.Errorf("key %q value % x", key, value)
+	}
+	want := cat([]byte{byte(OptTSFromNS), 8}, u64le(uint64(from)), []byte{byte(OptTSToNS), 8}, u64le(uint64(to)),
+		[]byte{byte(OptTSWindowNS), 8}, u64le(1_500_007),
+		[]byte{byte(OptTSAggregation), 3}, []byte("max"), []byte{byte(OptTSField), 4}, []byte("load"),
+		[]byte{byte(OptTSTags), 6}, []byte("host=a"))
+	if !bytes.Equal(options, want) {
+		t.Errorf("options\n % x\nwant\n % x", options, want)
+	}
+	p = capturePayload(t, func(c *Client) { c.TS.Query("cpu", nil) })
+	if _, _, options := requestParts(t, p); len(options) != 0 {
+		t.Errorf("default query options % x, want none", options)
+	}
+}
+
+func TestTSQueryDecodesBucketsAndSurfacesTheWindowRefusal(t *testing.T) {
+	ans := binary.LittleEndian.AppendUint32(nil, 1)
+	ans = binary.LittleEndian.AppendUint32(ans, 3)
+	ans = append(ans, "cpu"...)
+	ans = binary.LittleEndian.AppendUint32(ans, 2)
+	ans = cat(ans, u64le(1_700_000_000_000_000_000), u64le(math.Float64bits(1.5)),
+		u64le(1_700_000_000_000_000_007), u64le(math.Float64bits(-2)))
+	got, err := decodeTSQueryAnswer(ans)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []TSQuerySeries{{Key: "cpu", Buckets: []TSBucket{{1_700_000_000_000_000_000, 1.5}, {1_700_000_000_000_000_007, -2}}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v", got)
+	}
+	if got, err := decodeTSQueryAnswer(binary.LittleEndian.AppendUint32(nil, 0)); err != nil || len(got) != 0 {
+		t.Errorf("empty answer %+v, %v", got, err)
+	}
+	if _, err := decodeTSQueryAnswer(ans[:len(ans)-1]); err == nil {
+		t.Error("decoded a truncated answer")
+	}
+
+	const msg = "bad request: the range holds more than 1024 windows of this width; widen the window (it is in nanoseconds) or narrow the range"
+	c := tableServer(t, func(op OpCode, p []byte) (StatusCode, []byte) {
+		return StatusBadRequest, refusalBody(ReasonMalformed, RanNo, msg)
+	})
+	if _, err := c.TS.Query("cpu", &TSQueryOptions{Window: time.Nanosecond}); !IsBadRequest(err) || !strings.Contains(err.Error(), msg) {
+		t.Errorf("err %v", err)
+	}
+}
+
+func TestTSInfoDecodesItsNanosecondTimes(t *testing.T) {
+	w := bodyWriter{}
+	w.u32(3)
+	w.u32(2)
+	w.u8(0)
+	w.u16(2)
+	w.bytes16([]byte("value"))
+	w.bytes16([]byte("load"))
+	w.u64(42)
+	w.u8(1)
+	w.u64(1_700_000_000_123_456_789)
+	w.u8(1)
+	w.u64(1_700_000_001_000_000_001)
+	got, err := decodeTSInfoAnswer(w.buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Series != 3 || got.FieldCount != 2 || got.FieldsCapped || !reflect.DeepEqual(got.Fields, []string{"value", "load"}) ||
+		got.Points != 42 || got.OldestNS == nil || *got.OldestNS != 1_700_000_000_123_456_789 || got.NewestNS == nil || *got.NewestNS != 1_700_000_001_000_000_001 {
+		t.Errorf("got %+v", got)
+	}
+	none := bodyWriter{}
+	none.u32(1)
+	none.u32(1)
+	none.u8(1)
+	none.u16(0)
+	none.u64(0)
+	none.u8(0)
+	none.u8(0)
+	got, err = decodeTSInfoAnswer(none.buf)
+	if err != nil || got.OldestNS != nil || got.NewestNS != nil || !got.FieldsCapped {
+		t.Errorf("no points: %+v, %v", got, err)
+	}
+	if _, err := decodeTSInfoAnswer(w.buf[:len(w.buf)-1]); err == nil {
+		t.Error("decoded a truncated answer")
 	}
 }

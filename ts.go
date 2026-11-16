@@ -328,8 +328,7 @@ func (it *TSPointIter) Err() error { return it.err }
 
 // FloQLPoint is one point of a FloQL answer.
 type FloQLPoint struct {
-	// TimeNS is the point's time in Unix nanoseconds. The server answers
-	// FloQL in whole milliseconds for now, so it is a multiple of 1e6.
+	// TimeNS is the point's time in Unix nanoseconds.
 	TimeNS int64
 	Value  float64
 }
@@ -349,9 +348,10 @@ type TSFloQLOptions struct {
 	Namespace string
 }
 
-// FloQL runs a FloQL query. An answer of more than MaxTSReadLimit raw
-// points is refused (bad request, with the server's text): aggregate them,
-// narrow the query, or page through them with Read.
+// FloQL runs a FloQL query. Its answer's times are ns; in the query text,
+// a bare number in a range is Unix milliseconds. An answer of more than
+// MaxTSReadLimit raw points is refused (bad request, with the server's
+// text): aggregate them, narrow the query, or page through them with Read.
 func (ts *TSClient) FloQL(query string, opts *TSFloQLOptions) ([]FloQLSeries, error) {
 	if opts == nil {
 		opts = &TSFloQLOptions{}
@@ -364,8 +364,7 @@ func (ts *TSClient) FloQL(query string, opts *TSFloQLOptions) ([]FloQLSeries, er
 }
 
 // decodeFloQLAnswer reads a FloQL answer: [series_count:u32], each
-// [key_len:u32][key][field_len:u32][field][count:u32]([time_ms:i64][value:f64])*,
-// its times read into ns.
+// [key_len:u32][key][field_len:u32][field][count:u32]([time_ns:i64][value:f64])*.
 func decodeFloQLAnswer(data []byte) ([]FloQLSeries, error) {
 	r := bodyReader{buf: data}
 	n := int(r.u32())
@@ -382,7 +381,7 @@ func decodeFloQLAnswer(data []byte) ([]FloQLSeries, error) {
 		}
 		s.Points = make([]FloQLPoint, count)
 		for j := range s.Points {
-			s.Points[j] = FloQLPoint{TimeNS: int64(r.u64()) * int64(time.Millisecond), Value: math.Float64frombits(r.u64())}
+			s.Points[j] = FloQLPoint{TimeNS: int64(r.u64()), Value: math.Float64frombits(r.u64())}
 		}
 		series = append(series, s)
 	}
@@ -390,4 +389,179 @@ func decodeFloQLAnswer(data []byte) ([]FloQLSeries, error) {
 		return nil, err
 	}
 	return series, nil
+}
+
+// TSAggregation is how a Query combines a window's points.
+type TSAggregation string
+
+const (
+	TSAvg   TSAggregation = "avg"
+	TSSum   TSAggregation = "sum"
+	TSCount TSAggregation = "count"
+	TSMin   TSAggregation = "min"
+	TSMax   TSAggregation = "max"
+)
+
+// TSQueryOptions shape a Query.
+type TSQueryOptions struct {
+	Namespace string
+	// Field is the field queried; "" is "value".
+	Field string
+	// Tags keeps only series whose tags include every key=value pair.
+	Tags string
+	// FromNS and ToNS bound the points' times, inclusive, in Unix
+	// nanoseconds; 0 for no bound. A negative one is refused.
+	FromNS int64
+	ToNS   int64
+	// Window is each bucket's width, to the nanosecond; 0 for a minute.
+	// Buckets are aligned to the epoch. A negative one is refused.
+	Window time.Duration
+	// Aggregation combines a window's points; "" is TSAvg.
+	Aggregation TSAggregation
+}
+
+// TSBucket is one window of a Query: its start in Unix nanoseconds, and
+// its points' aggregate.
+type TSBucket struct {
+	StartNS int64
+	Value   float64
+}
+
+// Start is the bucket's start as a time.Time.
+func (b TSBucket) Start() time.Time { return time.Unix(0, b.StartNS) }
+
+// TSQuerySeries is one series of a Query's answer.
+type TSQuerySeries struct {
+	Key     string
+	Buckets []TSBucket
+}
+
+// Query aggregates a measurement field's points into windows. Only windows
+// that hold points are answered, at most 1024: more is refused (bad
+// request, with the server's text), so widen the window or narrow the
+// range.
+func (ts *TSClient) Query(measurement string, opts *TSQueryOptions) ([]TSQuerySeries, error) {
+	if opts == nil {
+		opts = &TSQueryOptions{}
+	}
+	if len(opts.Field) > 255 || len(opts.Tags) > 255 || len(opts.Aggregation) > 255 {
+		return nil, fmt.Errorf("flo: ts query field, tags and aggregation are at most 255 bytes each")
+	}
+	resp, err := ts.client.sendAndCheck(OpTSQuery, ts.client.getNamespace(opts.Namespace), []byte(measurement), nil, encodeTSQueryOptions(opts), false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeTSQueryAnswer(resp.Data)
+}
+
+// encodeTSQueryOptions codes a query's options; a zero time or window is
+// left out, which the server reads as no bound or a minute.
+func encodeTSQueryOptions(opts *TSQueryOptions) []byte {
+	b := NewOptionsBuilder()
+	if opts.FromNS != 0 {
+		b.AddU64(OptTSFromNS, uint64(opts.FromNS))
+	}
+	if opts.ToNS != 0 {
+		b.AddU64(OptTSToNS, uint64(opts.ToNS))
+	}
+	if opts.Window != 0 {
+		b.AddU64(OptTSWindowNS, uint64(opts.Window.Nanoseconds()))
+	}
+	if opts.Aggregation != "" {
+		b.AddBytes(OptTSAggregation, []byte(opts.Aggregation))
+	}
+	if opts.Field != "" {
+		b.AddBytes(OptTSField, []byte(opts.Field))
+	}
+	if opts.Tags != "" {
+		b.AddBytes(OptTSTags, []byte(opts.Tags))
+	}
+	return b.Build()
+}
+
+// decodeTSQueryAnswer reads a query's answer: [series_count:u32], each
+// [key_len:u32][key][bucket_count:u32]([start_ns:i64][value:f64])*.
+func decodeTSQueryAnswer(data []byte) ([]TSQuerySeries, error) {
+	r := bodyReader{buf: data}
+	n := int(r.u32())
+	// Each series takes at least 8 bytes.
+	if n*8 > len(data) {
+		return nil, ErrIncompleteResponse
+	}
+	series := make([]TSQuerySeries, 0, n)
+	for i := 0; i < n && !r.bad; i++ {
+		s := TSQuerySeries{Key: string(r.bytes32())}
+		count := int(r.u32())
+		if count*16 > len(r.buf) {
+			return nil, ErrIncompleteResponse
+		}
+		s.Buckets = make([]TSBucket, count)
+		for j := range s.Buckets {
+			s.Buckets[j] = TSBucket{StartNS: int64(r.u64()), Value: math.Float64frombits(r.u64())}
+		}
+		series = append(series, s)
+	}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return series, nil
+}
+
+// TSInfo is a measurement's summary.
+type TSInfo struct {
+	// Series counts each field of each tag set.
+	Series uint32
+	// FieldCount counts its distinct fields, up to 256.
+	FieldCount uint32
+	// FieldsCapped: it has more fields than were counted or listed.
+	FieldsCapped bool
+	Fields       []string
+	Points       uint64
+	// OldestNS and NewestNS are its oldest and newest points' times in
+	// Unix nanoseconds; nil without points.
+	OldestNS *int64
+	NewestNS *int64
+}
+
+// TSInfoOptions are an Info's optional parts.
+type TSInfoOptions struct {
+	Namespace string
+}
+
+// Info summarizes a measurement. One with no series is an error that
+// IsNotFound reports.
+func (ts *TSClient) Info(measurement string, opts *TSInfoOptions) (*TSInfo, error) {
+	if opts == nil {
+		opts = &TSInfoOptions{}
+	}
+	resp, err := ts.client.sendAndCheck(OpTSInfo, ts.client.getNamespace(opts.Namespace), []byte(measurement), nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeTSInfoAnswer(resp.Data)
+}
+
+// decodeTSInfoAnswer reads ts.info's answer: series, field_count,
+// fields_capped, fields, points, oldest_ns, newest_ns.
+func decodeTSInfoAnswer(data []byte) (*TSInfo, error) {
+	r := bodyReader{buf: data}
+	got := &TSInfo{Series: r.u32(), FieldCount: r.u32(), FieldsCapped: r.bool()}
+	n := int(r.u16())
+	if n > 256 || n*2 > len(r.buf) {
+		return nil, ErrIncompleteResponse
+	}
+	for i := 0; i < n && !r.bad; i++ {
+		got.Fields = append(got.Fields, string(r.bytes16()))
+	}
+	got.Points = r.u64()
+	for _, t := range []**int64{&got.OldestNS, &got.NewestNS} {
+		if r.present() {
+			v := int64(r.u64())
+			*t = &v
+		}
+	}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
 }

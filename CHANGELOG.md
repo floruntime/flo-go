@@ -16,6 +16,10 @@ live tests run against; this SDK no longer talks to an older server.
 - `OptTSTimestamp` is `OptTSTimestampNS`: a write's time is an i64 of Unix
   nanoseconds, not milliseconds; 0 or none is the server's time, and one
   before 1970 is refused
+- `OptTSFromMS`, `OptTSToMS` and `OptTSWindowMS` are `OptTSFromNS`,
+  `OptTSToNS` and `OptTSWindowNS`: a query's bounds and window are i64 ns.
+  0 or none is no bound; no window is a minute, and a window of 0 is
+  refused
 - `StreamClient.Read` returns a not-found answer as an error
   (`IsNotFound`), never as an empty read. The server now answers a
   non-blocking read of a stream that doesn't exist (never created, or
@@ -165,9 +169,11 @@ live tests run against; this SDK no longer talks to an older server.
   `TSReadOptions` with `Field`, `Tags`, `FromNS`, `ToNS`, `Limit` up to
   4096, `Order` (`TSOldestFirst`, `TSNewestFirst`) and `Cursor`), `ReadAll`
   (a `TSPointIter` over every page, ending at the first page without a
-  cursor, or on an error) and `FloQL` (`FloQLPoint.TimeNS`, for now whole
-  milliseconds). `TSPoint.Time`, `TSWriteResult.Time` and
-  `FloQLPoint.Time` give a `time.Time`
+  cursor, or on an error), `Query` (`TSQueryOptions` with `FromNS`, `ToNS`,
+  `Window` as a `time.Duration` and `Aggregation`; answers `TSBucket`s with
+  `StartNS`), `Info` (`TSInfo` with `OldestNS` and `NewestNS`) and `FloQL`
+  (`FloQLPoint.TimeNS`). Every time and window is ns; `Time` and `Start` on
+  the results give a `time.Time`
 - `ProcessingStatusResult.Late`: at least how many of a running job's TS
   source fields' points came more than `EdgeMS` behind their field's newest
   point; nil when there is no count
