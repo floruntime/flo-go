@@ -467,8 +467,8 @@ first), so a point there for the whole read is answered exactly once. The
 cursor is opaque. A tag filter that isn't `key=value` pairs, or a cursor
 that isn't one a page answered, is refused as a bad request.
 
-`client.TS.FloQL(query, nil)` runs a FloQL query; its points' times are in
-milliseconds. An answer of more than 4096 raw points is refused as a bad
+`client.TS.FloQL(query, nil)` runs a FloQL query; its points' times are ns
+too, for now whole milliseconds. An answer of more than 4096 raw points is refused as a bad
 request with the server's text: aggregate them, narrow the query, or page
 through them with `Read`.
 

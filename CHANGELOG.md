@@ -157,8 +157,9 @@ live tests run against; this SDK no longer talks to an older server.
   `TSReadOptions` with `Field`, `Tags`, `FromNS`, `ToNS`, `Limit` up to
   4096, `Order` (`TSOldestFirst`, `TSNewestFirst`) and `Cursor`), `ReadAll`
   (a `TSPointIter` over every page, ending at the first page without a
-  cursor, or on an error) and `FloQL`. `TSPoint.Time` and
-  `TSWriteResult.Time` give a `time.Time`
+  cursor, or on an error) and `FloQL` (`FloQLPoint.TimeNS`, for now whole
+  milliseconds). `TSPoint.Time`, `TSWriteResult.Time` and
+  `FloQLPoint.Time` give a `time.Time`
 - `ProcessingStatusResult.Late`: at least how many of a running job's TS
   source fields' points came more than `EdgeMS` behind their field's newest
   point; nil when there is no count

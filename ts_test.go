@@ -302,7 +302,7 @@ func TestFloQLDecodesSeriesAndSurfacesTheCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []FloQLSeries{{Key: "cpu", Field: "value", Points: []FloQLPoint{{1000, 2.5}}}}; !reflect.DeepEqual(got, want) {
+	if want := []FloQLSeries{{Key: "cpu", Field: "value", Points: []FloQLPoint{{1_000_000_000, 2.5}}}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v", got)
 	}
 

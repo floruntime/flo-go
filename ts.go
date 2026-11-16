@@ -315,12 +315,16 @@ func (it *TSPointIter) Point() TSPoint { return it.point }
 // Err is the error that ended the walk, nil if it reached the end.
 func (it *TSPointIter) Err() error { return it.err }
 
-// FloQLPoint is one point of a FloQL answer. Its time is Unix
-// milliseconds: FloQL answers in ms.
+// FloQLPoint is one point of a FloQL answer.
 type FloQLPoint struct {
-	TimeMS int64
+	// TimeNS is the point's time in Unix nanoseconds. The server answers
+	// FloQL in whole milliseconds for now, so it is a multiple of 1e6.
+	TimeNS int64
 	Value  float64
 }
+
+// Time is the point's time as a time.Time.
+func (p FloQLPoint) Time() time.Time { return time.Unix(0, p.TimeNS) }
 
 // FloQLSeries is one series of a FloQL answer.
 type FloQLSeries struct {
@@ -349,7 +353,8 @@ func (ts *TSClient) FloQL(query string, opts *TSFloQLOptions) ([]FloQLSeries, er
 }
 
 // decodeFloQLAnswer reads a FloQL answer: [series_count:u32], each
-// [key_len:u32][key][field_len:u32][field][count:u32]([time_ms:i64][value:f64])*.
+// [key_len:u32][key][field_len:u32][field][count:u32]([time_ms:i64][value:f64])*,
+// its times read into ns.
 func decodeFloQLAnswer(data []byte) ([]FloQLSeries, error) {
 	r := bodyReader{buf: data}
 	n := int(r.u32())
@@ -366,7 +371,7 @@ func decodeFloQLAnswer(data []byte) ([]FloQLSeries, error) {
 		}
 		s.Points = make([]FloQLPoint, count)
 		for j := range s.Points {
-			s.Points[j] = FloQLPoint{TimeMS: int64(r.u64()), Value: math.Float64frombits(r.u64())}
+			s.Points[j] = FloQLPoint{TimeNS: int64(r.u64()) * int64(time.Millisecond), Value: math.Float64frombits(r.u64())}
 		}
 		series = append(series, s)
 	}

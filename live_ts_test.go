@@ -126,8 +126,9 @@ func TestLiveTSReadPagesEveryPointOnceBothWays(t *testing.T) {
 	series, err := c.TS.FloQL("paged{host=h1}[2h]", nil)
 	if err != nil || len(series) != 1 || len(series[0].Points) != len(h1) {
 		t.Errorf("FloQL of one series: %d series, %v", len(series), err)
-	} else if series[0].Points[0].TimeMS != h1[0].TimeNS/1e6 {
-		t.Errorf("FloQL time %d ms, want %d", series[0].Points[0].TimeMS, h1[0].TimeNS/1e6)
+	} else if want := h1[0].TimeNS / 1e6 * 1e6; series[0].Points[0].TimeNS != want {
+		// FloQL answers whole ms for now.
+		t.Errorf("FloQL time %d ns, want %d", series[0].Points[0].TimeNS, want)
 	}
 }
 
