@@ -888,12 +888,11 @@ func (sw *StreamWorker) Drain() {
 
 // Stop stops the stream worker: it reads nothing more and cancels the
 // running handlers' contexts. Records a read took that haven't started are
-// not run, and a handler that returns an error once the stop cancelled it
-// isn't counted as failing, nor is one that panics once the stop cancelled
-// it: all are abandoned, handed back ready at once with no failure
-// counted, so stopping never dead-letters them. A handler error or panic
-// while the worker isn't stopping is nacked: only a nack's failures
-// dead-letter a record that always fails.
+// not run. After Stop, a handler's error or panic abandons its record: it
+// is handed back ready at once with no failure counted, so stopping never
+// dead-letters it. A handler error or panic while the worker isn't
+// stopping is nacked: only a nack's failures dead-letter a record that
+// always fails.
 func (sw *StreamWorker) Stop() {
 	sw.logger.Printf("Stopping stream worker...")
 	sw.runMu.Lock()
@@ -908,10 +907,9 @@ func (sw *StreamWorker) Stop() {
 	}
 }
 
-// Close stops the worker, waits up to closeRunWait for a running Start to
-// return, so the acks and hand-backs of records in flight are sent, then
-// closes its dedicated connections. A handler that ignores its context
-// can outlast the wait; its record comes back when its lease runs out.
+// Close stops the worker, waits up to 30 s for the running Start to send
+// its acks, nacks and hand-backs, then closes its dedicated connections;
+// anything unsent is redelivered when its lease expires. The wait is fixed.
 func (sw *StreamWorker) Close() error {
 	sw.Stop()
 	sw.runMu.Lock()

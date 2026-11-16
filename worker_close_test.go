@@ -3,6 +3,7 @@ package flo
 import (
 	"bytes"
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -162,3 +163,53 @@ func TestStreamWorkerStartFailsOnAGroupReadNotFound(t *testing.T) {
 		t.Errorf("%d reads; want the one", n)
 	}
 }
+
+// abandonsRun reports whether an action fail frame is the stop's hand-back:
+// retry, abandoned, no delay, "worker stopped".
+func abandonsRun(frame []byte) bool {
+	want := append(cat([]byte{1, 1, 1, 1, 1}, u64le(0), []byte{1, 14, 0}), "worker stopped"...)
+	return bytes.HasSuffix(frame, want)
+}
+
+// After Stop, an action handler's panic or non-context error abandons its
+// run, as the stream worker abandons its record.
+func TestActionWorkerAbandonsAHandlerThatFailsAfterTheStop(t *testing.T) {
+	for _, name := range []string{"panic", "error"} {
+		t.Run(name, func(t *testing.T) {
+			s, addr := newFrameServer(t, pollOnce(OpActionAwait, oneTask(), nil))
+			running := make(chan struct{})
+			w := drainTestWorker(t, addr, func(ctx *ActionContext) (interface{}, error) {
+				close(running)
+				<-ctx.Context().Done()
+				if name == "error" {
+					return nil, errSentinel
+				}
+				panic("the connection the stop closed")
+			})
+			done := startWorker(w.Start)
+			<-running
+			w.Stop()
+			waitStart(t, done)
+			fails := s.got(OpActionFail)
+			if len(fails) != 1 || !abandonsRun(fails[0]) {
+				t.Fatalf("%d fails; want the one abandon", len(fails))
+			}
+		})
+	}
+}
+
+// Before Stop, a panic keeps its rule: a fail with retry naming it.
+func TestActionWorkerFailsAPanicWhenNotStopping(t *testing.T) {
+	s, addr := newFrameServer(t, pollOnce(OpActionAwait, oneTask(), nil))
+	w := drainTestWorker(t, addr, func(*ActionContext) (interface{}, error) { panic("bug") })
+	done := startWorker(w.Start)
+	waitFor(t, "the fail", func() bool { return len(s.got(OpActionFail)) > 0 })
+	w.Stop()
+	waitStart(t, done)
+	fails := s.got(OpActionFail)
+	if len(fails) != 1 || abandonsRun(fails[0]) || !bytes.HasSuffix(fails[0], []byte("action panicked: bug")) {
+		t.Fatalf("%d fails; want one plain fail naming the panic", len(fails))
+	}
+}
+
+var errSentinel = errors.New("gave up")

@@ -233,11 +233,12 @@ live tests run against; this SDK no longer talks to an older server.
 
 ### Changed
 
-- `ActionWorker.Close` and `StreamWorker.Close` wait up to 5 s for a
-  running `Start` to return, so results, acks and hand-backs in flight are
-  sent before the connections close
-- A stream handler that panics after the worker's stop cancelled it is
-  abandoned, like one returning an error then, not nacked
+- `ActionWorker.Close` and `StreamWorker.Close` wait up to 30 s for the
+  running loop to send its completes, acks and hand-backs, then close the
+  client; anything unsent is redelivered when its lease expires
+- After `Stop`, a handler's error or panic abandons its message, on both
+  workers: an action handler's non-context error or panic after the stop
+  used to fail the run with retry, and a stream handler's panic was nacked
 - A `kv.scan` cursor is up to 4098 bytes (a shard id and the last key read),
   up from 64, and its length prefix is a u16
 

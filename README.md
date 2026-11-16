@@ -385,12 +385,10 @@ retries a touch that fails for a passing reason, and stops only on a
 conflict (a stale report), not found or bad request. Without it, call
 `sctx.Touch()` from long handlers. `Stop` runs none of a read's records not
 yet started, and cancels the running handlers' contexts. It abandons the
-unstarted records, and those whose handler returns an error or panics after
-the stop cancelled it, handing them back ready at once with no failure
-counted, so a stop never dead-letters them. A handler error or panic while
-the worker isn't stopping is nacked as usual. `Close` stops the worker and
-waits a few seconds for `Start` to return, so acks and hand-backs in flight
-are sent before the connections close. A group read answered not found
+unstarted records, and, as with the action worker, after `Stop` a handler's
+error or panic abandons its record: it is handed back ready at once with no
+failure counted, so a stop never dead-letters it. A handler error or panic
+while the worker isn't stopping is nacked as usual. A group read answered not found
 stops the worker and `Start` returns that error (`flo.IsNotFound`): a
 worker that may start before its stream exists should catch it and start
 again.
@@ -689,9 +687,14 @@ with no handler, and a result that doesn't marshal to JSON each fail the run
 with retry, so the
 action's max attempts bounds a handler that keeps failing; return a
 `flo.NewNonRetryableError` to fail the run at once. `Stop` takes no more
-tasks and cancels every running handler's context: a handler that returns
-the context's error hands its run back with no failure counted, and results
-may still be sent for 2 s, after which an unsent one waits out its lease.
+tasks and cancels every running handler's context. After `Stop`, a
+handler's error or panic abandons its run: it is handed back at once with no
+failure counted. Results may still be sent for 2 s, after which an unsent
+one waits out its lease.
+
+`Close` (on either worker) waits up to 30 s for the running loop to send its
+completes, acks and hand-backs, then closes the client; anything unsent is
+redelivered when its lease expires. The 30 s is fixed.
 
 Each task is one delivery of a run, named by its run id, delivery count,
 term and log index (`actx.TaskID()` prints them as the flo CLI does,
