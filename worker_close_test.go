@@ -39,19 +39,21 @@ func TestActionWorkerCloseWaitIsBounded(t *testing.T) {
 	_, addr := newFrameServer(t, pollOnce(OpActionAwait, oneTask(), nil))
 	running := make(chan struct{})
 	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
 	w := drainTestWorker(t, addr, func(*ActionContext) (interface{}, error) {
 		close(running)
 		<-release
 		return nil, nil
 	})
-	startWorker(w.Start)
+	done := startWorker(w.Start)
 	<-running
 	start := time.Now()
 	w.Close()
 	if d := time.Since(start); d > 2*time.Second {
-		t.Errorf("Close took %v with a handler that never returns", d)
+		t.Errorf("Close took %v with a handler that won't return", d)
 	}
+	// Let the handler and the run end, so neither outlives the test.
+	close(release)
+	waitStart(t, done)
 }
 
 // Close waits for the run, so the hand-back of a record the stop cut short
