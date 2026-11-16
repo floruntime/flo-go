@@ -76,13 +76,14 @@ type ActionWorker struct {
 	// Worker state. ctx ends on Stop or when Start's context does; handler
 	// contexts derive from it, so a drain, which doesn't end it, lets
 	// handlers finish. runMu guards cancel, which Stop reads while Start
-	// sets it.
-	runMu  sync.Mutex
-	ctx    context.Context
-	cancel context.CancelFunc
-	drain  drainState
-	wg     sync.WaitGroup
-	logger Logger
+	// sets it, and runDone, which closes as Start returns.
+	runMu   sync.Mutex
+	ctx     context.Context
+	cancel  context.CancelFunc
+	runDone chan struct{}
+	drain   drainState
+	wg      sync.WaitGroup
+	logger  Logger
 }
 
 // NewActionWorker creates a new Flo action worker from an existing client.
@@ -212,7 +213,11 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 	w.ctx, w.cancel = context.WithCancel(ctx)
 	runCtx := w.ctx // goroutines that may outlive this run read this, not w.ctx
 	pollCtx := w.drain.begin(runCtx)
+	runDone := make(chan struct{})
+	w.runDone = runDone
 	w.runMu.Unlock()
+	// Deferred first, so it closes after everything else Start does.
+	defer close(runDone)
 	defer w.cancel()
 	defer w.drain.end()
 
@@ -482,9 +487,16 @@ func (w *ActionWorker) Stop() {
 	}
 }
 
-// Close closes the connections.
+// Close stops the worker, waits up to closeRunWait for a running Start to
+// return, so the results of runs in flight are sent, then closes the
+// connections. A handler that ignores its context can outlast the wait;
+// its run goes back when its lease runs out.
 func (w *ActionWorker) Close() error {
 	w.Stop()
+	w.runMu.Lock()
+	runDone := w.runDone
+	w.runMu.Unlock()
+	awaitRun(runDone, w.logger)
 	w.closeCancel()
 	if w.resultClient != nil {
 		// Don't wait out a stalled result send.
@@ -678,7 +690,25 @@ var (
 	// stopResultWait is how long after a worker starts stopping its
 	// results may still be sent.
 	stopResultWait = 2 * time.Second
+	// closeRunWait bounds how long Close waits for a stopped worker's
+	// Start to return: past stopResultWait, so results still being sent
+	// land, with room for the deregistration.
+	closeRunWait = 5 * time.Second
 )
+
+// awaitRun waits up to closeRunWait for runDone, nil when Start never ran.
+func awaitRun(runDone chan struct{}, logger Logger) {
+	if runDone == nil {
+		return
+	}
+	t := time.NewTimer(closeRunWait)
+	defer t.Stop()
+	select {
+	case <-runDone:
+	case <-t.C:
+		logger.Printf("Close: the worker's run still hadn't returned after %v; closing anyway", closeRunWait)
+	}
+}
 
 // sendResult sends a complete or fail. On a connection error, a timeout or
 // an unreadable answer it reconnects and sends the same result again, up to

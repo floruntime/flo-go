@@ -13,6 +13,13 @@ live tests run against; this SDK no longer talks to an older server.
 
 ### Breaking
 
+- `OptTSTimestamp` is `OptTSTimestampNS`: a write's time is an i64 of Unix
+  nanoseconds, not milliseconds; 0 or none is the server's time, and one
+  before 1970 is refused
+- `StreamClient.Read` returns a not-found answer as an error
+  (`IsNotFound`), never as an empty read. A stream worker whose group read
+  is answered not found stops, and `Start` returns that error: a worker
+  that may start before its stream exists should catch it and start again
 - A group nack's error travels in its body, up to 1024 bytes
   (`MaxGroupNackError`); `OptErrorText` is gone. A report (ack, nack or
   touch) to a group that isn't there is `ErrNotFound`, not a refusal per
@@ -145,6 +152,16 @@ live tests run against; this SDK no longer talks to an older server.
 
 ### Added
 
+- `client.TS`: `Write` (a point's time in ns, `TSWriteOptions.TimeNS`),
+  `Read` (one page of a measurement field's points, oldest or newest first:
+  `TSReadOptions` with `Field`, `Tags`, `FromNS`, `ToNS`, `Limit` up to
+  4096, `Order` (`TSOldestFirst`, `TSNewestFirst`) and `Cursor`), `ReadAll`
+  (a `TSPointIter` over every page, ending at the first page without a
+  cursor, or on an error) and `FloQL`. `TSPoint.Time` and
+  `TSWriteResult.Time` give a `time.Time`
+- `ProcessingStatusResult.Late`: at least how many of a running job's TS
+  source fields' points came more than `EdgeMS` behind their field's newest
+  point; nil when there is no count
 - `StatusLimit` (15), `ErrLimit` and `IsLimit`, with `ReasonMemoryBudget`,
   `ReasonTooManyActions`, `ReasonTooManyWorkflowDefinitions` and
   `ReasonTooManyWorkflowRuns`: the node is at a limit built into the
@@ -215,6 +232,11 @@ live tests run against; this SDK no longer talks to an older server.
 
 ### Changed
 
+- `ActionWorker.Close` and `StreamWorker.Close` wait up to 5 s for a
+  running `Start` to return, so results, acks and hand-backs in flight are
+  sent before the connections close
+- A stream handler that panics after the worker's stop cancelled it is
+  abandoned, like one returning an error then, not nacked
 - A `kv.scan` cursor is up to 4098 bytes (a shard id and the last key read),
   up from 64, and its length prefix is a u16
 

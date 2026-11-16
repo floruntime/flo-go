@@ -66,7 +66,8 @@ func (s *StreamClient) Append(stream string, payload []byte, opts *StreamAppendO
 	}, nil
 }
 
-// Read reads records from a stream.
+// Read reads records from a stream. A not-found answer is an error that
+// IsNotFound reports, never an empty read.
 func (s *StreamClient) Read(stream string, opts *StreamReadOptions) (*StreamReadResult, error) {
 	if opts == nil {
 		opts = &StreamReadOptions{}
@@ -108,7 +109,7 @@ func (s *StreamClient) Read(stream string, opts *StreamReadOptions) (*StreamRead
 		builder.AddU32(OptBlockMS, *opts.BlockMS)
 	}
 
-	resp, err := s.client.sendAndCheck(OpStreamRead, namespace, []byte(stream), nil, builder.Build(), true)
+	resp, err := s.client.sendAndCheck(OpStreamRead, namespace, []byte(stream), nil, builder.Build(), false)
 	if err != nil {
 		return nil, err
 	}

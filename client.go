@@ -35,6 +35,7 @@ type Client struct {
 	Action     *ActionClient
 	Workflow   *WorkflowClient
 	Processing *ProcessingClient
+	TS         *TSClient
 }
 
 // ClientOption is a function that configures a Client.
@@ -82,6 +83,7 @@ func NewClient(endpoint string, opts ...ClientOption) *Client {
 	c.Action = &ActionClient{client: c}
 	c.Workflow = &WorkflowClient{client: c}
 	c.Processing = &ProcessingClient{client: c}
+	c.TS = &TSClient{client: c}
 
 	return c
 }

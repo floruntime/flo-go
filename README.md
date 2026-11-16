@@ -385,10 +385,15 @@ retries a touch that fails for a passing reason, and stops only on a
 conflict (a stale report), not found or bad request. Without it, call
 `sctx.Touch()` from long handlers. `Stop` runs none of a read's records not
 yet started, and cancels the running handlers' contexts. It abandons the
-unstarted records, and those whose handler returns an error after the stop
-cancelled it, handing them back ready at once with no failure counted, so a
-stop never dead-letters them. A handler error while the worker isn't
-stopping is nacked as usual.
+unstarted records, and those whose handler returns an error or panics after
+the stop cancelled it, handing them back ready at once with no failure
+counted, so a stop never dead-letters them. A handler error or panic while
+the worker isn't stopping is nacked as usual. `Close` stops the worker and
+waits a few seconds for `Start` to return, so acks and hand-backs in flight
+are sent before the connections close. A group read answered not found
+stops the worker and `Start` returns that error (`flo.IsNotFound`): a
+worker that may start before its stream exists should catch it and start
+again.
 
 `GroupNack` with `Abandon: true` does the same by hand. Abandon never
 dead-letters, so use it only for records the consumer never started (it is
@@ -401,7 +406,7 @@ reasons; the message says which. The group may be at its caps, which count
 its ready, leased and dead records: acks and nacks free leased ones, but
 dead ones stay until the group is deleted or a stream trim passes them. Or
 the shard's queues and groups together may be at the shard's cap, which
-clears as other groups and queues drain. Reading again won't help, so no
+clears as any of them drain, this group's own acks included. Reading again won't help, so no
 read retries it; the stream worker logs it once and polls again with a
 backoff.
 
@@ -428,6 +433,44 @@ for _, msg := range result.Messages {
     fmt.Printf("Peeking: seq=%d payload=%s\n", msg.Seq, msg.Payload)
 }
 ```
+
+### Time series
+
+A point has a measurement, a field (`"value"` unless named), tags that pick
+its series, a value and a time. Every time is an `int64` of Unix
+nanoseconds; `TSPoint.Time()` and `TSWriteResult.Time()` give a
+`time.Time`, and `t.UnixNano()` goes the other way.
+
+```go
+// TimeNS 0 takes the server's time; a time before 1970 is refused
+at := time.Now().UnixNano()
+w, err := client.TS.Write("cpu", 0.42, &flo.TSWriteOptions{Tags: "host=web-1,dc=east", TimeNS: at})
+
+// One page: up to Limit points (default and most 4096) of every series
+// whose tags include the filter's, merged in time order then write order
+from := at - int64(time.Hour)
+page, err := client.TS.Read("cpu", &flo.TSReadOptions{Tags: "host=web-1", FromNS: &from, Limit: 1000})
+// page.Cursor reads the next page; it is nil on the last one. A short page
+// can still have more after it, so page until the cursor is nil.
+
+// Every page, newest first
+it := client.TS.ReadAll("cpu", &flo.TSReadOptions{Order: flo.TSNewestFirst})
+for it.Next() {
+    p := it.Point()
+    fmt.Println(p.Time(), p.Value)
+}
+if err := it.Err(); err != nil { /* a refused page ends the walk */ }
+```
+
+A page continues strictly after the last page's cursor (before it, newest
+first), so a point there for the whole read is answered exactly once. The
+cursor is opaque. A tag filter that isn't `key=value` pairs, or a cursor
+that isn't one a page answered, is refused as a bad request.
+
+`client.TS.FloQL(query, nil)` runs a FloQL query; its points' times are in
+milliseconds. An answer of more than 4096 raw points is refused as a bad
+request with the server's text: aggregate them, narrow the query, or page
+through them with `Read`.
 
 ## Error Handling
 

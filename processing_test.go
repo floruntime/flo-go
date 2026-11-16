@@ -16,6 +16,12 @@ func appendStr(b []byte, s string) []byte {
 // processingStatusAnswer is a processing.status answer laid out as the
 // server writes it, with this node running the job.
 func processingStatusAnswer(status byte, reason string) []byte {
+	return processingStatusAnswerLate(status, reason, noLateEdge, 0)
+}
+
+// processingStatusAnswerLate is processingStatusAnswer with its late edge
+// and count.
+func processingStatusAnswerLate(status byte, reason string, lateEdge, latePoints uint64) []byte {
 	b := appendStr(nil, "job-1")
 	b = appendStr(b, "pipe")
 	b = append(b, status)
@@ -27,8 +33,36 @@ func processingStatusAnswer(status byte, reason string) []byte {
 	for _, v := range []uint64{10, 9, 8, 7, 6, 5} {
 		b = binary.LittleEndian.AppendUint64(b, v) // in, out, watermark, tick avg, tick max, uptime
 	}
+	b = binary.LittleEndian.AppendUint64(b, lateEdge)
+	b = binary.LittleEndian.AppendUint64(b, latePoints)
 	b = binary.LittleEndian.AppendUint32(b, 4)
 	return append(b, "name"...)
+}
+
+// The late edge maxInt(u64) means no count, whatever the count field says;
+// any other edge, 0 s included, carries one, 0 points included.
+func TestParseProcessingStatusLateFields(t *testing.T) {
+	for _, tc := range []struct {
+		edge, points uint64
+		want         *ProcessingLate
+	}{
+		{noLateEdge, 0, nil},
+		{noLateEdge, 7, nil},
+		{0, 0, &ProcessingLate{EdgeMS: 0, Points: 0}},
+		{30_000, 12, &ProcessingLate{EdgeMS: 30_000, Points: 12}},
+		{3_600_000, 1 << 40, &ProcessingLate{EdgeMS: 3_600_000, Points: 1 << 40}},
+	} {
+		got, err := parseProcessingStatus(processingStatusAnswerLate(0, "", tc.edge, tc.points))
+		if err != nil {
+			t.Fatalf("edge %d: %v", tc.edge, err)
+		}
+		if !reflect.DeepEqual(got.Late, tc.want) {
+			t.Errorf("edge %d points %d: Late %+v, want %+v", tc.edge, tc.points, got.Late, tc.want)
+		}
+		if got.UptimeMS != 5 || string(got.YAML) != "name" {
+			t.Errorf("edge %d: fields around the late ones misread: uptime %d yaml %q", tc.edge, got.UptimeMS, got.YAML)
+		}
+	}
 }
 
 func TestParseProcessingStatus(t *testing.T) {

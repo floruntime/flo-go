@@ -3,6 +3,7 @@ package flo
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,13 +205,17 @@ func extractProcessingMeta(data []byte) (string, error) {
 // Wire Format Parsers
 // =============================================================================
 
+// noLateEdge is the late edge a job without a TS source answers: no count.
+const noLateEdge = math.MaxUint64
+
 var processingStatusNames = []string{"running", "stopped", "cancelled", "failed", "completed"}
 
 // parseProcessingStatus reads processing.status's answer:
 // [job_id_len:u16][job_id][name_len:u16][name][status:u8][batch_size:u32]
 // [records_processed:u64][created_at:i64][reason_len:u16][reason]
 // [running:u8][records_in:u64][records_out:u64][watermark_ms:i64]
-// [tick_avg_us:u64][tick_max_us:u64][uptime_ms:u64][yaml_len:u32][yaml].
+// [tick_avg_us:u64][tick_max_us:u64][uptime_ms:u64][late_edge_ms:u64]
+// [late_points:u64][yaml_len:u32][yaml].
 func parseProcessingStatus(data []byte) (*ProcessingStatusResult, error) {
 	r := bodyReader{buf: data}
 	got := &ProcessingStatusResult{JobID: string(r.bytes16()), Name: string(r.bytes16())}
@@ -226,6 +231,9 @@ func parseProcessingStatus(data []byte) (*ProcessingStatusResult, error) {
 	got.TickAvgUS = r.u64()
 	got.TickMaxUS = r.u64()
 	got.UptimeMS = r.u64()
+	if edge, points := r.u64(), r.u64(); edge != noLateEdge {
+		got.Late = &ProcessingLate{EdgeMS: edge, Points: points}
+	}
 	got.YAML = r.bytes32()
 	if err := r.done(); err != nil {
 		return nil, err
