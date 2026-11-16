@@ -5,7 +5,7 @@ All notable changes to the Flo Go SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0-dev.24] - 2026-11-16
 
 These follow the server's wire. The server's op table changed with them, so
 `TableHash` is now `0x17f3632347cd6dd9`, the hash of flo `ad198c29`, which CI's
