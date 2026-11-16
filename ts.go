@@ -163,7 +163,10 @@ type TSReadResult struct {
 // A read is not found (IsNotFound) when no series of the field matches the
 // tag filter: a measurement never written, and a filter that matches
 // nothing, are not found, not empty. A matching series with no points in
-// the range or past the cursor is ok and empty.
+// the range or past the cursor is ok and empty. A stale node's not-found is
+// ErrStaleNotFound (IsStale, and still IsNotFound): the series may exist
+// but that node hasn't seen it yet, so read again rather than treat it as
+// gone.
 func (ts *TSClient) Read(measurement string, opts *TSReadOptions) (*TSReadResult, error) {
 	if opts == nil {
 		opts = &TSReadOptions{}
@@ -172,8 +175,11 @@ func (ts *TSClient) Read(measurement string, opts *TSReadOptions) (*TSReadResult
 	if err != nil {
 		return nil, err
 	}
-	resp, err := ts.client.sendAndCheck(OpTSRead, ts.client.getNamespace(opts.Namespace), []byte(measurement), body, nil, false)
+	resp, err := ts.client.sendRequest(OpTSRead, ts.client.getNamespace(opts.Namespace), []byte(measurement), body, nil)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkRead(resp); err != nil {
 		return nil, err
 	}
 	got, err := decodeTSReadAnswer(resp.Data)
@@ -271,7 +277,7 @@ func decodeTSReadAnswer(data []byte) (*TSReadResult, error) {
 //	if err := it.Err(); err != nil { ... }
 //
 // A failed page ends the walk with that error in Err: no matching series
-// is not found, not an empty walk.
+// is not found, not an empty walk, and a stale node's is ErrStaleNotFound.
 type TSPointIter struct {
 	ts          *TSClient
 	measurement string

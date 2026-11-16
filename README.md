@@ -344,7 +344,10 @@ created or appended to, or deleted) is `flo.ErrNotFound`, not an empty read;
 one that exists with nothing past `Start` is ok and empty. A blocking read
 of a stream not created yet waits for its first append. A consumer that may
 start before its stream exists should catch not-found (`flo.IsNotFound`) and
-start again.
+start again. A not-found from a stale node is `flo.ErrStaleNotFound`
+(`flo.IsStale`, and still `flo.IsNotFound`): the stream may exist but that
+node hasn't seen it yet, so read again rather than treat it as gone; the
+same holds for `TS.Read`.
 
 ### Stream consumer groups
 

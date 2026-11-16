@@ -22,9 +22,12 @@ live tests run against; this SDK no longer talks to an older server.
   deleted) not found; a stream with nothing past `Start` is still ok and
   empty, and a blocking read of a stream not created yet waits for its
   first append. `TSClient.Read` is not found when no series of the field
-  matches the tag filter. A stream worker whose group read
-  is answered not found stops, and `Start` returns that error: a worker
-  that may start before its stream exists should catch it and start again
+  matches the tag filter. On both, and on `ReadAll`, a stale node's
+  not-found is `ErrStaleNotFound` (`IsStale`, still `IsNotFound`): the
+  stream or series may exist but that node hasn't seen it yet, so read
+  again. A stream worker whose group read is answered not found stops, and
+  `Start` returns that error: a worker that may start before its stream
+  exists should catch it and start again
 - A group nack's error travels in its body, up to 1024 bytes
   (`MaxGroupNackError`); `OptErrorText` is gone. A report (ack, nack or
   touch) to a group that isn't there is `ErrNotFound`, not a refusal per

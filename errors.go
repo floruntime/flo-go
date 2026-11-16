@@ -43,7 +43,7 @@ var (
 
 	// ErrStaleNotFound: a stale shard (halted, diverged or blocked reading
 	// the log) answered that the key doesn't exist as of its state; it may
-	// exist since. Get and JsonGet
+	// exist since. Get, JsonGet, Stream.Read and TS.Read (and ReadAll)
 	// return it wrapped with the server's not-found refusal, so IsNotFound
 	// and IsStale both report it.
 	ErrStaleNotFound = errors.New("flo: not found as of a stale shard's state")

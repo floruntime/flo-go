@@ -211,6 +211,18 @@ func absentNow(resp *rawResponse) (bool, error) {
 	return gone, err
 }
 
+// checkRead checks a read's answer whose not-found is an error: a stale
+// shard's is ErrStaleNotFound (still IsNotFound), so it isn't read as the
+// thing being gone.
+func checkRead(resp *rawResponse) error {
+	if gone, err := absentNow(resp); err != nil {
+		return err
+	} else if gone {
+		return newServerError(resp.Status, resp.Data)
+	}
+	return checkStatus(resp.Status, resp.Data, false)
+}
+
 // encodeGetBody codes kv.get's request: wait_ms, wait_for, txn.
 func encodeGetBody(opts *GetOptions, txn *uint64) ([]byte, error) {
 	if opts.WaitMs > MaxWaitMS {
