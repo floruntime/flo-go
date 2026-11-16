@@ -66,8 +66,12 @@ func (s *StreamClient) Append(stream string, payload []byte, opts *StreamAppendO
 	}, nil
 }
 
-// Read reads records from a stream. A not-found answer is an error that
-// IsNotFound reports, never an empty read.
+// Read reads records from a stream. Without BlockMS, a read of a stream
+// that doesn't exist (never created or appended to, or deleted) is an
+// error that IsNotFound reports, never an empty read; one that exists with
+// nothing past Start is ok and empty. A blocking read of a stream not
+// created yet waits for its first append. A consumer that may start before
+// its stream exists should catch not-found and start again.
 func (s *StreamClient) Read(stream string, opts *StreamReadOptions) (*StreamReadResult, error) {
 	if opts == nil {
 		opts = &StreamReadOptions{}

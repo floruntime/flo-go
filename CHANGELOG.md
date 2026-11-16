@@ -17,7 +17,12 @@ live tests run against; this SDK no longer talks to an older server.
   nanoseconds, not milliseconds; 0 or none is the server's time, and one
   before 1970 is refused
 - `StreamClient.Read` returns a not-found answer as an error
-  (`IsNotFound`), never as an empty read. A stream worker whose group read
+  (`IsNotFound`), never as an empty read. The server now answers a
+  non-blocking read of a stream that doesn't exist (never created, or
+  deleted) not found; a stream with nothing past `Start` is still ok and
+  empty, and a blocking read of a stream not created yet waits for its
+  first append. `TSClient.Read` is not found when no series of the field
+  matches the tag filter. A stream worker whose group read
   is answered not found stops, and `Start` returns that error: a worker
   that may start before its stream exists should catch it and start again
 - A group nack's error travels in its body, up to 1024 bytes

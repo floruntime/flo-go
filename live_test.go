@@ -267,9 +267,9 @@ func TestLiveStreamDeleteNeedsForceWhenNotEmpty(t *testing.T) {
 	if err := c.Stream.Delete("doomed", &StreamDeleteOptions{Force: true}); err != nil {
 		t.Fatalf("delete with force: %v", err)
 	}
-	res, err := c.Stream.Read("doomed", nil)
-	if err != nil || len(res.Records) != 0 {
-		t.Fatalf("read after delete: %+v, %v; want no records", res, err)
+	// A deleted stream is gone, not empty.
+	if res, err := c.Stream.Read("doomed", nil); !IsNotFound(err) {
+		t.Fatalf("read after delete: %+v, %v; want not found", res, err)
 	}
 	if err := c.Stream.Delete("doomed", nil); err != nil {
 		t.Fatalf("deleting a missing stream: %v, want success", err)

@@ -337,6 +337,15 @@ complete, `flo.QueueGone` means done already (a resent complete); any other
 `Why` means that delivery is over and the message was, or will be,
 delivered again.
 
+### Reading a stream that doesn't exist
+
+Without `BlockMS`, `Stream.Read` of a stream that doesn't exist (never
+created or appended to, or deleted) is `flo.ErrNotFound`, not an empty read;
+one that exists with nothing past `Start` is ok and empty. A blocking read
+of a stream not created yet waits for its first append. A consumer that may
+start before its stream exists should catch not-found (`flo.IsNotFound`) and
+start again.
+
 ### Stream consumer groups
 
 A group reads a stream at least once. A group read leases records to its
@@ -463,7 +472,11 @@ if err := it.Err(); err != nil { /* a refused page ends the walk */ }
 A page continues strictly after the last page's cursor (before it, newest
 first), so a point there for the whole read is answered exactly once. The
 cursor is opaque. A tag filter that isn't `key=value` pairs, or a cursor
-that isn't one a page answered, is refused as a bad request.
+that isn't one a page answered, is refused as a bad request. A read is
+not found when no series of the field matches the tag filter: a measurement
+never written, and a filter that matches nothing, are `flo.ErrNotFound`,
+not empty, and end a `ReadAll` walk with that error. A matching series with
+no points in the range is ok and empty.
 
 `client.TS.FloQL(query, nil)` runs a FloQL query; its points' times are ns
 too, for now whole milliseconds. An answer of more than 4096 raw points is refused as a bad

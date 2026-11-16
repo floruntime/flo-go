@@ -159,6 +159,11 @@ type TSReadResult struct {
 // Cursor in the next call's options to read on; a page continues strictly
 // after the cursor (before it, newest first), so a point there for the
 // whole read is answered exactly once. ReadAll walks every page.
+//
+// A read is not found (IsNotFound) when no series of the field matches the
+// tag filter: a measurement never written, and a filter that matches
+// nothing, are not found, not empty. A matching series with no points in
+// the range or past the cursor is ok and empty.
 func (ts *TSClient) Read(measurement string, opts *TSReadOptions) (*TSReadResult, error) {
 	if opts == nil {
 		opts = &TSReadOptions{}
@@ -265,8 +270,8 @@ func decodeTSReadAnswer(data []byte) (*TSReadResult, error) {
 //	}
 //	if err := it.Err(); err != nil { ... }
 //
-// A failed page, a missing measurement's not-found included, ends the walk
-// with that error in Err.
+// A failed page ends the walk with that error in Err: no matching series
+// is not found, not an empty walk.
 type TSPointIter struct {
 	ts          *TSClient
 	measurement string
