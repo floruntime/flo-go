@@ -155,11 +155,13 @@ type StreamWorker struct {
 
 	// ctx ends on Stop or when Start's context does; handler contexts
 	// derive from it, so a drain, which doesn't end it, lets handlers
-	// finish. runMu guards cancel, which Stop reads while Start sets it.
-	runMu  sync.Mutex
-	ctx    context.Context
-	cancel context.CancelFunc
-	drain  drainState
+	// finish. runMu guards cancel, which Stop reads while Start sets it,
+	// and runDone, which closes as Start returns.
+	runMu   sync.Mutex
+	ctx     context.Context
+	cancel  context.CancelFunc
+	runDone chan struct{}
+	drain   drainState
 	// pollCtx is ctx that also ends on a drain; reads and their reconnects
 	// use it.
 	pollCtx context.Context
@@ -302,12 +304,18 @@ func (c *Client) NewStreamWorker(opts StreamWorkerOptions, handler StreamRecordH
 // registration waits out a halted shard, and an overloaded or unavailable
 // refusal that didn't run, with a backoff; any other refusal fails Start
 // with that error. Start fails with the limit error; a limit hit while
-// running is logged and backed off.
+// running is logged and backed off. A group read answered not found stops
+// the worker, and Start returns that error (IsNotFound): a worker that may
+// start before its stream exists should catch it and start again.
 func (sw *StreamWorker) Start(ctx context.Context) error {
 	sw.runMu.Lock()
 	sw.ctx, sw.cancel = context.WithCancel(ctx)
 	sw.pollCtx = sw.drain.begin(sw.ctx)
+	runDone := make(chan struct{})
+	sw.runDone = runDone
 	sw.runMu.Unlock()
+	// Deferred first, so it closes after everything else Start does.
+	defer close(runDone)
 	defer sw.cancel()
 	defer sw.drain.end()
 
@@ -469,6 +477,12 @@ func (sw *StreamWorker) pollStream(stream string, sem chan struct{}) error {
 					sw.logger.Printf("Error: [%s] group read committed but not applied, stopping: %v", stream, err)
 					sw.cancel()
 					return err
+				} else if IsNotFound(err) {
+					// Reading again would look like an empty stream; Start
+					// fails with it so the caller decides.
+					sw.logger.Printf("Error: [%s] group read not found, stopping: %v", stream, err)
+					sw.cancel()
+					return err
 				} else if !waitIfHalted(sw.pollCtx, sw.logger, "["+stream+"] group read", err, &halted) &&
 					!limited.wait(sw.pollCtx, sw.logger, "["+stream+"] group read", err) {
 					d := failed.next()
@@ -576,6 +590,13 @@ func (sw *StreamWorker) processRecord(stream string, lease StreamGroupLease, rec
 	defer touch.drop(record.ID)
 	defer func() {
 		if r := recover(); r != nil {
+			if sw.ctx.Err() != nil {
+				// As for a returned error: a handler the stop cut short may
+				// panic on what the stop tore down, so it isn't a failure.
+				sw.logger.Printf("[%s] Stream handler panicked on id %s after the stop: %v", stream, record.ID, r)
+				sw.handBack(stream, lease, []StreamGroupRecord{record}, touch)
+				return
+			}
 			sw.logger.Printf("[%s] Stream handler panicked on id %s: %v", stream, record.ID, r)
 			atomic.AddUint64(&sw.messagesFailed, 1)
 			touch.drop(record.ID)
@@ -867,11 +888,11 @@ func (sw *StreamWorker) Drain() {
 
 // Stop stops the stream worker: it reads nothing more and cancels the
 // running handlers' contexts. Records a read took that haven't started are
-// not run, and a handler that returns an error once the stop cancelled it
-// isn't counted as failing: both are abandoned, handed back ready at once
-// with no failure counted, so stopping never dead-letters them. A handler
-// error while the worker isn't stopping is nacked: only a nack's failures
-// dead-letter a record that always fails.
+// not run. After Stop, a handler's error or panic abandons its record: it
+// is handed back ready at once with no failure counted, so stopping never
+// dead-letters it. A handler error or panic while the worker isn't
+// stopping is nacked: only a nack's failures dead-letter a record that
+// always fails.
 func (sw *StreamWorker) Stop() {
 	sw.logger.Printf("Stopping stream worker...")
 	sw.runMu.Lock()
@@ -886,9 +907,15 @@ func (sw *StreamWorker) Stop() {
 	}
 }
 
-// Close stops the worker and closes its dedicated connections.
+// Close stops the worker, waits up to 30 s for the running Start to send
+// its acks, nacks and hand-backs, then closes its dedicated connections;
+// anything unsent is redelivered when its lease expires. The wait is fixed.
 func (sw *StreamWorker) Close() error {
 	sw.Stop()
+	sw.runMu.Lock()
+	runDone := sw.runDone
+	sw.runMu.Unlock()
+	awaitRun(runDone, sw.logger)
 	sw.closeCancel()
 	if sw.ackClient != nil {
 		// Stop leaves the ack connection up so in-flight acks land during a

@@ -21,7 +21,7 @@ func isTableOp(op OpCode) bool {
 		OpKVIncr, OpKVJsonGet, OpKVJsonSet, OpKVJsonDel,
 		OpKVBeginTxn, OpKVCommitTxn, OpKVRollbackTxn, OpKVExpire, OpKVExists,
 		OpNamespaceCreate, OpNamespaceDelete, OpNamespaceList, OpNamespaceInfo,
-		OpStreamGroupList, OpStreamGroupMembers, OpQueuePeek, OpQueueDequeue, OpQueueComplete, OpQueueFail, OpQueueTouch, OpTSInfo,
+		OpStreamGroupList, OpStreamGroupMembers, OpQueuePeek, OpQueueDequeue, OpQueueComplete, OpQueueFail, OpQueueTouch, OpTSRead, OpTSInfo,
 		OpActionStatus, OpActionAwait, OpActionComplete, OpActionFail, OpActionTouch, OpActionInfo,
 		OpWorkerList, OpWorkerInfo, OpProcessingRemove:
 		return true
@@ -209,6 +209,18 @@ func absentNow(resp *rawResponse) (bool, error) {
 		return true, fmt.Errorf("%w: %w", ErrStaleNotFound, newServerError(resp.Status, resp.Data))
 	}
 	return gone, err
+}
+
+// checkRead checks a read's answer whose not-found is an error: a stale
+// shard's is ErrStaleNotFound (still IsNotFound), so it isn't read as the
+// thing being gone.
+func checkRead(resp *rawResponse) error {
+	if gone, err := absentNow(resp); err != nil {
+		return err
+	} else if gone {
+		return newServerError(resp.Status, resp.Data)
+	}
+	return checkStatus(resp.Status, resp.Data, false)
 }
 
 // encodeGetBody codes kv.get's request: wait_ms, wait_for, txn.

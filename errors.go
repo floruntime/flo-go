@@ -43,7 +43,7 @@ var (
 
 	// ErrStaleNotFound: a stale shard (halted, diverged or blocked reading
 	// the log) answered that the key doesn't exist as of its state; it may
-	// exist since. Get and JsonGet
+	// exist since. Get, JsonGet, Stream.Read and TS.Read (and ReadAll)
 	// return it wrapped with the server's not-found refusal, so IsNotFound
 	// and IsStale both report it.
 	ErrStaleNotFound = errors.New("flo: not found as of a stale shard's state")
@@ -146,7 +146,9 @@ var (
 	// are at the shard's; the message says which. A group's cap counts its
 	// ready, leased and dead records: acks and nacks free leased ones, but
 	// dead ones stay until the group is deleted or a stream trim passes
-	// them. The shard's cap clears as other groups and queues drain. It is
+	// them. The shard's cap counts every queue and group on the shard, this
+	// one too, so it clears as any of them drain, this group's own acks
+	// included. It is
 	// also ErrOverloaded, but reading again won't clear either, so no read
 	// retries it; the stream worker logs it once and backs off, as for
 	// ErrLimit.

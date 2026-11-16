@@ -343,16 +343,22 @@ func checkResetAfterWork(t *testing.T, arrivals func() []time.Time) {
 	}
 }
 
+// The worker is stopped and its Start awaited before the test ends, so its
+// run doesn't outlive the test.
 func TestActionWorkerResetsBackoffAfterWork(t *testing.T) {
 	answer, arrivals := pollAfterWork(OpActionAwait, oneTask())
 	w := newTestActionWorker(t, fakeServer(t, answer))
-	go w.Start(context.Background())
+	done := startWorker(w.Start)
 	checkResetAfterWork(t, arrivals)
+	w.Stop()
+	waitStart(t, done)
 }
 
 func TestStreamWorkerResetsBackoffAfterWork(t *testing.T) {
 	answer, arrivals := pollAfterWork(OpStreamGroupRead, oneRecord)
 	sw := newTestStreamWorker(t, fakeServer(t, answer), 30000, func(*StreamContext) error { return nil })
-	go sw.Start(context.Background())
+	done := startWorker(sw.Start)
 	checkResetAfterWork(t, arrivals)
+	sw.Stop()
+	waitStart(t, done)
 }

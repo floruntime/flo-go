@@ -337,6 +337,18 @@ complete, `flo.QueueGone` means done already (a resent complete); any other
 `Why` means that delivery is over and the message was, or will be,
 delivered again.
 
+### Reading a stream that doesn't exist
+
+Without `BlockMS`, `Stream.Read` of a stream that doesn't exist (never
+created or appended to, or deleted) is `flo.ErrNotFound`, not an empty read;
+one that exists with nothing past `Start` is ok and empty. A blocking read
+of a stream not created yet waits for its first append. A consumer that may
+start before its stream exists should catch not-found (`flo.IsNotFound`) and
+start again. A not-found from a stale node is `flo.ErrStaleNotFound`
+(`flo.IsStale`, and still `flo.IsNotFound`): the stream may exist but that
+node hasn't seen it yet, so read again rather than treat it as gone; the
+same holds for `TS.Read`.
+
 ### Stream consumer groups
 
 A group reads a stream at least once. A group read leases records to its
@@ -385,10 +397,13 @@ retries a touch that fails for a passing reason, and stops only on a
 conflict (a stale report), not found or bad request. Without it, call
 `sctx.Touch()` from long handlers. `Stop` runs none of a read's records not
 yet started, and cancels the running handlers' contexts. It abandons the
-unstarted records, and those whose handler returns an error after the stop
-cancelled it, handing them back ready at once with no failure counted, so a
-stop never dead-letters them. A handler error while the worker isn't
-stopping is nacked as usual.
+unstarted records, and, as with the action worker, after `Stop` a handler's
+error or panic abandons its record: it is handed back ready at once with no
+failure counted, so a stop never dead-letters it. A handler error or panic
+while the worker isn't stopping is nacked as usual. A group read answered not found
+stops the worker and `Start` returns that error (`flo.IsNotFound`): a
+worker that may start before its stream exists should catch it and start
+again.
 
 `GroupNack` with `Abandon: true` does the same by hand. Abandon never
 dead-letters, so use it only for records the consumer never started (it is
@@ -401,7 +416,7 @@ reasons; the message says which. The group may be at its caps, which count
 its ready, leased and dead records: acks and nacks free leased ones, but
 dead ones stay until the group is deleted or a stream trim passes them. Or
 the shard's queues and groups together may be at the shard's cap, which
-clears as other groups and queues drain. Reading again won't help, so no
+clears as any of them drain, this group's own acks included. Reading again won't help, so no
 read retries it; the stream worker logs it once and polls again with a
 backoff.
 
@@ -428,6 +443,66 @@ for _, msg := range result.Messages {
     fmt.Printf("Peeking: seq=%d payload=%s\n", msg.Seq, msg.Payload)
 }
 ```
+
+### Time series
+
+A point has a measurement, a field (`"value"` unless named), tags that pick
+its series, a value and a time. Every time in the TS API is an `int64` of
+Unix nanoseconds, and a query's window a `time.Duration`, also exact to the
+nanosecond. `Time()` on points, buckets and write results gives a
+`time.Time`, and `t.UnixNano()` goes the other way.
+
+```go
+// TimeNS 0 takes the server's time; a time before 1970 is refused
+at := time.Now().UnixNano()
+w, err := client.TS.Write("cpu", 0.42, &flo.TSWriteOptions{Tags: "host=web-1,dc=east", TimeNS: at})
+
+// One page: up to Limit points (default and most 4096) of every series
+// whose tags include the filter's, merged in time order then write order
+from := at - int64(time.Hour)
+page, err := client.TS.Read("cpu", &flo.TSReadOptions{Tags: "host=web-1", FromNS: &from, Limit: 1000})
+// page.Cursor reads the next page; it is nil on the last one. A short page
+// can still have more after it, so page until the cursor is nil.
+
+// Every page, newest first
+it := client.TS.ReadAll("cpu", &flo.TSReadOptions{Order: flo.TSNewestFirst})
+for it.Next() {
+    p := it.Point()
+    fmt.Println(p.Time(), p.Value)
+}
+if err := it.Err(); err != nil { /* a refused page ends the walk */ }
+```
+
+A page continues strictly after the last page's cursor (before it, newest
+first), so a point there for the whole read is answered exactly once. The
+cursor is opaque. A tag filter that isn't `key=value` pairs, or a cursor
+that isn't one a page answered, is refused as a bad request. A read is
+not found when no series of the field matches the tag filter: a measurement
+never written, and a filter that matches nothing, are `flo.ErrNotFound`,
+not empty, and end a `ReadAll` walk with that error. A matching series with
+no points in the range is ok and empty.
+
+`client.TS.Query` aggregates a field into epoch-aligned windows:
+
+```go
+series, err := client.TS.Query("cpu", &flo.TSQueryOptions{
+    FromNS: from, ToNS: at, Window: 5 * time.Minute, Aggregation: flo.TSMax,
+})
+// series[i].Buckets[j].StartNS is each window's start, in ns
+```
+
+A zero `FromNS` or `ToNS` leaves that end open, and a zero `Window` is a
+minute. Only windows that hold points are answered, at most 1024; more is
+refused as a bad request with the server's text, so widen the window or
+narrow the range. `client.TS.Info` summarizes a measurement: its series,
+fields, points, and its oldest and newest points' times in ns
+(`OldestNS`, `NewestNS`); one with no series is `flo.ErrNotFound`.
+
+`client.TS.FloQL(query, nil)` runs a FloQL query; its points' times are ns.
+In the query text, a bare number in a range is Unix milliseconds, and
+durations (`5m`, `30s`) are as written. An answer of more than 4096 raw
+points is refused as a bad request with the server's text: aggregate them,
+narrow the query, or page through them with `Read`.
 
 ## Error Handling
 
@@ -646,9 +721,14 @@ with no handler, and a result that doesn't marshal to JSON each fail the run
 with retry, so the
 action's max attempts bounds a handler that keeps failing; return a
 `flo.NewNonRetryableError` to fail the run at once. `Stop` takes no more
-tasks and cancels every running handler's context: a handler that returns
-the context's error hands its run back with no failure counted, and results
-may still be sent for 2 s, after which an unsent one waits out its lease.
+tasks and cancels every running handler's context. After `Stop`, a
+handler's error or panic abandons its run: it is handed back at once with no
+failure counted. Results may still be sent for 2 s, after which an unsent
+one waits out its lease.
+
+`Close` (on either worker) waits up to 30 s for the running loop to send its
+completes, acks and hand-backs, then closes the client; anything unsent is
+redelivered when its lease expires. The 30 s is fixed.
 
 Each task is one delivery of a run, named by its run id, delivery count,
 term and log index (`actx.TaskID()` prints them as the flo CLI does,

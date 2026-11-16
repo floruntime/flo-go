@@ -76,13 +76,14 @@ type ActionWorker struct {
 	// Worker state. ctx ends on Stop or when Start's context does; handler
 	// contexts derive from it, so a drain, which doesn't end it, lets
 	// handlers finish. runMu guards cancel, which Stop reads while Start
-	// sets it.
-	runMu  sync.Mutex
-	ctx    context.Context
-	cancel context.CancelFunc
-	drain  drainState
-	wg     sync.WaitGroup
-	logger Logger
+	// sets it, and runDone, which closes as Start returns.
+	runMu   sync.Mutex
+	ctx     context.Context
+	cancel  context.CancelFunc
+	runDone chan struct{}
+	drain   drainState
+	wg      sync.WaitGroup
+	logger  Logger
 }
 
 // NewActionWorker creates a new Flo action worker from an existing client.
@@ -212,7 +213,11 @@ func (w *ActionWorker) Start(ctx context.Context) error {
 	w.ctx, w.cancel = context.WithCancel(ctx)
 	runCtx := w.ctx // goroutines that may outlive this run read this, not w.ctx
 	pollCtx := w.drain.begin(runCtx)
+	runDone := make(chan struct{})
+	w.runDone = runDone
 	w.runMu.Unlock()
+	// Deferred first, so it closes after everything else Start does.
+	defer close(runDone)
 	defer w.cancel()
 	defer w.drain.end()
 
@@ -461,9 +466,9 @@ func (w *ActionWorker) finishDrain(wc *WorkerClient, regOpts *WorkerRegisterOpti
 }
 
 // Stop stops the worker: it takes no more tasks and cancels the context of
-// every running handler. A handler that returns the context's error hands
-// its run back with no failure counted, to run again elsewhere; one that
-// returns anything else is reported as usual. Results may still be sent for
+// every running handler. After Stop, a handler's error or panic abandons
+// its run: it is handed back at once with no failure counted, to run again
+// elsewhere. A result is reported as usual. Results may still be sent for
 // two seconds after Stop, then the result connection is cut, and a run
 // whose result was not sent goes back when its lease runs out. Start
 // returns once every handler has returned.
@@ -482,9 +487,15 @@ func (w *ActionWorker) Stop() {
 	}
 }
 
-// Close closes the connections.
+// Close stops the worker, waits up to 30 s for the running Start to send
+// its completes, fails and hand-backs, then closes the connections;
+// anything unsent is redelivered when its lease expires. The wait is fixed.
 func (w *ActionWorker) Close() error {
 	w.Stop()
+	w.runMu.Lock()
+	runDone := w.runDone
+	w.runMu.Unlock()
+	awaitRun(runDone, w.logger)
 	w.closeCancel()
 	if w.resultClient != nil {
 		// Don't wait out a stalled result send.
@@ -512,6 +523,9 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *Task, arriv
 		})
 	}
 	fail := func(msg string, retry bool) { sendFail(msg, &WorkerFailOptions{Retry: retry}) }
+	// The worker is stopping, not the task failing: hand it back with no
+	// failure counted, to run again elsewhere.
+	abandon := func() { sendFail("worker stopped", &WorkerFailOptions{Retry: true, Abandoned: true}) }
 	complete := func(data []byte, opts *WorkerCompleteOptions) {
 		if w.sendResult("complete", taskID, func() error {
 			return workerClient.Complete(task.Delivery, data, opts)
@@ -522,6 +536,13 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *Task, arriv
 
 	defer func() {
 		if r := recover(); r != nil {
+			if w.ctx.Err() != nil {
+				// Like a returned error after the stop: the stop may have
+				// torn down what the handler used, so it isn't a failure.
+				w.logger.Printf("Action handler panicked after the stop: %v (task=%s)", r, taskID)
+				abandon()
+				return
+			}
 			// Like a returned error: retried while attempts are left, so
 			// the action's max attempts bounds a handler that always panics.
 			w.logger.Printf("Action handler panicked: %v", r)
@@ -571,11 +592,10 @@ func (w *ActionWorker) executeTask(workerClient *WorkerClient, task *Task, arriv
 		case ctxErr && context.Cause(ctx) == errActionTimeout:
 			w.logger.Printf("Action timed out: %s (task=%s)", task.Action, taskID)
 			fail("action timed out", true)
-		case ctxErr && w.ctx.Err() != nil:
-			// The worker is stopping, not the task failing: hand it back
-			// with no failure counted, to run again elsewhere.
-			w.logger.Printf("Action interrupted by worker stop: %s (task=%s)", task.Action, taskID)
-			sendFail("worker stopped", &WorkerFailOptions{Retry: true, Abandoned: true})
+		case w.ctx.Err() != nil:
+			// Whatever error the handler made of the stop's cancel.
+			w.logger.Printf("Action interrupted by worker stop: %s (task=%s): %v", task.Action, taskID, err)
+			abandon()
 		case IsNonRetryable(err):
 			w.logger.Printf("Action failed (non-retryable): %s - %v", task.Action, err)
 			fail(err.Error(), false)
@@ -678,7 +698,24 @@ var (
 	// stopResultWait is how long after a worker starts stopping its
 	// results may still be sent.
 	stopResultWait = 2 * time.Second
+	// closeRunWait bounds how long Close waits for a stopped worker's
+	// Start to return, so handlers finishing up can still report.
+	closeRunWait = 30 * time.Second
 )
+
+// awaitRun waits up to closeRunWait for runDone, nil when Start never ran.
+func awaitRun(runDone chan struct{}, logger Logger) {
+	if runDone == nil {
+		return
+	}
+	t := time.NewTimer(closeRunWait)
+	defer t.Stop()
+	select {
+	case <-runDone:
+	case <-t.C:
+		logger.Printf("Close: the worker's run still hadn't returned after %v; closing anyway", closeRunWait)
+	}
+}
 
 // sendResult sends a complete or fail. On a connection error, a timeout or
 // an unreadable answer it reconnects and sends the same result again, up to

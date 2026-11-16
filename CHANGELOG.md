@@ -8,11 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 These follow the server's wire. The server's op table changed with them, so
-`TableHash` is now `0xc1f93eb0ed86a281`, the hash of flo `fd771c1d`, which CI's
+`TableHash` is now `0x17f3632347cd6dd9`, the hash of flo `ad198c29`, which CI's
 live tests run against; this SDK no longer talks to an older server.
 
 ### Breaking
 
+- `OptTSTimestamp` is `OptTSTimestampNS`: a write's time is an i64 of Unix
+  nanoseconds, not milliseconds; 0 or none is the server's time, and one
+  before 1970 is refused
+- `OptTSFromMS`, `OptTSToMS` and `OptTSWindowMS` are `OptTSFromNS`,
+  `OptTSToNS` and `OptTSWindowNS`: a query's bounds and window are i64 ns.
+  0 or none is no bound; no window is a minute, and a window of 0 is
+  refused
+- `StreamClient.Read` returns a not-found answer as an error
+  (`IsNotFound`), never as an empty read. The server now answers a
+  non-blocking read of a stream that doesn't exist (never created, or
+  deleted) not found; a stream with nothing past `Start` is still ok and
+  empty, and a blocking read of a stream not created yet waits for its
+  first append. `TSClient.Read` is not found when no series of the field
+  matches the tag filter. On both, and on `ReadAll`, a stale node's
+  not-found is `ErrStaleNotFound` (`IsStale`, still `IsNotFound`): the
+  stream or series may exist but that node hasn't seen it yet, so read
+  again. A stream worker whose group read is answered not found stops, and
+  `Start` returns that error: a worker that may start before its stream
+  exists should catch it and start again
 - A group nack's error travels in its body, up to 1024 bytes
   (`MaxGroupNackError`); `OptErrorText` is gone. A report (ack, nack or
   touch) to a group that isn't there is `ErrNotFound`, not a refusal per
@@ -145,6 +164,19 @@ live tests run against; this SDK no longer talks to an older server.
 
 ### Added
 
+- `client.TS`: `Write` (a point's time in ns, `TSWriteOptions.TimeNS`),
+  `Read` (one page of a measurement field's points, oldest or newest first:
+  `TSReadOptions` with `Field`, `Tags`, `FromNS`, `ToNS`, `Limit` up to
+  4096, `Order` (`TSOldestFirst`, `TSNewestFirst`) and `Cursor`), `ReadAll`
+  (a `TSPointIter` over every page, ending at the first page without a
+  cursor, or on an error), `Query` (`TSQueryOptions` with `FromNS`, `ToNS`,
+  `Window` as a `time.Duration` and `Aggregation`; answers `TSBucket`s with
+  `StartNS`), `Info` (`TSInfo` with `OldestNS` and `NewestNS`) and `FloQL`
+  (`FloQLPoint.TimeNS`). Every time and window is ns; `Time` and `Start` on
+  the results give a `time.Time`
+- `ProcessingStatusResult.Late`: at least how many of a running job's TS
+  source fields' points came more than `EdgeMS` behind their field's newest
+  point; nil when there is no count
 - `StatusLimit` (15), `ErrLimit` and `IsLimit`, with `ReasonMemoryBudget`,
   `ReasonTooManyActions`, `ReasonTooManyWorkflowDefinitions` and
   `ReasonTooManyWorkflowRuns`: the node is at a limit built into the
@@ -215,6 +247,12 @@ live tests run against; this SDK no longer talks to an older server.
 
 ### Changed
 
+- `ActionWorker.Close` and `StreamWorker.Close` wait up to 30 s for the
+  running loop to send its completes, acks and hand-backs, then close the
+  client; anything unsent is redelivered when its lease expires
+- After `Stop`, a handler's error or panic abandons its message, on both
+  workers: an action handler's non-context error or panic after the stop
+  used to fail the run with retry, and a stream handler's panic was nacked
 - A `kv.scan` cursor is up to 4098 bytes (a shard id and the last key read),
   up from 64, and its length prefix is a u16
 

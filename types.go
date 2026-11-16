@@ -33,7 +33,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0xc1f93eb0ed86a281
+	TableHash uint64 = 0x17f3632347cd6dd9
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -288,15 +288,15 @@ const (
 	OptAbandon      OptionTag = 0x34 // void: A nack hands its records back unstarted: ready at once, no attempt spent
 
 	// Time-Series Options (0x60 - 0x6F)
-	OptTSFromMS      OptionTag = 0x60 // i64: Start of time range (inclusive, unix ms)
-	OptTSToMS        OptionTag = 0x61 // i64: End of time range (inclusive, 0 = now)
-	OptTSWindowMS    OptionTag = 0x62 // i64: Aggregation window size (ms)
+	OptTSFromNS      OptionTag = 0x60 // i64: A query's earliest time, inclusive, in Unix ns (0 = none)
+	OptTSToNS        OptionTag = 0x61 // i64: A query's latest time, inclusive, in Unix ns (0 = none)
+	OptTSWindowNS    OptionTag = 0x62 // i64: A query's window width in ns (absent = a minute; 0 refused)
 	OptTSAggregation OptionTag = 0x63 // string: Aggregation function name (avg, sum, count, min, max)
 	OptTSField       OptionTag = 0x64 // string: Field name filter (empty = "value")
 	OptTSTags        OptionTag = 0x65 // string: Comma-separated tag filters "key=val,key2=val2"
-	OptTSTimestamp   OptionTag = 0x67 // i64: Explicit timestamp for write (0 = server-assigned)
+	OptTSTimestampNS OptionTag = 0x67 // i64: A write's time in Unix ns (0 or absent = the server's; before 1970 refused)
 	OptTSRawTTL      OptionTag = 0x68 // string: Raw data TTL (e.g., "7d")
-	OptTSDownsample  OptionTag = 0x69 // string: Downsample rule (e.g., "1m:avg:30d")
+	OptTSDownsample  OptionTag = 0x69 // string: refused: downsampling isn't supported
 )
 
 // ScanResult is one page of a KV scan: key names, and the cursor that
@@ -1559,8 +1559,24 @@ type ProcessingStatusResult struct {
 	TickAvgUS   uint64
 	TickMaxUS   uint64
 	UptimeMS    uint64
+	// Late counts the job's TS source fields' late points; nil when there
+	// is no count (no TS source running here, or a window past an hour).
+	Late *ProcessingLate
 	// YAML is the definition the job was submitted with.
 	YAML []byte
+}
+
+// ProcessingLate is a running job's late points: at least Points of its TS
+// source fields' points came more than EdgeMS behind their field's newest
+// point. A TS source reads its field up to its lateness window behind the
+// newest point, so a point that late may come in behind what it has
+// already read, and be missed. EdgeMS is the smallest of the server's
+// fixed edges (0 s, 1 s, 5 s, 15 s, 30 s, 1 m, 5 m, 1 h) at or above the
+// largest window among the job's TS sources; a window past an hour has no
+// count.
+type ProcessingLate struct {
+	EdgeMS uint64
+	Points uint64
 }
 
 // ProcessingListEntry represents a single entry in a processing job list.

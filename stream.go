@@ -66,7 +66,15 @@ func (s *StreamClient) Append(stream string, payload []byte, opts *StreamAppendO
 	}, nil
 }
 
-// Read reads records from a stream.
+// Read reads records from a stream. Without BlockMS, a read of a stream
+// that doesn't exist (never created or appended to, or deleted) is an
+// error that IsNotFound reports, never an empty read; one that exists with
+// nothing past Start is ok and empty. A blocking read of a stream not
+// created yet waits for its first append. A consumer that may start before
+// its stream exists should catch not-found and start again. A stale node's
+// not-found is ErrStaleNotFound (IsStale, and still IsNotFound): the stream
+// may exist but that node hasn't seen it yet, so read again rather than
+// treat it as gone.
 func (s *StreamClient) Read(stream string, opts *StreamReadOptions) (*StreamReadResult, error) {
 	if opts == nil {
 		opts = &StreamReadOptions{}
@@ -108,8 +116,11 @@ func (s *StreamClient) Read(stream string, opts *StreamReadOptions) (*StreamRead
 		builder.AddU32(OptBlockMS, *opts.BlockMS)
 	}
 
-	resp, err := s.client.sendAndCheck(OpStreamRead, namespace, []byte(stream), nil, builder.Build(), true)
+	resp, err := s.client.sendRequest(OpStreamRead, namespace, []byte(stream), nil, builder.Build())
 	if err != nil {
+		return nil, err
+	}
+	if err := checkRead(resp); err != nil {
 		return nil, err
 	}
 
