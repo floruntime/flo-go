@@ -33,7 +33,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0xc1f93eb0ed86a281
+	TableHash uint64 = 0x17f3632347cd6dd9
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
