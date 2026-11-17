@@ -44,57 +44,6 @@ func TestPeekAnswerIsDecodedWhole(t *testing.T) {
 	}
 }
 
-// The limit and the seq to start after travel in the value, not as options,
-// which the server ignores for this op.
-func TestDLQListSendsLimitAndAfterInTheValue(t *testing.T) {
-	after := uint64(41)
-	for _, tc := range []struct {
-		opts *DLQListOptions
-		want []byte
-	}{
-		{nil, []byte{100, 0, 0, 0}},
-		{&DLQListOptions{Limit: 10, After: &after}, cat([]byte{10, 0, 0, 0}, u64le(41))},
-	} {
-		p := capturePayload(t, func(c *Client) { c.Queue.DLQList("jobs", tc.opts) })
-		value, opts := splitValueAndOptions(p)
-		if !bytes.Equal(value, tc.want) || len(opts) != 0 {
-			t.Errorf("%+v: value % x options % x, want % x and none", tc.opts, value, opts, tc.want)
-		}
-	}
-	if _, err := NewClient("127.0.0.1:1").Queue.DLQList("jobs", &DLQListOptions{Limit: MaxDLQPage + 1}); err == nil {
-		t.Error("a limit past MaxDLQPage was accepted")
-	}
-}
-
-func TestDLQPageIsDecodedWhole(t *testing.T) {
-	w := bodyWriter{}
-	w.u32(1)
-	w.u64(9)
-	w.u32(3)
-	w.bytes32([]byte("abc"))
-	w.u64(1700)
-	w.u32(4)
-	w.u8(2)
-	w.u64(1800)
-	w.u64(30) // total
-	w.u8(1)   // has_more
-	w.u64(9)  // last_seq
-	got, err := decodeDLQPage(w.buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := &DLQPage{Messages: []DeadLetter{{Seq: 9, Size: 3, Payload: []byte("abc"), EnqueuedAtMS: 1700, Deliveries: 4, Priority: 2, MovedAtMS: 1800}},
-		Total: 30, HasMore: true, LastSeq: 9}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %+v, want %+v", got, want)
-	}
-	for n := range w.buf {
-		if _, err := decodeDLQPage(w.buf[:n]); !errors.Is(err, ErrIncompleteResponse) {
-			t.Fatalf("cut at %d: %v", n, err)
-		}
-	}
-}
-
 func TestGroupListAndMembersAreDecodedWhole(t *testing.T) {
 	g := bodyWriter{}
 	g.u16(1)

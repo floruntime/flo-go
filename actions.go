@@ -201,7 +201,7 @@ func decodeActionListAnswer(data []byte) (*ActionListResult, error) {
 // decodeActionStatusAnswer reads action.status's answer:
 // [status:u8][created_at_ms:i64][started_at_ms?][completed_at_ms?][attempt:u32]
 // [output?: u16 length][error_message?: u16 length][worker_id?: u16 length]
-// [outcome?: u16 length], each ? a present byte first.
+// [outcome?: u16 length][held?: u8 length], each ? a present byte first.
 func decodeActionStatusAnswer(data []byte) (*ActionRunStatus, error) {
 	r := bodyReader{buf: data}
 	st := &ActionRunStatus{Status: RunStatus(r.u8()), CreatedAt: int64(r.u64())}
@@ -225,6 +225,9 @@ func decodeActionStatusAnswer(data []byte) (*ActionRunStatus, error) {
 	}
 	if r.present() {
 		st.Outcome = string(r.bytes16())
+	}
+	if r.present() {
+		st.Held = string(r.bytes8())
 	}
 	if err := r.done(); err != nil {
 		return nil, err

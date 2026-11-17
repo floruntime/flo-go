@@ -349,6 +349,28 @@ start again. A not-found from a stale node is `flo.ErrStaleNotFound`
 node hasn't seen it yet, so read again rather than treat it as gone; the
 same holds for `TS.Read`.
 
+### Creating and altering a stream
+
+An append creates the stream it names, with one partition and no retention.
+`Create` makes one with other settings, and `Alter` changes a stream's
+retention; `Info` shows both.
+
+```go
+err := client.Stream.Create("events", &flo.StreamCreateOptions{Partitions: 4, RetentionCount: 1_000_000})
+err = client.Stream.Alter("events", &flo.StreamAlterOptions{RetentionAgeS: 7 * 24 * 3600})
+```
+
+A create of a stream that exists is answered by its settings. With the same
+partitions and retention it is ok and changes nothing, as a retry should be.
+With others it is `flo.ErrConflict` ("the stream exists with other
+settings"): change them with `Alter`. That holds once a stream has been
+created or altered: after an alter, a create must name the settings the
+stream has now, retention as the alter left it, or it is refused. Only a
+stream an append made and nothing has altered takes a create's settings. A
+stream an append made can be altered; an alter of one that doesn't exist is
+`flo.ErrNotFound`. A create whose name's 64-bit hash matches another
+stream's in the namespace is `flo.ErrConflict` too: choose another name.
+
 ### Stream consumer groups
 
 A group reads a stream at least once. A group read leases records to its
@@ -411,6 +433,32 @@ stopping); nack records that failed, or a poison record cycles forever. A
 nack's `Error` is at most 1024 bytes. An ack, nack or touch to a group that
 isn't there (deleted, say) is `flo.ErrNotFound`.
 
+An operator can take records a consumer holds and has left idle with
+`GroupSteal`: name each by id and the deliveries its holder has
+(`GroupPending` lists them) and the idle time, since the holder last read,
+stole or touched it. Each one taken gets a new delivery, leased to the
+consumer named; report on it with the result's `Lease` and `Stolen`. One
+whose holder touched it within the idle time is refused `flo.QueueNotIdle`.
+A read takes expired records by itself, so stealing is for a holder that
+keeps a lease alive without making progress.
+
+```go
+pending, _ := client.Stream.GroupPending("orders", "billing", "stuck-worker", nil)
+items := make([]flo.StreamGroupItem, len(pending))
+for i, p := range pending {
+    items[i] = flo.StreamGroupItem{ID: p.ID, Deliveries: p.Deliveries}
+}
+stolen, err := client.Stream.GroupSteal("orders", "billing", "rescue", 300_000, items, nil)
+_, err = client.Stream.GroupAck("orders", "billing", stolen.Lease, stolen.Stolen, nil)
+```
+
+A group's dead letters work as a queue's: `GroupDLQList` pages through them
+(id, deliveries, failures, when it died, last error), and
+`GroupDLQRequeue` and `GroupDLQDelete` take them by id or `All`, answering
+`Applied`, refusals with why and `More`. A requeued record is ready for the
+next read with its failures reset; one trimmed from the stream since is
+gone.
+
 A read refused with `flo.ErrGroupHeldFull` took nothing new, for one of two
 reasons; the message says which. The group may be at its caps, which count
 its ready, leased and dead records: acks and nacks free leased ones, but
@@ -420,13 +468,43 @@ clears as any of them drain, this group's own acks included. Reading again won't
 read retries it; the stream worker logs it once and polls again with a
 backoff.
 
-#### DLQ Operations
+#### Dead letters
+
+A message failed or expired until its attempts ran out (or failed with
+`Dead`) is a dead letter. `DLQList` pages through them, oldest dead first,
+each with its deliveries, failures, when it died, its last error and up to
+4 KiB of its payload. `DLQRequeue` makes dead letters ready again with their
+failures reset; `DLQDelete` deletes them, and with `DryRun` only counts what
+it would. Both take messages by seq, or with `All` the oldest, up to `Limit`
+(at most 100), and answer `Applied`, the rest refused with why
+(`flo.QueueNotDead` for one that isn't dead, `flo.QueueGone` for one that
+isn't there) and, with `All`, `More` while others remain.
 
 ```go
-// One page of dead letters, oldest first, up to 100 at a time
-page, err := client.Queue.DLQList("tasks", &flo.DLQListOptions{Limit: 50})
-for page.HasMore {
-    page, err = client.Queue.DLQList("tasks", &flo.DLQListOptions{Limit: 50, After: &page.LastSeq})
+// One page at a time; the cursor is opaque
+opts := &flo.DLQListOptions{Limit: 50}
+for {
+    page, err := client.Queue.DLQList("tasks", opts)
+    if err != nil {
+        return err
+    }
+    for _, d := range page.Messages {
+        fmt.Printf("seq=%d failures=%d error=%q\n", d.Seq, d.Failures, d.Error)
+    }
+    if page.Cursor == nil {
+        break
+    }
+    opts.After = page.Cursor
+}
+
+// Requeue two by seq, then delete the rest a batch at a time
+report, err := client.Queue.DLQRequeue("tasks", []uint64{41, 42}, nil)
+for more := true; more; {
+    report, err = client.Queue.DLQDelete("tasks", nil, &flo.DLQDeleteOptions{All: true})
+    if err != nil {
+        return err
+    }
+    more = report.More
 }
 
 // Remove every message, dead letters included
@@ -601,6 +679,15 @@ to 5 s; any other refusal at registration fails `Start` with that error, and
 the worker never carries on unregistered. Results and acks (complete, fail,
 stream ack) refused by a halted shard aren't resent either; the task or record
 comes back by its own timeout.
+
+An action worker's complete or fail refused `overloaded` with ran no is sent
+again, past the client's own retries, with a backoff from 100 ms up to 5 s
+and a warning each time, until it is accepted or answered otherwise, for as
+long as the worker may send results (two seconds past a stop). The server
+refuses a report so when it would end a run a workflow step called and the
+calling workflow's shard has no room for the run's end. It holds the run
+meanwhile: the lease doesn't expire into a redelivery, and
+`Action.Status` shows why in `Held`.
 
 A halted shard still answers reads, from its state just before the entry it
 halted at, and so does a node that is blocked reading a committed entry from

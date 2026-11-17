@@ -39,6 +39,12 @@ func actionStatusAnswer(status RunStatus, started, completed *int64, attempt uin
 	} else {
 		b = append(b, 0)
 	}
+	if status == RunStatusRunning {
+		held := "the end waits for room on the caller's shard"
+		b = append(append(b, 1, byte(len(held))), held...) // held: a u8 length
+	} else {
+		b = append(b, 0)
+	}
 	return b
 }
 
@@ -64,6 +70,26 @@ func TestActionStatusDecodesAPendingRunAndAFailedOne(t *testing.T) {
 	st, err = decodeActionStatusAnswer(actionStatusAnswer(RunStatusTimedOut, nil, nil, 3, nil, &msg, nil))
 	if err != nil || st.Status != RunStatusTimedOut || st.Attempt != 3 || st.ErrorMessage != "boom" {
 		t.Fatalf("timed out: %+v, %v", st, err)
+	}
+}
+
+// A run whose end is held carries why; held is absent otherwise.
+func TestActionStatusDecodesHeld(t *testing.T) {
+	started := int64(1100)
+	worker := "w"
+	st, err := decodeActionStatusAnswer(actionStatusAnswer(RunStatusRunning, &started, nil, 1, nil, nil, &worker))
+	if err != nil || st.Status != RunStatusRunning || st.Held != "the end waits for room on the caller's shard" {
+		t.Fatalf("held: %+v, %v", st, err)
+	}
+	st, err = decodeActionStatusAnswer(actionStatusAnswer(RunStatusPending, nil, nil, 0, nil, nil, nil))
+	if err != nil || st.Held != "" {
+		t.Fatalf("not held: %+v, %v", st, err)
+	}
+	whole := actionStatusAnswer(RunStatusRunning, &started, nil, 1, nil, nil, &worker)
+	for n := range whole {
+		if _, err := decodeActionStatusAnswer(whole[:n]); !errors.Is(err, ErrIncompleteResponse) {
+			t.Fatalf("cut at %d: %v", n, err)
+		}
 	}
 }
 

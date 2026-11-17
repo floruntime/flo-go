@@ -154,7 +154,7 @@ func TestLiveQueuePeekAndAnEmptyDLQ(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Messages) != 0 || page.Total != 0 || page.HasMore {
+	if len(page.Messages) != 0 || page.Cursor != nil {
 		t.Fatalf("DLQ page %+v, want empty", page)
 	}
 }

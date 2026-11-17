@@ -141,9 +141,9 @@ func (s *StreamClient) Info(stream string, opts *StreamInfoOptions) (*StreamInfo
 		return nil, err
 	}
 
-	// Parse response: [first_ts:u64][first_seq:u64][last_ts:u64][last_seq:u64][count:u64][bytes:u64][partition_count:u32][retention_age_s:u64][retention_count:u64][retention_bytes:u64]; the retention fields are not read yet
-	if len(resp.Data) < 52 {
-		return nil, fmt.Errorf("incomplete stream info response")
+	// Parse response: [first_ts:u64][first_seq:u64][last_ts:u64][last_seq:u64][count:u64][bytes:u64][partition_count:u32][retention_age_s:u64][retention_count:u64][retention_bytes:u64]
+	if len(resp.Data) < 76 {
+		return nil, fmt.Errorf("%w: stream info answer of %d bytes", ErrIncompleteResponse, len(resp.Data))
 	}
 
 	return &StreamInfo{
@@ -158,7 +158,56 @@ func (s *StreamClient) Info(stream string, opts *StreamInfoOptions) (*StreamInfo
 		Count:          binary.LittleEndian.Uint64(resp.Data[32:40]),
 		Bytes:          binary.LittleEndian.Uint64(resp.Data[40:48]),
 		PartitionCount: binary.LittleEndian.Uint32(resp.Data[48:52]),
+		RetentionAgeS:  binary.LittleEndian.Uint64(resp.Data[52:60]),
+		RetentionCount: binary.LittleEndian.Uint64(resp.Data[60:68]),
 	}, nil
+}
+
+// Create creates a stream with its settings: partitions and retention. An
+// append creates the stream it names, with one partition and no retention,
+// so create one first only to set others. Creating a stream that exists
+// with the same settings changes nothing, as a retry does. Creating one
+// with other settings is ErrConflict ("the stream exists with other
+// settings"): change them with Alter. Once a stream has been altered, a
+// create must name the settings it has now, partitions and retention as
+// the alter left them, or it is that conflict. The one exception is a
+// stream an append made and nothing has altered: a create gives it the
+// settings asked. A name whose 64-bit hash matches another stream's in the
+// namespace is ErrConflict too; choose another name.
+func (s *StreamClient) Create(stream string, opts *StreamCreateOptions) error {
+	if opts == nil {
+		opts = &StreamCreateOptions{}
+	}
+	var value []byte
+	if opts.Partitions > 0 {
+		value = binary.LittleEndian.AppendUint32(nil, opts.Partitions)
+	}
+	_, err := s.client.sendAndCheck(OpStreamCreate, s.client.getNamespace(opts.Namespace), []byte(stream), value, retentionOptions(opts.RetentionAgeS, opts.RetentionCount), false)
+	return err
+}
+
+// Alter changes a stream's retention: each of RetentionAgeS and
+// RetentionCount that is non-zero replaces the stream's. A stream an append
+// made can be altered. A stream that doesn't exist is ErrNotFound. After an
+// alter, a create must name the stream's settings as they now are (see
+// Create).
+func (s *StreamClient) Alter(stream string, opts *StreamAlterOptions) error {
+	if opts == nil {
+		opts = &StreamAlterOptions{}
+	}
+	_, err := s.client.sendAndCheck(OpStreamAlter, s.client.getNamespace(opts.Namespace), []byte(stream), nil, retentionOptions(opts.RetentionAgeS, opts.RetentionCount), false)
+	return err
+}
+
+func retentionOptions(ageS, count uint64) []byte {
+	b := NewOptionsBuilder()
+	if ageS > 0 {
+		b.AddU64(OptRetentionAge, ageS)
+	}
+	if count > 0 {
+		b.AddU64(OptRetentionCount, count)
+	}
+	return b.Build()
 }
 
 // Trim removes a stream's oldest records by exactly one bound: Before,
@@ -514,7 +563,7 @@ func decodeGroupReport(data []byte, touch bool) (*StreamGroupReport, error) {
 	}
 	for i := 0; i < n && !r.bad; i++ {
 		f := StreamGroupRefusal{ID: StreamID{TimestampMS: r.u64(), Sequence: r.u64()}, Why: GroupRefusalWhy(r.u8())}
-		if f.Why > QueueNotHeld {
+		if f.Why > maxQueueRefusalWhy {
 			r.bad = true
 		}
 		got.Refused = append(got.Refused, f)
@@ -598,6 +647,227 @@ func (s *StreamClient) GroupMembers(stream, group string, opts *StreamInfoOption
 		return nil, err
 	}
 	return decodeGroupMembersAnswer(resp.Data)
+}
+
+// GroupSteal takes records another consumer holds and has left idle for
+// at least minIdleMS (1 ms to 12 h): idle is the time since the holder last
+// touched one (its read, a steal, or any touch). Each record taken gets a
+// new delivery, leased to consumer, its failures kept; report on it with
+// the result's Lease and Stolen. Name each record by its id and the
+// deliveries its holder has (GroupPending lists them). It is an operator's
+// command: a read takes expired records by itself. An unknown group is an
+// error that IsNotFound reports.
+func (s *StreamClient) GroupSteal(stream, group, consumer string, minIdleMS uint64, items []StreamGroupItem, opts *StreamGroupStealOptions) (*StreamGroupStealResult, error) {
+	if opts == nil {
+		opts = &StreamGroupStealOptions{}
+	}
+	if consumer == "" {
+		return nil, errors.New("flo: a steal names the consumer that takes the records")
+	}
+	if minIdleMS < 1 || minIdleMS > MaxGroupAckTimeoutMS {
+		return nil, fmt.Errorf("flo: steal min idle %d ms, want 1..%d", minIdleMS, MaxGroupAckTimeoutMS)
+	}
+	if l := opts.LeaseMS; l != nil && (*l < MinGroupAckTimeoutMS || *l > MaxGroupAckTimeoutMS) {
+		return nil, fmt.Errorf("flo: steal lease %d ms, want %d..%d", *l, MinGroupAckTimeoutMS, MaxGroupAckTimeoutMS)
+	}
+	if len(items) == 0 || len(items) > MaxGroupBatch {
+		return nil, fmt.Errorf("flo: a steal names 1..%d records, got %d", MaxGroupBatch, len(items))
+	}
+	w, err := groupValue(group, &consumer, 8+9+1+20*len(items))
+	if err != nil {
+		return nil, err
+	}
+	w.u64(minIdleMS)
+	w.optU64(opts.LeaseMS)
+	w.u8(uint8(len(items)))
+	for _, it := range items {
+		w.u64(it.ID.TimestampMS)
+		w.u64(it.ID.Sequence)
+		w.u32(it.Deliveries)
+	}
+	resp, err := s.client.sendAndCheck(OpStreamGroupSteal, s.client.getNamespace(opts.Namespace), []byte(stream), w.buf, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	got, err := decodeStealAnswer(resp.Data)
+	if err != nil {
+		return nil, err
+	}
+	got.Lease.Consumer = consumer
+	return got, nil
+}
+
+// decodeStealAnswer reads stream.group.steal's answer: term, index,
+// expires_at_ms, stolen, refused.
+func decodeStealAnswer(data []byte) (*StreamGroupStealResult, error) {
+	r := bodyReader{buf: data}
+	got := &StreamGroupStealResult{Lease: StreamGroupLease{Term: r.u64(), Index: r.u64()}, ExpiresAtMS: int64(r.u64())}
+	n := int(r.u8())
+	if n > MaxGroupBatch {
+		return nil, ErrIncompleteResponse
+	}
+	for i := 0; i < n && !r.bad; i++ {
+		got.Stolen = append(got.Stolen, StreamGroupItem{ID: StreamID{TimestampMS: r.u64(), Sequence: r.u64()}, Deliveries: r.u32()})
+	}
+	got.Refused = decodeGroupRefusals(&r)
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
+}
+
+// decodeGroupRefusals reads an operator command's refused records: id,
+// why, reason.
+func decodeGroupRefusals(r *bodyReader) []StreamGroupRefusal {
+	n := int(r.u8())
+	if n > MaxGroupBatch {
+		r.bad = true
+		return nil
+	}
+	var refused []StreamGroupRefusal
+	for i := 0; i < n && !r.bad; i++ {
+		f := StreamGroupRefusal{ID: StreamID{TimestampMS: r.u64(), Sequence: r.u64()}, Why: GroupRefusalWhy(r.u8()), Reason: string(r.bytes8())}
+		if f.Why > maxQueueRefusalWhy {
+			r.bad = true
+		}
+		refused = append(refused, f)
+	}
+	return refused
+}
+
+// GroupDLQList returns one page of a consumer group's dead letters, oldest
+// dead first. Pass the page's Cursor as the next call's After to read the
+// next one. It reads the leader's state. An unknown group is an error that
+// IsNotFound reports.
+func (s *StreamClient) GroupDLQList(stream, group string, opts *StreamGroupDLQListOptions) (*StreamGroupDLQPage, error) {
+	if opts == nil {
+		opts = &StreamGroupDLQListOptions{}
+	}
+	if opts.Limit > MaxDLQPage {
+		return nil, fmt.Errorf("flo: DLQ list limit %d, at most %d", opts.Limit, MaxDLQPage)
+	}
+	w, err := groupValue(group, nil, 5+25)
+	if err != nil {
+		return nil, err
+	}
+	optLimit(w, opts.Limit)
+	if c := opts.After; c != nil {
+		w.u8(1)
+		w.u64(c.deadNS)
+		w.u64(c.id.TimestampMS)
+		w.u64(c.id.Sequence)
+	} else {
+		w.u8(0)
+	}
+	resp, err := s.client.sendAndCheck(OpStreamGroupDLQList, s.client.getNamespace(opts.Namespace), []byte(stream), w.buf, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeGroupDLQPage(resp.Data)
+}
+
+// decodeGroupDLQPage reads stream.group.dlq_list's answer: dead, cursor.
+func decodeGroupDLQPage(data []byte) (*StreamGroupDLQPage, error) {
+	r := bodyReader{buf: data}
+	n := int(r.u8())
+	if n > MaxDLQPage {
+		return nil, ErrIncompleteResponse
+	}
+	page := &StreamGroupDLQPage{Dead: make([]StreamGroupDeadLetter, 0, n)}
+	for i := 0; i < n && !r.bad; i++ {
+		d := StreamGroupDeadLetter{ID: StreamID{TimestampMS: r.u64(), Sequence: r.u64()}, Deliveries: r.u32(), Failures: r.u32(), DeadAtMS: int64(r.u64())}
+		d.Error = string(r.bytes16())
+		if len(d.Error) > maxDLQError {
+			r.bad = true
+		}
+		page.Dead = append(page.Dead, d)
+	}
+	if r.present() {
+		page.Cursor = &StreamGroupDLQCursor{deadNS: r.u64(), id: StreamID{TimestampMS: r.u64(), Sequence: r.u64()}}
+	}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return page, nil
+}
+
+// GroupDLQRequeue makes a group's dead letters ready again at once, with
+// their failures reset to 0 (their deliveries and last error stay): those
+// named by id, or with opts.All the oldest, up to opts.Limit. One trimmed
+// from the stream since is gone. The answer says how many it applied to,
+// why each other was refused, and, with All, whether more remain.
+func (s *StreamClient) GroupDLQRequeue(stream, group string, ids []StreamID, opts *StreamGroupDLQOptions) (*StreamGroupDLQReport, error) {
+	if opts == nil {
+		opts = &StreamGroupDLQOptions{}
+	}
+	w, err := groupDLQBody(group, ids, opts.All, opts.Limit)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.client.sendAndCheck(OpStreamGroupDLQRequeue, s.client.getNamespace(opts.Namespace), []byte(stream), w.buf, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeGroupDLQReport(resp.Data)
+}
+
+// GroupDLQDelete deletes a group's dead letters for good, named or with
+// opts.All the oldest, as GroupDLQRequeue takes them. With opts.DryRun it
+// deletes nothing, and Applied is how many it would.
+func (s *StreamClient) GroupDLQDelete(stream, group string, ids []StreamID, opts *StreamGroupDLQDeleteOptions) (*StreamGroupDLQReport, error) {
+	if opts == nil {
+		opts = &StreamGroupDLQDeleteOptions{}
+	}
+	w, err := groupDLQBody(group, ids, opts.All, opts.Limit)
+	if err != nil {
+		return nil, err
+	}
+	w.u8(1)
+	w.u8(boolByte(opts.DryRun))
+	resp, err := s.client.sendAndCheck(OpStreamGroupDLQDelete, s.client.getNamespace(opts.Namespace), []byte(stream), w.buf, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeGroupDLQReport(resp.Data)
+}
+
+// groupDLQBody codes a group requeue's or delete's leading fields: group,
+// records, all, limit.
+func groupDLQBody(group string, ids []StreamID, all bool, limit uint32) (*bodyWriter, error) {
+	if err := checkDeadPick(len(ids), all, limit); err != nil {
+		return nil, err
+	}
+	w, err := groupValue(group, nil, 2+16*len(ids)+9)
+	if err != nil {
+		return nil, err
+	}
+	if all {
+		w.u8(0)
+	} else {
+		w.u8(1)
+		w.u8(uint8(len(ids)))
+		for _, id := range ids {
+			w.u64(id.TimestampMS)
+			w.u64(id.Sequence)
+		}
+	}
+	w.u8(1)
+	w.u8(boolByte(all))
+	optLimit(w, limit)
+	return w, nil
+}
+
+// decodeGroupDLQReport reads a group requeue's or delete's answer:
+// applied, refused, more.
+func decodeGroupDLQReport(data []byte) (*StreamGroupDLQReport, error) {
+	r := bodyReader{buf: data}
+	got := &StreamGroupDLQReport{Applied: r.u32()}
+	got.Refused = decodeGroupRefusals(&r)
+	got.More = r.bool()
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
 }
 
 const (

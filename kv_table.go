@@ -21,7 +21,8 @@ func isTableOp(op OpCode) bool {
 		OpKVIncr, OpKVJsonGet, OpKVJsonSet, OpKVJsonDel,
 		OpKVBeginTxn, OpKVCommitTxn, OpKVRollbackTxn, OpKVExpire, OpKVExists,
 		OpNamespaceCreate, OpNamespaceDelete, OpNamespaceList, OpNamespaceInfo,
-		OpStreamGroupList, OpStreamGroupMembers, OpQueuePeek, OpQueueDequeue, OpQueueComplete, OpQueueFail, OpQueueTouch, OpTSRead, OpTSInfo,
+		OpStreamGroupList, OpStreamGroupMembers, OpStreamGroupSteal, OpStreamGroupDLQList, OpStreamGroupDLQRequeue, OpStreamGroupDLQDelete,
+		OpQueuePeek, OpQueueDLQList, OpQueueDLQRequeue, OpQueueDLQDelete, OpQueueDequeue, OpQueueComplete, OpQueueFail, OpQueueTouch, OpTSRead, OpTSInfo,
 		OpActionStatus, OpActionAwait, OpActionComplete, OpActionFail, OpActionTouch, OpActionInfo,
 		OpWorkerList, OpWorkerInfo, OpProcessingRemove:
 		return true

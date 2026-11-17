@@ -139,8 +139,17 @@ func TestAReportsRefusalsArriveInAnOkAnswer(t *testing.T) {
 	if err != nil || touched.ExpiresAtMS != 5000 || touched.Applied != 1 {
 		t.Fatalf("touch %+v, %v", touched, err)
 	}
+	// not_dead and not_idle are read as themselves; a later why is unknown.
+	for why, want := range map[byte]QueueRefusalWhy{6: QueueNotDead, 7: QueueNotIdle} {
+		b := append([]byte{}, w.buf...)
+		b[4+1+8] = why
+		got, err := decodeQueueReport(b, false)
+		if err != nil || got.Refused[0].Why != want {
+			t.Fatalf("why %d: %+v, %v; want %v", why, got, err, want)
+		}
+	}
 	bad := append([]byte{}, w.buf...)
-	bad[4+1+8] = 6 // an unknown why
+	bad[4+1+8] = 8 // an unknown why
 	if _, err := decodeQueueReport(bad, false); !errors.Is(err, ErrIncompleteResponse) {
 		t.Fatalf("unknown why: %v", err)
 	}
@@ -149,7 +158,8 @@ func TestAReportsRefusalsArriveInAnOkAnswer(t *testing.T) {
 			t.Fatalf("cut at %d: %v", n, err)
 		}
 	}
-	if QueueRefusalWhy(9).String() != "why(9)" || QueueExpired.String() != "expired" {
+	if QueueRefusalWhy(9).String() != "why(9)" || QueueExpired.String() != "expired" ||
+		QueueNotDead.String() != "not_dead" || QueueNotIdle.String() != "not_idle" {
 		t.Fatal("why names")
 	}
 }
