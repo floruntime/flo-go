@@ -720,14 +720,32 @@ func awaitRun(runDone chan struct{}, logger Logger) {
 // sendResult sends a complete or fail. On a connection error, a timeout or
 // an unreadable answer it reconnects and sends the same result again, up to
 // maxResultSends in all: the worker can't tell whether a lost one arrived,
-// and a task reported twice is safer than one never reported. A refusal is not resent. A
-// result still unsent is dropped with a log line, and the server hands the
-// task out again when its lease runs out.
+// and a task reported twice is safer than one never reported. A refusal
+// overloaded that didn't run is sent again with a backoff for as long as
+// the worker may send results: a report that would end a run a workflow
+// step called is refused so while the caller's shard has no room, and the
+// server holds the run (its lease doesn't expire into a redelivery) until
+// the report gets through. Any other refusal is not resent. A result still
+// unsent is dropped with a log line, and the server hands the task out
+// again when its lease runs out.
 func (w *ActionWorker) sendResult(op, taskID string, send func() error) error {
 	var err error
-	for n := 1; ; n++ {
+	held := newWorkerBackoff()
+	for n := 1; ; {
 		if err = send(); err == nil {
 			return nil
+		}
+		if refusedOverloaded(err) {
+			if w.resultCtx.Err() != nil {
+				break
+			}
+			d := held.next()
+			w.logger.Printf("Warning: %s for task %s refused: %v; sending it again in %v", op, taskID, err, d)
+			sleepCtx(w.resultCtx, d)
+			if w.resultCtx.Err() != nil {
+				break
+			}
+			continue
 		}
 		if !resultLost(err) || n == maxResultSends {
 			break
@@ -737,6 +755,7 @@ func (w *ActionWorker) sendResult(op, taskID string, send func() error) error {
 			err = fmt.Errorf("reconnect: %w", rerr)
 			break
 		}
+		n++
 	}
 	stopping := ""
 	if w.ctx.Err() != nil {
@@ -744,6 +763,13 @@ func (w *ActionWorker) sendResult(op, taskID string, send func() error) error {
 	}
 	w.logger.Printf("Error: dropped %s for task %s%s: %v", op, taskID, stopping, err)
 	return err
+}
+
+// refusedOverloaded reports whether err is an overloaded refusal the server
+// says it didn't run.
+func refusedOverloaded(err error) bool {
+	var se *ServerError
+	return errors.As(err, &se) && se.Status == StatusOverloaded && se.Ran == RanNo
 }
 
 // reconnectResult reconnects the result connection unless a concurrent

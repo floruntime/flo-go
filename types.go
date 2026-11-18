@@ -33,7 +33,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0x17f3632347cd6dd9
+	TableHash uint64 = 0xac07f1f7338c66bd
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -115,12 +115,14 @@ const (
 	OpStreamGroupDelete  OpCode = 0x15C
 	OpStreamGroupList    OpCode = 0x15D
 	OpStreamGroupMembers OpCode = 0x15E
+	OpStreamGroupSteal   OpCode = 0x15F
+	// A group's dead letters.
+	OpStreamGroupDLQList    OpCode = 0x160
+	OpStreamGroupDLQRequeue OpCode = 0x161
+	OpStreamGroupDLQDelete  OpCode = 0x162
 
 	// ── Queues (0x170 – 0x19F) ──
 	OpQueueEnqueue    OpCode = 0x170
-	OpQueueDLQList    OpCode = 0x176
-	OpQueueDLQDelete  OpCode = 0x177
-	OpQueueDLQRequeue OpCode = 0x178
 	OpQueueStats      OpCode = 0x17B
 	OpQueuePurge      OpCode = 0x17F
 	OpQueuePeek       OpCode = 0x180
@@ -128,6 +130,9 @@ const (
 	OpQueueComplete   OpCode = 0x182
 	OpQueueFail       OpCode = 0x183
 	OpQueueTouch      OpCode = 0x184
+	OpQueueDLQList    OpCode = 0x185
+	OpQueueDLQRequeue OpCode = 0x186
+	OpQueueDLQDelete  OpCode = 0x187
 	OpQueueList       OpCode = 0x198
 
 	// ── Time-Series (0x1A0 – 0x1BF) ──
@@ -272,14 +277,16 @@ const (
 	// Stream Options (0x20 - 0x2F) - StreamID-native ONLY
 	// All stream positioning uses StreamID (timestamp_ms + sequence) - no legacy offset/timestamp modes
 	// 0x20 reserved
-	OptStreamStart   OptionTag = 0x21 // [16]u8: Read the records after this StreamID (exclusive)
-	OptStreamEnd     OptionTag = 0x22 // [16]u8: End StreamID for reads (inclusive)
-	OptStreamTail    OptionTag = 0x23 // void: Flag indicating tail read (start from end)
-	OptPartition     OptionTag = 0x24 // u32: Explicit partition index
-	OptPartitionKey  OptionTag = 0x25 // string: Key for partition routing
-	OptMaxAgeSeconds OptionTag = 0x26 // u64: Maximum age in seconds for retention
-	OptDryRun        OptionTag = 0x28 // void: Flag to preview what would be deleted
-	OptForce         OptionTag = 0x2C // void: Allow a destructive op, e.g. deleting a non-empty stream
+	OptStreamStart    OptionTag = 0x21 // [16]u8: Read the records after this StreamID (exclusive)
+	OptStreamEnd      OptionTag = 0x22 // [16]u8: End StreamID for reads (inclusive)
+	OptStreamTail     OptionTag = 0x23 // void: Flag indicating tail read (start from end)
+	OptPartition      OptionTag = 0x24 // u32: Explicit partition index
+	OptPartitionKey   OptionTag = 0x25 // string: Key for partition routing
+	OptMaxAgeSeconds  OptionTag = 0x26 // u64: Maximum age in seconds for retention
+	OptDryRun         OptionTag = 0x28 // void: Flag to preview what would be deleted
+	OptRetentionCount OptionTag = 0x29 // u64: A stream's retention: the most records it keeps
+	OptRetentionAge   OptionTag = 0x2A // u64: A stream's retention: the oldest record it keeps, in seconds
+	OptForce          OptionTag = 0x2C // void: Allow a destructive op, e.g. deleting a non-empty stream
 
 	// Consumer Group Options (0x30 - 0x3F)
 	OptAckTimeoutMS OptionTag = 0x30 // u32: A group's lease: a record not acked this long is delivered again (5 s to 12 h)
@@ -458,9 +465,19 @@ const (
 	QueueReleased QueueRefusalWhy = 4
 	// QueueNotHeld: it isn't leased.
 	QueueNotHeld QueueRefusalWhy = 5
+	// QueueNotDead: a dead letter requeue or delete named it, and it isn't
+	// dead.
+	QueueNotDead QueueRefusalWhy = 6
+	// QueueNotIdle: a group steal named it, and its holder moved its lease
+	// within the idle time named.
+	QueueNotIdle QueueRefusalWhy = 7
 )
 
-var queueRefusalNames = [...]string{"gone", "delivered_again", "other_holder", "expired", "released", "not_held"}
+// maxQueueRefusalWhy is the last why this client knows; an answer carrying
+// a later one is refused as unreadable, not mislabelled.
+const maxQueueRefusalWhy = QueueNotIdle
+
+var queueRefusalNames = [...]string{"gone", "delivered_again", "other_holder", "expired", "released", "not_held", "not_dead", "not_idle"}
 
 func (w QueueRefusalWhy) String() string {
 	if int(w) < len(queueRefusalNames) {
@@ -609,40 +626,80 @@ type PurgeOptions struct {
 // DLQListOptions contains options for DLQ list operations.
 type DLQListOptions struct {
 	Namespace string
-	// Limit is the most dead letters on the page, 1..MaxDLQPage; 0 means
-	// MaxDLQPage.
+	// Limit is the most dead letters on the page, 1..MaxDLQPage; 0 is the
+	// server's 20.
 	Limit uint32
-	// After, when set, starts the page after the dead letter with this seq:
-	// the previous page's LastSeq.
-	After *uint64
+	// After continues a listing: the previous page's Cursor. nil reads the
+	// first page.
+	After *DLQCursor
 }
 
-// MaxDLQPage is the most dead letters one DLQList page holds.
+// MaxDLQPage is the most dead letters one DLQList page holds, and the most
+// one DLQRequeue or DLQDelete names or takes.
 const MaxDLQPage = 100
 
-// DeadLetter is one message in a queue's dead letter queue.
-type DeadLetter struct {
-	Seq uint64
-	// Size is the payload's whole length; Payload holds at most its first
-	// 4 KiB.
-	Size         uint32
-	Payload      []byte
-	EnqueuedAtMS int64
-	// Deliveries counts the times it was delivered.
-	Deliveries uint32
-	Priority   uint8
-	MovedAtMS  int64
+// DLQCursor is where a DLQList page left off. It is opaque: pass it back
+// as the next call's After.
+type DLQCursor struct {
+	deadNS uint64
+	seq    uint64
 }
 
-// DLQPage is one page of a queue's dead letters, oldest first.
+// DeadLetter is one message in a queue's dead letters.
+type DeadLetter struct {
+	Seq      uint64
+	Priority uint32
+	// Deliveries counts the times it was delivered.
+	Deliveries uint32
+	// Failures counts the times it failed: failed by its consumer, or its
+	// lease ran out.
+	Failures     uint32
+	EnqueuedAtMS int64
+	// DeadAtMS is when it died, in Unix milliseconds.
+	DeadAtMS int64
+	// Size is the payload's whole length; Payload holds at most its first
+	// 4 KiB.
+	Size    uint32
+	Payload []byte
+	// Error is its last error, at most its first 256 bytes.
+	Error string
+}
+
+// DLQPage is one page of a queue's dead letters, oldest dead first.
 type DLQPage struct {
 	Messages []DeadLetter
-	// Total is how many dead letters the queue holds.
-	Total uint64
-	// HasMore says another page follows: ask again with After set to LastSeq.
-	HasMore bool
-	// LastSeq is the seq of the page's last message; 0 on an empty page.
-	LastSeq uint64
+	// Cursor reads the next page, as DLQListOptions.After; nil on the last.
+	Cursor *DLQCursor
+}
+
+// DLQRequeueOptions contains options for DLQRequeue.
+type DLQRequeueOptions struct {
+	Namespace string
+	// All takes the oldest dead letters instead of naming them, up to
+	// Limit; the report's More says whether others remain.
+	All bool
+	// Limit is, with All, the most one call takes, 1..MaxDLQPage; 0 is the
+	// server's 100.
+	Limit uint32
+}
+
+// DLQDeleteOptions contains options for DLQDelete.
+type DLQDeleteOptions struct {
+	Namespace string
+	// All and Limit are as for DLQRequeueOptions.
+	All   bool
+	Limit uint32
+	// DryRun deletes nothing: Applied counts what it would delete.
+	DryRun bool
+}
+
+// DLQReport is a dead letter requeue's or delete's answer: how many it
+// applied to, the rest and why (QueueGone, or QueueNotDead for one that
+// isn't dead), and, with All, whether dead letters remain past this batch.
+type DLQReport struct {
+	Applied uint32
+	Refused []QueueRefusal
+	More    bool
 }
 
 // PeekOptions contains options for queue peek operations.
@@ -783,6 +840,10 @@ type StreamInfo struct {
 	Count          uint64
 	Bytes          uint64
 	PartitionCount uint32
+	// RetentionAgeS and RetentionCount are its retention, as a create or
+	// an alter set them; 0 is none.
+	RetentionAgeS  uint64
+	RetentionCount uint64
 }
 
 // StreamAppendOptions contains options for stream append operations.
@@ -822,6 +883,25 @@ type StreamTrimResult struct {
 type StreamDeleteOptions struct {
 	Namespace string
 	Force     bool // Delete the stream even if it still holds records
+}
+
+// StreamCreateOptions contains options for stream create.
+type StreamCreateOptions struct {
+	Namespace string
+	// Partitions is the stream's partition count; 0 is 1.
+	Partitions uint32
+	// RetentionAgeS is the oldest record the stream keeps, in seconds, and
+	// RetentionCount the most records; 0 is no bound.
+	RetentionAgeS  uint64
+	RetentionCount uint64
+}
+
+// StreamAlterOptions contains options for stream alter. Each retention
+// bound that is non-zero replaces the stream's; 0 leaves it as it is.
+type StreamAlterOptions struct {
+	Namespace      string
+	RetentionAgeS  uint64
+	RetentionCount uint64
 }
 
 // StreamInfoOptions contains options for stream info operations.
@@ -944,16 +1024,21 @@ func (r *StreamGroupReadResult) Items() []StreamGroupItem {
 	return items
 }
 
-// GroupRefusalWhy says why a group report applied nothing to a record. The
-// values are a queue report's: QueueGone (no such record in the group:
-// acked already, or never leased), QueueDeliveredAgain, QueueOtherHolder,
-// QueueExpired, QueueReleased (nacked) and QueueNotHeld.
+// GroupRefusalWhy says why a group report or operator command applied
+// nothing to a record. The values are a queue report's: QueueGone (no such
+// record in the group: acked already, or never leased), QueueDeliveredAgain,
+// QueueOtherHolder, QueueExpired, QueueReleased (nacked) and QueueNotHeld;
+// QueueNotIdle for a steal, and QueueNotDead for a dead letter requeue or
+// delete.
 type GroupRefusalWhy = QueueRefusalWhy
 
 // StreamGroupRefusal is a record a group report applied nothing to.
 type StreamGroupRefusal struct {
 	ID  StreamID
 	Why GroupRefusalWhy
+	// Reason says the same for a person; read Why, not this. Ack, nack and
+	// touch answers carry none.
+	Reason string
 }
 
 // StreamGroupReport is an ack's, nack's or touch's answer: per record, the
@@ -987,6 +1072,100 @@ type StreamGroupNackOptions struct {
 	// consumer that abandons on errors cycles a poison record forever.
 	// It takes no DelayMS, Dead or Error.
 	Abandon bool
+}
+
+// StreamGroupStealOptions contains options for GroupSteal.
+type StreamGroupStealOptions struct {
+	Namespace string
+	// LeaseMS is the lease the records are taken for, MinGroupAckTimeoutMS
+	// to MaxGroupAckTimeoutMS; nil takes the group's.
+	LeaseMS *uint64
+}
+
+// StreamGroupStealResult is what a steal took: the records with their new
+// deliveries, leased to the consumer that stole them, and the rest with why.
+type StreamGroupStealResult struct {
+	// Stolen names each record taken with its new deliveries, for a report.
+	Stolen []StreamGroupItem
+	Lease  StreamGroupLease
+	// ExpiresAtMS is when the new lease runs out without a touch, in Unix
+	// milliseconds; 0 when nothing was taken.
+	ExpiresAtMS int64
+	// Refused: QueueNotIdle for a record its holder touched within the
+	// idle time named; otherwise the delivery named moved on.
+	Refused []StreamGroupRefusal
+}
+
+// StreamGroupDLQListOptions contains options for GroupDLQList.
+type StreamGroupDLQListOptions struct {
+	Namespace string
+	// Limit is the most dead letters on the page, 1..MaxDLQPage; 0 is the
+	// server's 20.
+	Limit uint32
+	// After continues a listing: the previous page's Cursor. nil reads the
+	// first page.
+	After *StreamGroupDLQCursor
+}
+
+// StreamGroupDLQCursor is where a GroupDLQList page left off. It is
+// opaque: pass it back as the next call's After.
+type StreamGroupDLQCursor struct {
+	deadNS uint64
+	id     StreamID
+}
+
+// StreamGroupDeadLetter is one of a consumer group's dead letters: a
+// record nacked or expired MaxDeliver times, or nacked dead.
+type StreamGroupDeadLetter struct {
+	ID StreamID
+	// Deliveries counts the times it was delivered.
+	Deliveries uint32
+	// Failures counts the times it failed: nacked, or its lease ran out.
+	Failures uint32
+	// DeadAtMS is when it died, in Unix milliseconds.
+	DeadAtMS int64
+	// Error is its last error, at most its first 256 bytes.
+	Error string
+}
+
+// StreamGroupDLQPage is one page of a consumer group's dead letters,
+// oldest dead first.
+type StreamGroupDLQPage struct {
+	Dead []StreamGroupDeadLetter
+	// Cursor reads the next page, as StreamGroupDLQListOptions.After; nil on
+	// the last.
+	Cursor *StreamGroupDLQCursor
+}
+
+// StreamGroupDLQOptions contains options for GroupDLQRequeue.
+type StreamGroupDLQOptions struct {
+	Namespace string
+	// All takes the oldest dead letters instead of naming them, up to
+	// Limit; the report's More says whether others remain.
+	All bool
+	// Limit is, with All, the most one call takes, 1..MaxDLQPage; 0 is the
+	// server's 100.
+	Limit uint32
+}
+
+// StreamGroupDLQDeleteOptions contains options for GroupDLQDelete.
+type StreamGroupDLQDeleteOptions struct {
+	Namespace string
+	// All and Limit are as for StreamGroupDLQOptions.
+	All   bool
+	Limit uint32
+	// DryRun deletes nothing: Applied counts what it would delete.
+	DryRun bool
+}
+
+// StreamGroupDLQReport is a group's dead letter requeue's or delete's
+// answer: how many it applied to, the rest and why (QueueGone, or
+// QueueNotDead for a record that isn't dead), and, with All, whether dead
+// letters remain past this batch.
+type StreamGroupDLQReport struct {
+	Applied uint32
+	Refused []StreamGroupRefusal
+	More    bool
 }
 
 // StreamGroupInfo is a consumer group's counts. Ready, Leased, Dead and
@@ -1102,6 +1281,10 @@ type ActionRunStatus struct {
 	// Outcome is the outcome a completed run's worker named, which a
 	// workflow step follows; "" for success.
 	Outcome string
+	// Held, when not "", says why the run's lease, past due, isn't ended
+	// yet: its end waits for room on the calling workflow's shard. The run
+	// isn't handed out again meanwhile.
+	Held string
 }
 
 // ActionRegisterOptions contains options for action registration.

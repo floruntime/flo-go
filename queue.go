@@ -2,6 +2,7 @@ package flo
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 )
 
@@ -222,21 +223,29 @@ func decodeQueueReport(data []byte, touch bool) (*QueueReport, error) {
 		got.ExpiresAtMS = int64(r.u64())
 	}
 	got.Applied = r.u32()
-	n := int(r.u8())
-	if n > MaxDequeueCount {
-		return nil, ErrIncompleteResponse
-	}
-	for i := 0; i < n && !r.bad; i++ {
-		f := QueueRefusal{Seq: r.u64(), Why: QueueRefusalWhy(r.u8()), Reason: string(r.bytes8())}
-		if f.Why > QueueNotHeld {
-			r.bad = true
-		}
-		got.Refused = append(got.Refused, f)
-	}
+	got.Refused = decodeQueueRefusals(&r)
 	if err := r.done(); err != nil {
 		return nil, err
 	}
 	return got, nil
+}
+
+// decodeQueueRefusals reads a list of refused messages: seq, why, reason.
+func decodeQueueRefusals(r *bodyReader) []QueueRefusal {
+	n := int(r.u8())
+	if n > MaxDequeueCount {
+		r.bad = true
+		return nil
+	}
+	var refused []QueueRefusal
+	for i := 0; i < n && !r.bad; i++ {
+		f := QueueRefusal{Seq: r.u64(), Why: QueueRefusalWhy(r.u8()), Reason: string(r.bytes8())}
+		if f.Why > maxQueueRefusalWhy {
+			r.bad = true
+		}
+		refused = append(refused, f)
+	}
+	return refused
 }
 
 // Purge removes every message from a queue, dead letters included, and
@@ -255,65 +264,164 @@ func (q *QueueClient) Purge(queue string, opts *PurgeOptions) (uint32, error) {
 	return binary.LittleEndian.Uint32(resp.Data), nil
 }
 
-// DLQList returns one page of a queue's dead letters, oldest first. Pass
-// the page's LastSeq as the next call's After to read the next one.
+// DLQList returns one page of a queue's dead letters, oldest dead first,
+// each with up to 4 KiB of its payload. Pass the page's Cursor as the next
+// call's After to read the next one. It reads the leader's state. A queue
+// that doesn't exist is an error that IsNotFound reports.
 func (q *QueueClient) DLQList(queue string, opts *DLQListOptions) (*DLQPage, error) {
 	if opts == nil {
 		opts = &DLQListOptions{}
 	}
-	namespace := q.client.getNamespace(opts.Namespace)
-
-	limit := opts.Limit
-	if limit == 0 {
-		limit = MaxDLQPage
+	if opts.Limit > MaxDLQPage {
+		return nil, fmt.Errorf("flo: DLQ list limit %d, at most %d", opts.Limit, MaxDLQPage)
 	}
-	if limit > MaxDLQPage {
-		return nil, fmt.Errorf("flo: DLQ list limit %d, at most %d", limit, MaxDLQPage)
+	w := bodyWriter{buf: make([]byte, 0, 22)}
+	optLimit(&w, opts.Limit)
+	if c := opts.After; c != nil {
+		w.u8(1)
+		w.u64(c.deadNS)
+		w.u64(c.seq)
+	} else {
+		w.u8(0)
 	}
-	// Value: [limit:u32][after_seq:u64]?
-	value := binary.LittleEndian.AppendUint32(make([]byte, 0, 12), limit)
-	if opts.After != nil {
-		value = binary.LittleEndian.AppendUint64(value, *opts.After)
-	}
-
-	resp, err := q.client.sendAndCheck(OpQueueDLQList, namespace, []byte(queue), value, nil, false)
+	resp, err := q.client.sendAndCheck(OpQueueDLQList, q.client.getNamespace(opts.Namespace), []byte(queue), w.buf, nil, false)
 	if err != nil {
 		return nil, err
 	}
 	return decodeDLQPage(resp.Data)
 }
 
+// optLimit codes a defaulted limit: absent when 0, the server's default.
+func optLimit(w *bodyWriter, limit uint32) {
+	if limit == 0 {
+		w.u8(0)
+		return
+	}
+	w.u8(1)
+	w.u32(limit)
+}
+
 // maxPeekPayload is the most of a payload Peek and DLQList carry.
 const maxPeekPayload = 4096
 
-// decodeDLQPage reads a DLQ list answer:
-// [count:u32]([seq:u64][size:u32][len:u32][payload][enqueued_at_ms:i64]
-// [deliveries:u32][priority:u8][moved_at_ms:i64])*[total:u64][has_more:u8][last_seq:u64].
+// maxDLQError is the most of a dead letter's last error DLQList carries.
+const maxDLQError = 256
+
+// decodeDLQPage reads queue.dlq_list's answer: dead, cursor.
 func decodeDLQPage(data []byte) (*DLQPage, error) {
 	r := bodyReader{buf: data}
-	n := r.u32()
+	n := int(r.u8())
 	if n > MaxDLQPage {
 		return nil, ErrIncompleteResponse
 	}
 	page := &DLQPage{Messages: make([]DeadLetter, 0, n)}
-	for i := uint32(0); i < n && !r.bad; i++ {
-		d := DeadLetter{Seq: r.u64(), Size: r.u32(), Payload: r.bytes32()}
-		d.EnqueuedAtMS = int64(r.u64())
-		d.Deliveries = r.u32()
-		d.Priority = r.u8()
-		d.MovedAtMS = int64(r.u64())
-		if len(d.Payload) > maxPeekPayload {
+	for i := 0; i < n && !r.bad; i++ {
+		d := DeadLetter{Seq: r.u64(), Priority: r.u32(), Deliveries: r.u32(), Failures: r.u32(),
+			EnqueuedAtMS: int64(r.u64()), DeadAtMS: int64(r.u64()), Size: r.u32(), Payload: r.bytes16()}
+		d.Error = string(r.bytes16())
+		if len(d.Payload) > maxPeekPayload || len(d.Error) > maxDLQError {
 			r.bad = true
 		}
 		page.Messages = append(page.Messages, d)
 	}
-	page.Total = r.u64()
-	page.HasMore = r.bool()
-	page.LastSeq = r.u64()
+	if r.present() {
+		page.Cursor = &DLQCursor{deadNS: r.u64(), seq: r.u64()}
+	}
 	if err := r.done(); err != nil {
 		return nil, err
 	}
 	return page, nil
+}
+
+// DLQRequeue makes dead letters ready again at once, at their priority,
+// with their failures reset to 0 (their deliveries and last error stay):
+// those named by seq, or with opts.All the oldest, up to opts.Limit. The
+// answer says how many it applied to, why each other was refused, and,
+// with All, whether more remain.
+func (q *QueueClient) DLQRequeue(queue string, seqs []uint64, opts *DLQRequeueOptions) (*DLQReport, error) {
+	if opts == nil {
+		opts = &DLQRequeueOptions{}
+	}
+	w, err := dlqBody(seqs, opts.All, opts.Limit)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := q.client.sendAndCheck(OpQueueDLQRequeue, q.client.getNamespace(opts.Namespace), []byte(queue), w.buf, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeDLQReport(resp.Data)
+}
+
+// DLQDelete deletes dead letters for good, named or with opts.All the
+// oldest, as DLQRequeue takes them. With opts.DryRun it deletes nothing,
+// and Applied is how many it would.
+func (q *QueueClient) DLQDelete(queue string, seqs []uint64, opts *DLQDeleteOptions) (*DLQReport, error) {
+	if opts == nil {
+		opts = &DLQDeleteOptions{}
+	}
+	w, err := dlqBody(seqs, opts.All, opts.Limit)
+	if err != nil {
+		return nil, err
+	}
+	w.u8(1)
+	w.u8(boolByte(opts.DryRun))
+	resp, err := q.client.sendAndCheck(OpQueueDLQDelete, q.client.getNamespace(opts.Namespace), []byte(queue), w.buf, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeDLQReport(resp.Data)
+}
+
+// checkDeadPick refuses what the server would: dead letters named, or all,
+// not both and not neither.
+func checkDeadPick(named int, all bool, limit uint32) error {
+	switch {
+	case all && named > 0:
+		return errors.New("flo: name the dead letters or give All, not both")
+	case !all && named == 0:
+		return errors.New("flo: name the dead letters, or give All")
+	case named > MaxDLQPage:
+		return fmt.Errorf("flo: %d dead letters named, at most %d", named, MaxDLQPage)
+	case limit > MaxDLQPage:
+		return fmt.Errorf("flo: dead letter limit %d, at most %d", limit, MaxDLQPage)
+	}
+	return nil
+}
+
+// dlqBody codes a queue requeue's or delete's leading fields: messages,
+// all, limit.
+func dlqBody(seqs []uint64, all bool, limit uint32) (*bodyWriter, error) {
+	if err := checkDeadPick(len(seqs), all, limit); err != nil {
+		return nil, err
+	}
+	w := &bodyWriter{buf: make([]byte, 0, 12+8*len(seqs))}
+	if all {
+		w.u8(0)
+	} else {
+		w.u8(1)
+		w.u8(uint8(len(seqs)))
+		for _, seq := range seqs {
+			w.u64(seq)
+		}
+	}
+	w.u8(1)
+	w.u8(boolByte(all))
+	optLimit(w, limit)
+	return w, nil
+}
+
+// decodeDLQReport reads a queue requeue's or delete's answer: applied,
+// refused, more.
+func decodeDLQReport(data []byte) (*DLQReport, error) {
+	r := bodyReader{buf: data}
+	got := &DLQReport{Applied: r.u32()}
+	got.Refused = decodeQueueRefusals(&r)
+	got.More = r.bool()
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return got, nil
 }
 
 // Peek returns up to limit of a queue's next ready messages (1..MaxPeekLimit;

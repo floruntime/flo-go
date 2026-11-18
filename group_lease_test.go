@@ -154,7 +154,11 @@ func TestAStaleGroupReportAppliesNothingAndSaysWhy(t *testing.T) {
 		t.Errorf("sent %d times, want once", n)
 	}
 	if _, err := decodeGroupReport([]byte{0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}, false); err == nil {
-		t.Error("a why past not_held was read")
+		t.Error("a why past not_idle was read")
+	}
+	got, err := decodeGroupReport([]byte{0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7}, false)
+	if err != nil || got.Refused[0].Why != QueueNotIdle {
+		t.Errorf("why 7: %+v, %v; want not_idle", got, err)
 	}
 }
 

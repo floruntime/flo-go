@@ -5,6 +5,57 @@ All notable changes to the Flo Go SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+The server's op table changed, so `TableHash` is now `0xac07f1f7338c66bd`,
+the hash of flo `1fd555dc`, which CI's live tests run against; this SDK no
+longer talks to an older server.
+
+### Breaking
+
+- Queue dead letters moved to the server's new ops, and the old wire is
+  gone. `DLQList` pages by an opaque `DLQCursor`: `DLQListOptions.After`
+  takes the last page's `DLQPage.Cursor`, nil on the last page, and a
+  `Limit` of 0 is the server's 20. `DLQPage.Total`, `HasMore` and `LastSeq`
+  are gone. `DeadLetter.MovedAtMS` is `DeadAtMS`, `Priority` is a `uint32`,
+  and it gains `Failures` and `Error` (its last error, up to 256 bytes). A
+  queue that doesn't exist is not found
+- `QueueRefusalWhy` (and `GroupRefusalWhy`) gains `QueueNotDead` (6) and
+  `QueueNotIdle` (7); a decoder that met 6 or 7 used to refuse the answer
+- `StreamInfo` reads the retention the answer always carried, and an info
+  answer shorter than the server's is refused
+
+### Added
+
+- `Queue.DLQRequeue` and `Queue.DLQDelete` (with `DryRun`): dead letters by
+  seq, or `All` up to `Limit`, answering `Applied`, refusals with why, and
+  `More`
+- `Stream.GroupSteal`: take records another consumer holds and has left
+  idle, with a new delivery and lease; one not idle is refused
+  `QueueNotIdle`
+- `Stream.GroupDLQList`, `GroupDLQRequeue` and `GroupDLQDelete`: a consumer
+  group's dead letters, paged by an opaque cursor, by id or `All`
+- `Stream.Create` and `Stream.Alter`, and `StreamInfo.RetentionAgeS` and
+  `RetentionCount`. An alter of a stream an append made now works; after an
+  alter, a create must name the stream's settings or it is a conflict
+  ("the stream exists with other settings"), and a create whose name's
+  64-bit hash matches another stream's is a conflict
+- `ActionRunStatus.Held`: why a run's lease, past due, isn't ended yet (its
+  end waits for room on the calling workflow's shard)
+- `StreamGroupRefusal.Reason`, from the operator commands' answers
+
+### Changed
+
+- The action worker sends a complete or fail refused overloaded (ran no)
+  again with a backoff until it is accepted, for as long as it may send
+  results; it used to drop it after the client's own retries. The server
+  refuses so a report that would end a run a workflow step called while the
+  caller's shard has no room, and holds the run until the report gets
+  through
+- The server no longer fails a workflow step whose action isn't registered:
+  it waits for one and retries, up to the server's `[workflows]
+  missing_action_wait_ms` (10 minutes by default)
+
 ## [0.1.0-dev.24] - 2026-11-16
 
 These follow the server's wire. The server's op table changed with them, so

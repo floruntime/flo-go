@@ -433,3 +433,96 @@ func TestAFailingHandlerFailsTheRunWithRetry(t *testing.T) {
 		})
 	}
 }
+
+// overloadedNotRun is the server's refusal of a report that would end a
+// run a workflow step called while the caller's shard has no room.
+var overloadedNotRun = reply{status: StatusOverloaded, body: refusalBody(ReasonUnclassified, RanNo,
+	"overloaded: writes to shard 3 are queued past their cap; this request was not run — retry later")}
+
+// heldResultWorker is resultTestWorker with the client's own retries off,
+// so each overloaded refusal reaches the worker.
+func heldResultWorker(t *testing.T, addr string) (*ActionWorker, *captureLogger) {
+	t.Helper()
+	logger := &captureLogger{}
+	w, err := NewClient(addr, WithTimeout(time.Second), WithRetry(RetryPolicy{MaxAttempts: 1})).NewActionWorker(ActionWorkerOptions{ActionTimeout: time.Minute, Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { w.Close() })
+	w.handlers["a"] = succeed
+	w.ctx, w.cancel = context.WithCancel(context.Background())
+	return w, logger
+}
+
+// A complete or fail refused overloaded, not run, is sent again with a
+// backoff until it is accepted: the result is never dropped or failed.
+func TestAnOverloadedResultIsSentAgainUntilAccepted(t *testing.T) {
+	for name, op := range map[string]OpCode{"complete": OpActionComplete, "fail": OpActionFail} {
+		t.Run(name, func(t *testing.T) {
+			s, addr := newFrameServer(t, func(got OpCode, n int) reply {
+				if got == op && n == 0 {
+					return overloadedNotRun
+				}
+				return reply{}
+			})
+			w, logger := heldResultWorker(t, addr)
+			if op == OpActionFail {
+				w.handlers["a"] = func(*ActionContext) (interface{}, error) { return nil, errors.New("no") }
+			}
+			runTask(w)
+			sent := s.got(op)
+			if len(sent) != 2 {
+				t.Fatalf("server saw %d of %v, want 2", len(sent), op)
+			}
+			if !sameApartFromID(sent[0], sent[1]) {
+				t.Error("the resent report differs from the first")
+			}
+			if op == OpActionComplete {
+				checkSends(t, s, 2, 0)
+			} else {
+				checkSends(t, s, 0, 2)
+			}
+			if !logger.has("refused") || !logger.has("sending it again") {
+				t.Errorf("no warning of the retry; log: %q", logger.lines)
+			}
+			if logger.has("Error: dropped") {
+				t.Errorf("an accepted result was logged dropped; log: %q", logger.lines)
+			}
+		})
+	}
+}
+
+// Past the client's own retries the worker keeps sending, each wait longer,
+// until the worker may send results no more; then the result is dropped.
+func TestAnOverloadedResultIsSentUntilTheWorkerMayNotSend(t *testing.T) {
+	s, addr := newFrameServer(t, func(got OpCode, n int) reply {
+		if got == OpActionComplete {
+			return overloadedNotRun
+		}
+		return reply{}
+	})
+	w, logger := heldResultWorker(t, addr)
+	go func() {
+		for len(s.got(OpActionComplete)) < 3 {
+			time.Sleep(10 * time.Millisecond)
+		}
+		w.closeCancel()
+	}()
+	done := make(chan struct{})
+	go func() {
+		runTask(w)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the worker never stopped sending an overloaded complete")
+	}
+	if n := len(s.got(OpActionComplete)); n < 3 {
+		t.Errorf("server saw %d completes, want 3 or more", n)
+	}
+	checkSends(t, s, len(s.got(OpActionComplete)), 0)
+	if !logger.has("Error: dropped complete for task t1") {
+		t.Errorf("no drop logged; log: %q", logger.lines)
+	}
+}
