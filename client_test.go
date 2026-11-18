@@ -8,7 +8,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -356,29 +355,40 @@ func eofServer(t *testing.T, reply func(id uint64) []byte) net.Listener {
 }
 
 // Concurrent reconnects must not leak sockets or tear down each other's
-// connection: once they all return, exactly one connection is open.
+// connection: once they all return, the only connection the server holds open
+// is the client's.
 func TestConcurrentReconnectsLeaveOneConnection(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	var open atomic.Int32
+	// Open server-side connections, by the client's address. A connection the
+	// client closed can still be waiting to be accepted, or not yet read to its
+	// end, so a bare count can read 1 and then 2 a moment later.
+	var mu sync.Mutex
+	open := map[string]bool{}
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			open.Add(1)
+			peer := conn.RemoteAddr().String()
+			mu.Lock()
+			open[peer] = true
+			mu.Unlock()
 			go func() {
-				defer open.Add(-1)
+				defer func() {
+					mu.Lock()
+					delete(open, peer)
+					mu.Unlock()
+				}()
 				defer conn.Close()
 				io.Copy(io.Discard, conn)
 			}()
 		}
 	}()
-
 	c := NewClient(ln.Addr().String(), WithTimeout(time.Second))
 	defer c.Close()
 	for round := 0; round < 5; round++ {
@@ -393,15 +403,34 @@ func TestConcurrentReconnectsLeaveOneConnection(t *testing.T) {
 			}()
 		}
 		wg.Wait()
-		deadline := time.Now().Add(2 * time.Second)
-		for open.Load() != 1 && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
-		if n := open.Load(); n != 1 {
-			t.Fatalf("round %d: %d server-side connections open, want 1", round, n)
-		}
-		if !c.IsConnected() {
+		live := c.live.Load()
+		if live == nil {
 			t.Fatalf("round %d: client not connected", round)
+		}
+		want := (*live).LocalAddr().String()
+		// A leaked connection stays open, so it shows within the settle time;
+		// one the client closed is accepted, read to its end and dropped.
+		const settle = 100 * time.Millisecond
+		deadline := time.Now().Add(5 * time.Second)
+		var since time.Time
+		var n int
+		for {
+			mu.Lock()
+			n = len(open)
+			ok := n == 1 && open[want]
+			mu.Unlock()
+			now := time.Now()
+			if !ok {
+				since = time.Time{}
+			} else if since.IsZero() {
+				since = now
+			} else if now.Sub(since) >= settle {
+				break
+			}
+			if now.After(deadline) {
+				t.Fatalf("round %d: %d server-side connections open, want only the client's", round, n)
+			}
+			time.Sleep(5 * time.Millisecond)
 		}
 	}
 }
