@@ -358,7 +358,15 @@ retention; `Info` shows both.
 ```go
 err := client.Stream.Create("events", &flo.StreamCreateOptions{Partitions: 4, RetentionCount: 1_000_000})
 err = client.Stream.Alter("events", &flo.StreamAlterOptions{RetentionAgeS: 7 * 24 * 3600})
+// Drop the count bound: the stream keeps any number of records
+err = client.Stream.Alter("events", &flo.StreamAlterOptions{ClearRetentionCount: true})
 ```
+
+An alter leaves a bound it doesn't name, or names as 0, as it is;
+`ClearRetentionAge` and `ClearRetentionCount` drop one. Setting and clearing
+the same bound in one alter is `flo.ErrBadRequest`, and only an alter can
+clear. A retention count of `math.MaxUint64` is refused ("retention bound too
+large"), as is an age over 100 years.
 
 A create of a stream that exists is answered by its settings. With the same
 partitions and retention it is ok and changes nothing, as a retry should be.
@@ -440,7 +448,9 @@ stole or touched it. Each one taken gets a new delivery, leased to the
 consumer named; report on it with the result's `Lease` and `Stolen`. One
 whose holder touched it within the idle time is refused `flo.QueueNotIdle`.
 A read takes expired records by itself, so stealing is for a holder that
-keeps a lease alive without making progress.
+keeps a lease alive without making progress. A steal naming no records is
+answered at once, after the group and consumer checks: nothing stolen and a
+lease of zeros.
 
 ```go
 pending, _ := client.Stream.GroupPending("orders", "billing", "stuck-worker", nil)

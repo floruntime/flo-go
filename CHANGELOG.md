@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The server's op table hash is now `0xe394286115044c9d`, the hash of flo `19cfe003`; this SDK and older servers refuse each other. Run ids may now be up to 42 bytes (`{prefix}{bits}-{shard}-{term}`); treat them as opaque.
+The server's op table hash is now `0xdc7e06b2a9f89c65`, the hash of flo `08d51612`; this SDK and older servers refuse each other. Run ids may now be up to 42 bytes (`{prefix}{bits}-{shard}-{term}`); treat them as opaque.
+
+### Added
+
+- `StreamAlterOptions.ClearRetentionAge` and `ClearRetentionCount` drop a stream's retention bound. Setting and clearing the same bound in one alter is `ErrBadRequest`; a bound left out or 0 is still unchanged. The server now refuses a retention count of `math.MaxUint64` ("retention bound too large") on create and alter.
+- `ReasonSkippedByRepair` (38): an operator's repair skipped the log entry or message that carried the request, so it never runs.
+
+### Changed
+
+- A stream deleted and made again under the same name keeps its ids rising past the old ones while the server still holds the deleted stream's tombstone; once the tombstone is forgotten, they start again.
+- A `GroupSteal` naming no records is answered at once, after the group and consumer checks: nothing stolen, a lease of zeros, and nothing logged.
+- The server refuses a processing job name over 4096 bytes and a workflow version over 256 bytes when the definition is submitted.
 
 ## [0.1.0-dev.25] - 2026-11-18
 

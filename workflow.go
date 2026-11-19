@@ -19,7 +19,8 @@ type WorkflowClient struct {
 // =============================================================================
 
 // Create creates (or replaces) a workflow from a YAML definition.
-// The workflow name is extracted from the YAML and sent as the key.
+// The workflow name is extracted from the YAML and sent as the key. A
+// version over 256 bytes is refused (ErrBadRequest).
 func (w *WorkflowClient) Create(name string, yaml []byte, opts *WorkflowCreateOptions) error {
 	if opts == nil {
 		opts = &WorkflowCreateOptions{}

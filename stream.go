@@ -182,24 +182,33 @@ func (s *StreamClient) Create(stream string, opts *StreamCreateOptions) error {
 	if opts.Partitions > 0 {
 		value = binary.LittleEndian.AppendUint32(nil, opts.Partitions)
 	}
-	_, err := s.client.sendAndCheck(OpStreamCreate, s.client.getNamespace(opts.Namespace), []byte(stream), value, retentionOptions(opts.RetentionAgeS, opts.RetentionCount), false)
+	_, err := s.client.sendAndCheck(OpStreamCreate, s.client.getNamespace(opts.Namespace), []byte(stream), value, retentionOptions(opts.RetentionAgeS, opts.RetentionCount).Build(), false)
 	return err
 }
 
 // Alter changes a stream's retention: each of RetentionAgeS and
-// RetentionCount that is non-zero replaces the stream's. A stream an append
-// made can be altered. A stream that doesn't exist is ErrNotFound. After an
-// alter, a create must name the stream's settings as they now are (see
-// Create).
+// RetentionCount that is non-zero replaces the stream's, and
+// ClearRetentionAge and ClearRetentionCount drop the bound they name.
+// Setting and clearing one bound together is ErrBadRequest. A stream an
+// append made can be altered. A stream that doesn't exist is ErrNotFound.
+// After an alter, a create must name the stream's settings as they now are
+// (see Create).
 func (s *StreamClient) Alter(stream string, opts *StreamAlterOptions) error {
 	if opts == nil {
 		opts = &StreamAlterOptions{}
 	}
-	_, err := s.client.sendAndCheck(OpStreamAlter, s.client.getNamespace(opts.Namespace), []byte(stream), nil, retentionOptions(opts.RetentionAgeS, opts.RetentionCount), false)
+	b := retentionOptions(opts.RetentionAgeS, opts.RetentionCount)
+	if opts.ClearRetentionAge {
+		b.AddFlag(OptRetentionAgeClear)
+	}
+	if opts.ClearRetentionCount {
+		b.AddFlag(OptRetentionCountClear)
+	}
+	_, err := s.client.sendAndCheck(OpStreamAlter, s.client.getNamespace(opts.Namespace), []byte(stream), nil, b.Build(), false)
 	return err
 }
 
-func retentionOptions(ageS, count uint64) []byte {
+func retentionOptions(ageS, count uint64) *OptionsBuilder {
 	b := NewOptionsBuilder()
 	if ageS > 0 {
 		b.AddU64(OptRetentionAge, ageS)
@@ -207,7 +216,7 @@ func retentionOptions(ageS, count uint64) []byte {
 	if count > 0 {
 		b.AddU64(OptRetentionCount, count)
 	}
-	return b.Build()
+	return b
 }
 
 // Trim removes a stream's oldest records by exactly one bound: Before,

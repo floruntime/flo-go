@@ -19,7 +19,8 @@ type ProcessingClient struct {
 // =============================================================================
 
 // Submit submits a processing job from a YAML definition.
-// Returns the server-assigned job ID.
+// Returns the server-assigned job ID. A job name over 4096 bytes is
+// refused (ErrBadRequest).
 func (p *ProcessingClient) Submit(yaml []byte, opts *ProcessingSubmitOptions) (string, error) {
 	if opts == nil {
 		opts = &ProcessingSubmitOptions{}
