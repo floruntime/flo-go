@@ -287,6 +287,9 @@ const (
 	OptRetentionCount OptionTag = 0x29 // u64: A stream's retention: the most records it keeps
 	OptRetentionAge   OptionTag = 0x2A // u64: A stream's retention: the oldest record it keeps, in seconds
 	OptForce          OptionTag = 0x2C // void: Allow a destructive op, e.g. deleting a non-empty stream
+	// Alter only: drop the stream's age bound / count bound.
+	OptRetentionAgeClear   OptionTag = 0x2D // void
+	OptRetentionCountClear OptionTag = 0x2E // void
 
 	// Consumer Group Options (0x30 - 0x3F)
 	OptAckTimeoutMS OptionTag = 0x30 // u32: A group's lease: a record not acked this long is delivered again (5 s to 12 h)
@@ -891,17 +894,23 @@ type StreamCreateOptions struct {
 	// Partitions is the stream's partition count; 0 is 1.
 	Partitions uint32
 	// RetentionAgeS is the oldest record the stream keeps, in seconds, and
-	// RetentionCount the most records; 0 is no bound.
+	// RetentionCount the most records; 0 is no bound. An age over 100
+	// years, or a count of math.MaxUint64, is ErrBadRequest.
 	RetentionAgeS  uint64
 	RetentionCount uint64
 }
 
 // StreamAlterOptions contains options for stream alter. Each retention
 // bound that is non-zero replaces the stream's; 0 leaves it as it is.
+// ClearRetentionAge and ClearRetentionCount drop a bound, leaving the
+// stream with none; setting and clearing the same bound in one alter is
+// refused (ErrBadRequest).
 type StreamAlterOptions struct {
-	Namespace      string
-	RetentionAgeS  uint64
-	RetentionCount uint64
+	Namespace           string
+	RetentionAgeS       uint64
+	RetentionCount      uint64
+	ClearRetentionAge   bool
+	ClearRetentionCount bool
 }
 
 // StreamInfoOptions contains options for stream info operations.
@@ -1872,6 +1881,11 @@ const (
 	// are at the shard's. Reading again won't help, so it is not retried
 	// (ErrGroupHeldFull).
 	ReasonGroupHeldFull Reason = 37
+	// ReasonSkippedByRepair (with StatusConflict): an operator's repair
+	// skipped the log entry, or the message between shards, that carried
+	// the request, so it never runs on any node. The message names the
+	// repair's entry and the message's seq.
+	ReasonSkippedByRepair Reason = 38
 )
 
 var reasonNames = map[Reason]string{
@@ -1889,6 +1903,7 @@ var reasonNames = map[Reason]string{
 	ReasonMemoryBudget: "memory_budget", ReasonTooManyActions: "too_many_actions",
 	ReasonTooManyWorkflowDefinitions: "too_many_workflow_definitions", ReasonTooManyWorkflowRuns: "too_many_workflow_runs",
 	ReasonQueueFull: "queue_full", ReasonGroupHeldFull: "group_held_full",
+	ReasonSkippedByRepair: "skipped_by_repair",
 }
 
 // Known reports whether this SDK knows the reason. A newer server's reason
