@@ -16,7 +16,8 @@ The server's op table hash is now `0xdc7e06b2a9f89c65`, the hash of flo `08d5161
 
 ### Changed
 
-- A stream deleted and made again under the same name keeps its ids rising past the old ones rather than starting over.
+- A stream deleted and made again under the same name keeps its ids rising past the old ones while the server still holds the deleted stream's tombstone; once the tombstone is forgotten, they start again.
+- A `GroupSteal` naming no records is answered at once, after the group and consumer checks: nothing stolen, a lease of zeros, and nothing logged.
 - The server refuses a processing job name over 4096 bytes and a workflow version over 256 bytes when the definition is submitted.
 
 ## [0.1.0-dev.25] - 2026-11-18

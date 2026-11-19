@@ -448,7 +448,9 @@ stole or touched it. Each one taken gets a new delivery, leased to the
 consumer named; report on it with the result's `Lease` and `Stolen`. One
 whose holder touched it within the idle time is refused `flo.QueueNotIdle`.
 A read takes expired records by itself, so stealing is for a holder that
-keeps a lease alive without making progress.
+keeps a lease alive without making progress. A steal naming no records is
+answered at once, after the group and consumer checks: nothing stolen and a
+lease of zeros.
 
 ```go
 pending, _ := client.Stream.GroupPending("orders", "billing", "stuck-worker", nil)
