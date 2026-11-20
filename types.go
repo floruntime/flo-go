@@ -1563,9 +1563,11 @@ type WorkflowGetDefinitionOptions struct {
 
 // WorkflowStartOptions contains options for starting a workflow run.
 type WorkflowStartOptions struct {
-	Namespace      string
-	Version        string // Workflow version (default: "latest")
-	IdempotencyKey string // Prevents duplicate runs with the same key
+	Namespace string
+	Version   string // Workflow version (default: "latest")
+	// IdempotencyKey prevents duplicate runs with the same key. Keys starting
+	// with '_' are reserved for the server and refused.
+	IdempotencyKey string
 	RunID          string // Explicit run ID (auto-generated if empty)
 }
 

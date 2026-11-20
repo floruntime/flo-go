@@ -274,7 +274,10 @@ func parseWorkflowStatus(data []byte) (*WorkflowStatusResult, error) {
 	return result, nil
 }
 
-// Signal sends a signal to a running workflow.
+// Signal sends a signal to a running workflow. Each signal ends one wait: a
+// wait takes the oldest signal of its type the run holds. The run keeps
+// signals no wait has taken (at most 64; one more is refused) until a wait
+// takes them or the run ends.
 func (w *WorkflowClient) Signal(runID string, signalName string, data []byte, opts *WorkflowSignalOptions) error {
 	if opts == nil {
 		opts = &WorkflowSignalOptions{}
