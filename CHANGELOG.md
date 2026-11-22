@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The server's op table hash is now `0xdc7e06b2a9f89c65`, the hash of flo `08d51612`; this SDK and older servers refuse each other. Run ids may now be up to 42 bytes (`{prefix}{bits}-{shard}-{term}`); treat them as opaque.
+The server's op table hash is now `0x2440b62edffe27a6`, the hash of flo `8966c6f7`; this SDK and older servers refuse each other. Run ids may now be up to 42 bytes (`{prefix}{bits}-{shard}-{term}`); treat them as opaque.
 
 ### Added
 
@@ -16,6 +16,9 @@ The server's op table hash is now `0xdc7e06b2a9f89c65`, the hash of flo `08d5161
 
 ### Changed
 
+- A delete now drops a key's earlier versions: after put, delete, put, `history` is the new version and the delete's tombstone. The server removes old tombstones in time.
+- A workflow signal is taken by one wait: a wait takes the oldest signal of its type the run holds, and a run keeps at most 64 that no wait has taken (one more is refused) until a wait takes them or the run ends.
+- Idempotency keys starting with `_` are reserved for the server and refused on a workflow start.
 - A stream deleted and made again under the same name keeps its ids rising past the old ones while the server still holds the deleted stream's tombstone; once the tombstone is forgotten, they start again.
 - A `GroupSteal` naming no records is answered at once, after the group and consumer checks: nothing stolen, a lease of zeros, and nothing logged.
 - The server refuses a processing job name over 4096 bytes and a workflow version over 256 bytes when the definition is submitted.

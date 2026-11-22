@@ -138,6 +138,8 @@ func TestLiveKVGetShowsTheExpiry(t *testing.T) {
 	}
 }
 
+// A delete frees what the key held: history after put, delete, put is the
+// new version and the delete's tombstone, and the first version is gone.
 func TestLiveKVHistoryMarksTheDelete(t *testing.T) {
 	c := liveClient(t)
 	if _, err := c.KV.Put("k", []byte("one"), nil); err != nil {
@@ -154,9 +156,9 @@ func TestLiveKVHistoryMarksTheDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	hist := page.Versions
-	if len(hist) != 3 || page.More || hist[0].Deleted || !hist[1].Deleted || hist[2].Deleted ||
-		string(hist[0].Value) != "two" || string(hist[2].Value) != "one" {
-		t.Fatalf("history = %+v; want two, a delete, one", hist)
+	if len(hist) != 2 || page.More || hist[0].Deleted || !hist[1].Deleted ||
+		string(hist[0].Value) != "two" {
+		t.Fatalf("history = %+v; want two, then the delete", hist)
 	}
 }
 

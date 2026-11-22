@@ -182,7 +182,9 @@ for {
 #### History
 
 ```go
-// Versions newest first (default 10, at most 65); a missing key has none
+// Versions newest first (default 10, at most 65); a missing key has none.
+// A delete drops the versions before it, so history ends at its tombstone,
+// and the server removes old tombstones in time.
 page, err := client.KV.History("key", nil)
 for _, entry := range page.Versions {
     if entry.Deleted {

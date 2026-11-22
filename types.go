@@ -33,7 +33,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0xdc7e06b2a9f89c65
+	TableHash uint64 = 0x2440b62edffe27a6
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -1563,9 +1563,11 @@ type WorkflowGetDefinitionOptions struct {
 
 // WorkflowStartOptions contains options for starting a workflow run.
 type WorkflowStartOptions struct {
-	Namespace      string
-	Version        string // Workflow version (default: "latest")
-	IdempotencyKey string // Prevents duplicate runs with the same key
+	Namespace string
+	Version   string // Workflow version (default: "latest")
+	// IdempotencyKey prevents duplicate runs with the same key. Keys starting
+	// with '_' are reserved for the server and refused.
+	IdempotencyKey string
 	RunID          string // Explicit run ID (auto-generated if empty)
 }
 
