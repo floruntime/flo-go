@@ -252,6 +252,15 @@ func TestActionInfoDecodesItsCounts(t *testing.T) {
 	}
 }
 
+// The read deadline covers the time the server may hold a history read.
+func TestAHistoryReadsDeadlineCoversItsHold(t *testing.T) {
+	for _, op := range []OpCode{OpWorkflowHistory, OpActionHistory} {
+		if got := waitMS(op, nil, nil); got != runHistoryHoldMS {
+			t.Fatalf("waitMS(%v) = %d, want %d", op, got, runHistoryHoldMS)
+		}
+	}
+}
+
 // The read deadline covers an await's wait, which travels in its body.
 func TestAnAwaitsDeadlineCoversItsBlock(t *testing.T) {
 	body, err := encodeAwaitBody([]string{"a", "bb"}, 45000, "rk")

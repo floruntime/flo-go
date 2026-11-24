@@ -5,6 +5,25 @@ All notable changes to the Flo Go SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+The server's op table hash is now `0xaaef4dfa38d45632`, the hash of flo `0bc90b34`; this SDK and older servers refuse each other.
+
+### Breaking
+
+- `Workflow.History` returns a `*RunHistoryPage` instead of raw bytes and takes `*RunHistoryOptions` (`Limit`, `Cursor`, `NewestFirst`; each left out is the server's default) in place of `WorkflowHistoryOptions`. A page holds `Events` (`Type`, `Detail`, `Extra`, `TimestampMS`), `HasMore` and `Cursor`, nil on the last page; `Limit` 0 is the server's 100, and a page holds at most `MaxRunHistoryLimit` (1000) events. It is sent as a table op; the server refuses the old request.
+- `ReasonTooManyActions` (33), `ReasonTooManyWorkflowDefinitions` (34) and `ReasonTooManyWorkflowRuns` (35) are gone; no other reason renumbers. An action registration past the node's memory is refused `limit` with `ReasonMemoryBudget`, like any other write.
+
+### Added
+
+- `Action.History`: a page of an action run's history (its invoke, deliveries, failures and result), the same page as `Workflow.History`. `Extra` is the outcome its worker named on `action_settled`, and `"truncated"` on a delivery, retried failure or hand-back whose `Detail` is only the first 256 bytes. A history read may be held up to 5 s while the run's history catches up; gaps show as `history_lost` or `history_missing` events.
+- `ActionRunStatus.OutputTruncated` and `ErrorTruncated`: `Output` and `ErrorMessage` are now their first 256 bytes, and the flags say more were cut. The whole output is the run's `action_settled` history event.
+- `WorkflowStatusResult.OutputTruncated`: an ended run's `Output` is its first 256 bytes, the whole is its `workflow_output` history event; its `Input` is empty. The status decoder now refuses bytes past the answer.
+
+### Changed
+
+- A workflow step calling an action named longer than an action may be (256 bytes) fails the step. The docs now say that a workflow name or an action name over 256 bytes is refused (`ErrBadRequest`) when the workflow is created or started or the action registered.
+
 ## [0.1.0-dev.26] - 2026-11-24
 
 Works with flo v0.1.0-dev.21.

@@ -139,8 +139,8 @@ func TestLiveWorkflowRunIDChosenByTheClient(t *testing.T) {
 		if err != nil {
 			t.Fatalf("history %q: %v", id, err)
 		}
-		if len(hist) < 4 || hist[0]|hist[1]|hist[2]|hist[3] == 0 {
-			t.Errorf("history %q: % x, want at least one event", id, hist)
+		if len(hist.Events) == 0 || hist.Events[0].Type != "workflow_started" || string(hist.Events[0].Detail) != "{}" || hist.HasMore || hist.Cursor != nil {
+			t.Errorf("history %q: %+v, want one page starting with workflow_started and its input", id, hist)
 		}
 		// A signal the run isn't waiting for is kept, not refused.
 		if err := c.Workflow.Signal(id, "nudge", []byte(`{}`), nil); err != nil {
@@ -156,8 +156,24 @@ func TestLiveWorkflowRunIDChosenByTheClient(t *testing.T) {
 		if err != nil {
 			t.Fatalf("status %q after cancel: %v", id, err)
 		}
-		if st.Status != "cancelled" {
-			t.Errorf("status %q after cancel: %q, want cancelled", id, st.Status)
+		if st.Status != "cancelled" || len(st.Input) != 0 || st.OutputTruncated {
+			t.Errorf("status %q after cancel: %+v, want cancelled with its input dropped", id, st)
+		}
+		// Newest first, one at a time: the run's end, then on by the cursor.
+		one := uint32(1)
+		last, err := c.Workflow.History(id, &RunHistoryOptions{Limit: one, NewestFirst: true})
+		if err != nil {
+			t.Fatalf("history %q newest first: %v", id, err)
+		}
+		if len(last.Events) != 1 || last.Events[0].Type != "workflow_cancelled" || !last.HasMore || last.Cursor == nil {
+			t.Fatalf("history %q newest first: %+v, want workflow_cancelled and more", id, last)
+		}
+		prev, err := c.Workflow.History(id, &RunHistoryOptions{Limit: one, NewestFirst: true, Cursor: last.Cursor})
+		if err != nil {
+			t.Fatalf("history %q's next page: %v", id, err)
+		}
+		if len(prev.Events) != 1 || prev.Events[0].Type == "workflow_cancelled" || prev.Events[0].TimestampMS > last.Events[0].TimestampMS {
+			t.Errorf("history %q's next page: %+v, want an earlier event", id, prev)
 		}
 	}
 	runs := liveListRuns(t, c, "")

@@ -20,7 +20,8 @@ type WorkflowClient struct {
 
 // Create creates (or replaces) a workflow from a YAML definition.
 // The workflow name is extracted from the YAML and sent as the key. A
-// version over 256 bytes is refused (ErrBadRequest).
+// name or version over 256 bytes is refused (ErrBadRequest). A step that
+// calls an action named longer than an action may be (256 bytes) fails.
 func (w *WorkflowClient) Create(name string, yaml []byte, opts *WorkflowCreateOptions) error {
 	if opts == nil {
 		opts = &WorkflowCreateOptions{}
@@ -58,7 +59,8 @@ func (w *WorkflowClient) GetDefinition(name string, opts *WorkflowGetDefinitionO
 }
 
 // Start starts a workflow run with optional input data.
-// Returns the run ID.
+// Returns the run ID. A workflow name over 256 bytes is refused
+// (ErrBadRequest).
 func (w *WorkflowClient) Start(name string, input []byte, opts *WorkflowStartOptions) (string, error) {
 	if opts == nil {
 		opts = &WorkflowStartOptions{}
@@ -107,7 +109,8 @@ func (w *WorkflowClient) Start(name string, input []byte, opts *WorkflowStartOpt
 	return string(resp.Data), nil
 }
 
-// Status gets the status of a workflow run.
+// Status gets the status of a workflow run. An ended run's Input is empty
+// and its Output a 256-byte preview; its history holds both whole.
 func (w *WorkflowClient) Status(runID string, opts *WorkflowStatusOptions) (*WorkflowStatusResult, error) {
 	if opts == nil {
 		opts = &WorkflowStatusOptions{}
@@ -267,8 +270,16 @@ func parseWorkflowStatus(data []byte) (*WorkflowStatusResult, error) {
 		result.Output = make([]byte, outputLen)
 		copy(result.Output, data[pos:pos+outputLen])
 		pos += outputLen
+		if pos >= len(data) || data[pos] > 1 {
+			return nil, fmt.Errorf("%w: status output_truncated", ErrIncompleteResponse)
+		}
+		result.OutputTruncated = data[pos] == 1
+		pos++
 	} else {
 		pos++
+	}
+	if pos != len(data) {
+		return nil, fmt.Errorf("%w: %d bytes past a status answer", ErrIncompleteResponse, len(data)-pos)
 	}
 
 	return result, nil
@@ -305,20 +316,14 @@ func (w *WorkflowClient) Cancel(runID string, opts *WorkflowCancelOptions) error
 	return err
 }
 
-// History retrieves the execution history of a workflow run.
-// Returns the raw response bytes (binary format from server).
-func (w *WorkflowClient) History(runID string, opts *WorkflowHistoryOptions) ([]byte, error) {
-	if opts == nil {
-		opts = &WorkflowHistoryOptions{}
-	}
-	namespace := w.client.getNamespace(opts.Namespace)
-
-	resp, err := w.client.sendAndCheck(OpWorkflowHistory, namespace, []byte(runID), nil, nil, true)
-	if err != nil {
-		return nil, err
-	}
-
-	return resp.Data, nil
+// History returns one page of a run's history, oldest first unless
+// NewestFirst. Pass the page's Cursor in the next call's options to read
+// on. An ended run's whole output is its workflow_output event, when
+// longer than Status shows. The server may hold the read up to 5 s while
+// the run's history catches up. A run the server doesn't hold is an error
+// that IsNotFound reports.
+func (w *WorkflowClient) History(runID string, opts *RunHistoryOptions) (*RunHistoryPage, error) {
+	return w.client.runHistory(OpWorkflowHistory, runID, opts)
 }
 
 // ListRuns returns one page of runs, newest first: name's runs, or every
