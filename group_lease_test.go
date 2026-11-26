@@ -266,12 +266,12 @@ func TestALimitIsReturnedAsErrLimitAndNeverRetried(t *testing.T) {
 	var sends atomic.Int32
 	c := tableServer(t, func(op OpCode, _ []byte) (StatusCode, []byte) {
 		sends.Add(1)
-		return StatusLimit, refusalBody(ReasonTooManyActions, RanNo, "limit: this node holds 10000 actions")
+		return StatusLimit, refusalBody(ReasonMemoryBudget, RanNo, "limit: memory budget spent on node 1")
 	})
 	err := c.Action.Register("a", ActionTypeUser, nil)
 	var se *ServerError
-	if !errors.Is(err, ErrLimit) || !IsLimit(err) || !errors.As(err, &se) || se.Reason != ReasonTooManyActions || se.Message != "limit: this node holds 10000 actions" {
-		t.Fatalf("register = %v, want ErrLimit with too_many_actions", err)
+	if !errors.Is(err, ErrLimit) || !IsLimit(err) || !errors.As(err, &se) || se.Reason != ReasonMemoryBudget || se.Message != "limit: memory budget spent on node 1" {
+		t.Fatalf("register = %v, want ErrLimit with memory_budget", err)
 	}
 	if n := sends.Load(); n != 1 {
 		t.Errorf("sent %d times, want once", n)
@@ -279,11 +279,10 @@ func TestALimitIsReturnedAsErrLimitAndNeverRetried(t *testing.T) {
 	if IsOverloaded(err) || IsUnavailable(err) || isRefusedUnrun(err) {
 		t.Error("a limit reads as retryable")
 	}
+	// A limit reason from a newer server is a limit all the same.
 	for r, name := range map[Reason]string{
-		ReasonMemoryBudget:               "memory_budget",
-		ReasonTooManyActions:             "too_many_actions",
-		ReasonTooManyWorkflowDefinitions: "too_many_workflow_definitions",
-		ReasonTooManyWorkflowRuns:        "too_many_workflow_runs",
+		ReasonMemoryBudget: "memory_budget",
+		Reason(99):         "reason(99)",
 	} {
 		if got := newServerError(StatusLimit, refusalBody(r, RanNo, "m")); !IsLimit(got) || !strings.Contains(got.Error(), name) {
 			t.Errorf("reason %d decoded as %v, want %s", r, got, name)
@@ -304,7 +303,7 @@ func TestAWorkerLoopWarnsOfALimitOncePerReason(t *testing.T) {
 			case op == poll && n < 2:
 				return reply{status: StatusLimit, body: refusalBody(ReasonMemoryBudget, RanNo, "limit: memory budget spent on node 1")}
 			case op == poll && n < 4:
-				return reply{status: StatusLimit, body: refusalBody(ReasonTooManyWorkflowRuns, RanNo, "limit: runs")}
+				return reply{status: StatusLimit, body: refusalBody(Reason(99), RanNo, "limit: a newer server's")}
 			case op == OpWorkerHeartbeat:
 				return activeBeat()
 			case op == poll:
@@ -334,13 +333,13 @@ func TestAWorkerLoopWarnsOfALimitOncePerReason(t *testing.T) {
 		waitStart(t, done)
 		warned := map[string]int{}
 		for _, line := range logger.all() {
-			for _, r := range []string{"memory_budget", "too_many_workflow_runs"} {
+			for _, r := range []string{"memory_budget", "reason(99)"} {
 				if strings.Contains(line, "("+r+")") {
 					warned[r]++
 				}
 			}
 		}
-		if warned["memory_budget"] != 1 || warned["too_many_workflow_runs"] != 1 {
+		if warned["memory_budget"] != 1 || warned["reason(99)"] != 1 {
 			t.Errorf("stream=%v: warnings %v, want one per reason; log %q", stream, warned, logger.all())
 		}
 	}
@@ -487,7 +486,7 @@ func TestAWorkerStartRefusedAtALimitFails(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		s, addr := newFrameServer(t, func(op OpCode, n int) reply {
 			if op == OpWorkerRegister {
-				return reply{status: StatusLimit, body: refusalBody(ReasonTooManyActions, RanNo, "limit: actions")}
+				return reply{status: StatusLimit, body: refusalBody(ReasonMemoryBudget, RanNo, "limit: memory budget spent on node 1")}
 			}
 			return reply{}
 		})

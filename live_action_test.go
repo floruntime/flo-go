@@ -77,8 +77,18 @@ func TestLiveActionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Status != RunStatusCompleted || !bytes.Equal(st.Output, []byte("pong")) || st.Outcome != "" {
-		t.Fatalf("status %+v, want completed with pong and no outcome", st)
+	if st.Status != RunStatusCompleted || !bytes.Equal(st.Output, []byte("pong")) || st.Outcome != "" || st.OutputTruncated || st.ErrorTruncated {
+		t.Fatalf("status %+v, want completed with pong, no outcome, nothing cut", st)
+	}
+	hist, err := c.Action.History(run.RunID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(hist.Events); n < 3 || hist.HasMore || hist.Cursor != nil ||
+		hist.Events[0].Type != "action_invoked" || string(hist.Events[0].Detail) != "ping" ||
+		hist.Events[n-2].Type != "action_settled" || string(hist.Events[n-2].Detail) != "pong" || hist.Events[n-2].Extra != "" ||
+		hist.Events[n-1].Type != "action_ended" {
+		t.Fatalf("history %+v, want invoked with ping, settled with pong, then ended", hist)
 	}
 
 	// The fail path, on a second run.
@@ -103,6 +113,49 @@ func TestLiveActionRoundTrip(t *testing.T) {
 	task = await("rk-4")
 	if task.RunID != second.RunID || task.Deliveries != 3 || task.Attempt != 2 {
 		t.Fatalf("after an abandon: %+v, want deliveries 3, attempt still 2", task)
+	}
+}
+
+// A result past 256 bytes shows as its preview in Status, OutputTruncated
+// set, and whole in the run's history.
+func TestLiveActionLongOutputIsWholeInHistory(t *testing.T) {
+	c := liveClient(t)
+	if err := c.Action.Register("long", ActionTypeUser, nil); err != nil {
+		t.Fatal(err)
+	}
+	run, err := c.Action.Invoke("long", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := uint32(5000)
+	wc := c.workerClient("w-long")
+	task, err := wc.Await([]string{"long"}, &WorkerAwaitOptions{BlockMS: &block})
+	if err != nil || task == nil || task.RunID != run.RunID {
+		t.Fatalf("await: %+v, %v", task, err)
+	}
+	out := bytes.Repeat([]byte("0123456789"), 30)
+	if err := wc.Complete(task.Delivery, out, nil); err != nil {
+		t.Fatal(err)
+	}
+	st, err := c.Action.Status(run.RunID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Status != RunStatusCompleted || !bytes.Equal(st.Output, out[:256]) || !st.OutputTruncated || st.ErrorTruncated {
+		t.Fatalf("status %+v, want the first 256 bytes and OutputTruncated", st)
+	}
+	hist, err := c.Action.History(run.RunID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settled []RunHistoryEvent
+	for _, e := range hist.Events {
+		if e.Type == "action_settled" {
+			settled = append(settled, e)
+		}
+	}
+	if len(settled) != 1 || !bytes.Equal(settled[0].Detail, out) || hist.HasMore {
+		t.Fatalf("history %+v, want one action_settled with the whole output", hist)
 	}
 }
 

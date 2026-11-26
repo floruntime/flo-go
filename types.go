@@ -33,7 +33,7 @@ const (
 	// the request, and its answers carry its own hash, which this client
 	// refuses. CI's live tests run against the flo commit in
 	// .github/flo-ref.env: change both in one commit.
-	TableHash uint64 = 0xe188239e79bb6bef
+	TableHash uint64 = 0xaaef4dfa38d45632
 
 	// Size limits (for client-side validation)
 	MaxNamespaceSize = 255
@@ -157,6 +157,7 @@ const (
 	OpActionFail     OpCode = 0x30C
 	OpActionTouch    OpCode = 0x30D
 	OpActionInfo     OpCode = 0x30F
+	OpActionHistory  OpCode = 0x310
 
 	// ── Workers (0x320 – 0x33F) ──
 	OpWorkerRegister   OpCode = 0x320
@@ -1279,10 +1280,16 @@ type ActionRunStatus struct {
 	CompletedAt *int64 // ms; nil until it finishes
 	// Attempt is how many attempts have begun, the current one included.
 	Attempt uint32
-	// Output is what the worker completed it with; nil until it completes.
-	Output []byte
-	// ErrorMessage is why its last attempt failed, if one did.
-	ErrorMessage string
+	// Output is the first 256 bytes of what the worker completed it with;
+	// nil until it completes. OutputTruncated says more were cut: the whole
+	// is the detail of the run's action_settled history event.
+	Output          []byte
+	OutputTruncated bool
+	// ErrorMessage is the first 256 bytes of why its last attempt failed, if
+	// one did. ErrorTruncated says more were cut: the whole is in the run's
+	// history.
+	ErrorMessage   string
+	ErrorTruncated bool
 	// WorkerID is the worker holding the run, or that last held it; "" until
 	// one takes it. Only the leader knows a take at once: another node
 	// learns it at the run's next update.
@@ -1583,12 +1590,18 @@ type WorkflowStatusResult struct {
 	Version     string
 	Status      string
 	CurrentStep string
+	// Input is empty once the run has ended; its history's first event
+	// (workflow_started for a client's start) holds it.
 	Input       []byte
 	CreatedAt   int64
 	StartedAt   *int64
 	CompletedAt *int64
 	WaitSignal  *string
-	Output      []byte
+	// Output is an ended run's first 256 bytes of output. OutputTruncated
+	// says more were cut: the whole is the detail of the run's
+	// workflow_output history event.
+	Output          []byte
+	OutputTruncated bool
 }
 
 // WorkflowSignalOptions contains options for sending a signal to a workflow.
@@ -1616,9 +1629,43 @@ type WorkflowSyncOptions struct {
 	Namespace string
 }
 
-// WorkflowHistoryOptions contains options for workflow history queries.
-type WorkflowHistoryOptions struct {
+// RunHistoryOptions pages a workflow or action run's history.
+type RunHistoryOptions struct {
 	Namespace string
+	// Limit is the most events on the page; 0 lets the server choose (100),
+	// and it answers at most MaxRunHistoryLimit.
+	Limit uint32
+	// Cursor is the previous page's Cursor; nil reads from the start (or,
+	// with NewestFirst, from the end).
+	Cursor *uint64
+	// NewestFirst reads back from the cursor, newest event first.
+	NewestFirst bool
+}
+
+// RunHistoryPage is one page of a run's history, in the order asked. A page
+// can hold fewer than Limit while HasMore is set: keep reading until it is
+// false.
+type RunHistoryPage struct {
+	Events []RunHistoryEvent
+	// HasMore says another page follows; Cursor reads it.
+	HasMore bool
+	// Cursor is where the next page starts; nil on the last page.
+	Cursor *uint64
+}
+
+// RunHistoryEvent is one thing that happened to a run. A gap shows as an
+// event of type history_lost (events a repair skipped, or the log no
+// longer holds) or history_missing (not landed by the read's deadline).
+type RunHistoryEvent struct {
+	// Type is what happened, e.g. workflow_started, action_settled.
+	Type string
+	// Detail is its detail: an input, a result, an error, a worker.
+	Detail []byte
+	// Extra is, for an action's action_settled event, the outcome its
+	// worker named; for an action's delivery, retried failure or hand-back,
+	// "truncated" when Detail is only the first 256 bytes; empty otherwise.
+	Extra       string
+	TimestampMS int64
 }
 
 // WorkflowListRunsOptions contains options for listing workflow runs.
@@ -1860,18 +1907,9 @@ const (
 	// removed; stop or cancel it first.
 	ReasonJobRunning Reason = 31
 	// ReasonMemoryBudget (with StatusLimit): the node's memory budget is
-	// spent. The message names the node.
+	// spent, by an action registration as by any other write. The message
+	// names the node.
 	ReasonMemoryBudget Reason = 32
-	// ReasonTooManyActions (with StatusLimit): the shard the action's name
-	// routes to holds as many actions as it registers, a number built into
-	// the server; delete one first.
-	ReasonTooManyActions Reason = 33
-	// ReasonTooManyWorkflowDefinitions (with StatusLimit): the node holds as
-	// many workflow definitions as it keeps; delete one first.
-	ReasonTooManyWorkflowDefinitions Reason = 34
-	// ReasonTooManyWorkflowRuns (with StatusLimit): the node holds as many
-	// workflow runs as it keeps; let some finish or delete them first.
-	ReasonTooManyWorkflowRuns Reason = 35
 	// ReasonQueueFull (with StatusOverloaded): the queue holds as many
 	// messages or bytes as its caps allow, or the shard's queues and groups
 	// together do. It drains as messages are acked, so it is retried like
@@ -1902,9 +1940,7 @@ var reasonNames = map[Reason]string{
 	ReasonWrongType: "wrong_type", ReasonTooManyTransactions: "too_many_transactions",
 	ReasonStaleReport: "stale_report", ReasonWorkerUnhealthy: "worker_unhealthy", ReasonWorkerDraining: "worker_draining",
 	ReasonShardHalted: "shard_halted", ReasonAdminOnly: "admin_only", ReasonJobRunning: "job_running",
-	ReasonMemoryBudget: "memory_budget", ReasonTooManyActions: "too_many_actions",
-	ReasonTooManyWorkflowDefinitions: "too_many_workflow_definitions", ReasonTooManyWorkflowRuns: "too_many_workflow_runs",
-	ReasonQueueFull: "queue_full", ReasonGroupHeldFull: "group_held_full",
+	ReasonMemoryBudget: "memory_budget", ReasonQueueFull: "queue_full", ReasonGroupHeldFull: "group_held_full",
 	ReasonSkippedByRepair: "skipped_by_repair",
 }
 

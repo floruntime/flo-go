@@ -15,7 +15,8 @@ type ActionClient struct {
 // Action Operations
 // =============================================================================
 
-// Register registers an action.
+// Register registers an action. A name over 256 bytes is refused
+// (ErrBadRequest).
 func (a *ActionClient) Register(name string, actionType ActionType, opts *ActionRegisterOptions) error {
 	if opts == nil {
 		opts = &ActionRegisterOptions{}
@@ -83,7 +84,8 @@ func encodeInvokeValue(labels string, input []byte) ([]byte, error) {
 	return append(value, input...), nil
 }
 
-// Status gets the status of an action run.
+// Status gets the status of an action run. Its Output and ErrorMessage are
+// previews, their first 256 bytes; History holds them whole.
 func (a *ActionClient) Status(runID string, opts *ActionStatusOptions) (*ActionRunStatus, error) {
 	if opts == nil {
 		opts = &ActionStatusOptions{}
@@ -103,6 +105,15 @@ func (a *ActionClient) Status(runID string, opts *ActionStatusOptions) (*ActionR
 	}
 	st.RunID = runID
 	return st, nil
+}
+
+// History returns one page of an action run's history: its invoke,
+// deliveries, failures and result, oldest first unless NewestFirst. Pass
+// the page's Cursor in the next call's options to read on. The server may
+// hold the read up to 5 s while the run's history catches up. A run the
+// server doesn't hold is an error that IsNotFound reports.
+func (a *ActionClient) History(runID string, opts *RunHistoryOptions) (*RunHistoryPage, error) {
+	return a.client.runHistory(OpActionHistory, runID, opts)
 }
 
 // Info returns an action's settings and its runs' counts. An action the
@@ -201,7 +212,8 @@ func decodeActionListAnswer(data []byte) (*ActionListResult, error) {
 // decodeActionStatusAnswer reads action.status's answer:
 // [status:u8][created_at_ms:i64][started_at_ms?][completed_at_ms?][attempt:u32]
 // [output?: u16 length][error_message?: u16 length][worker_id?: u16 length]
-// [outcome?: u16 length][held?: u8 length], each ? a present byte first.
+// [outcome?: u16 length][held?: u8 length], each ? a present byte first,
+// then [output_truncated:u8][error_truncated:u8].
 func decodeActionStatusAnswer(data []byte) (*ActionRunStatus, error) {
 	r := bodyReader{buf: data}
 	st := &ActionRunStatus{Status: RunStatus(r.u8()), CreatedAt: int64(r.u64())}
@@ -229,6 +241,8 @@ func decodeActionStatusAnswer(data []byte) (*ActionRunStatus, error) {
 	if r.present() {
 		st.Held = string(r.bytes8())
 	}
+	st.OutputTruncated = r.bool()
+	st.ErrorTruncated = r.bool()
 	if err := r.done(); err != nil {
 		return nil, err
 	}

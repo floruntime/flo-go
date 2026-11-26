@@ -45,7 +45,7 @@ func actionStatusAnswer(status RunStatus, started, completed *int64, attempt uin
 	} else {
 		b = append(b, 0)
 	}
-	return b
+	return append(b, 0, 0) // output_truncated, error_truncated
 }
 
 func TestActionStatusDecodesACompletedRunsOutput(t *testing.T) {
@@ -106,5 +106,29 @@ func TestActionStatusRefusesACutAnswerAndAnUnknownStatus(t *testing.T) {
 	}
 	if !isTableOp(OpActionStatus) {
 		t.Fatal("action.status is a table op")
+	}
+}
+
+// Output and error message are previews; the two flags at the end say which
+// were cut, and a cut flag or a byte past them refuses the answer.
+func TestActionStatusDecodesTheTruncatedFlags(t *testing.T) {
+	msg := "boom"
+	b := actionStatusAnswer(RunStatusFailed, nil, nil, 2, bytes.Repeat([]byte("o"), 256), &msg, nil)
+	for _, c := range []struct {
+		out, err byte
+	}{{0, 0}, {1, 0}, {0, 1}, {1, 1}} {
+		b[len(b)-2], b[len(b)-1] = c.out, c.err
+		st, err := decodeActionStatusAnswer(b)
+		if err != nil || st.OutputTruncated != (c.out == 1) || st.ErrorTruncated != (c.err == 1) || len(st.Output) != 256 || st.ErrorMessage != "boom" {
+			t.Fatalf("flags %v: %+v, %v", c, st, err)
+		}
+	}
+	b[len(b)-1] = 2
+	if _, err := decodeActionStatusAnswer(b); !errors.Is(err, ErrIncompleteResponse) {
+		t.Fatalf("a flag of 2: %v", err)
+	}
+	b[len(b)-1] = 0
+	if _, err := decodeActionStatusAnswer(append(b, 0)); !errors.Is(err, ErrIncompleteResponse) {
+		t.Fatalf("a byte past the flags: %v", err)
 	}
 }

@@ -25,7 +25,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -139,11 +138,12 @@ func main() {
 	// -------------------------------------------------------------------------
 	fmt.Println("\n--- History ---")
 
-	histData, err := client.Workflow.History(runID, nil)
+	// The first page; pass page.Cursor back to read further.
+	hist, err := client.Workflow.History(runID, nil)
 	if err != nil {
 		log.Fatalf("History failed: %v", err)
 	}
-	for _, ev := range parseHistory(histData) {
+	for _, ev := range hist.Events {
 		fmt.Printf("  [%s] %s\n", ev.Type, ev.Detail)
 	}
 
@@ -256,36 +256,4 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-// =============================================================================
-// Binary response parsers
-// =============================================================================
-
-type HistoryEvent struct {
-	Type, Detail string
-	Timestamp    int64
-}
-
-func parseHistory(data []byte) []HistoryEvent {
-	if len(data) < 4 {
-		return nil
-	}
-	count := binary.LittleEndian.Uint32(data[0:4])
-	pos := 4
-	events := make([]HistoryEvent, 0, count)
-	for i := uint32(0); i < count; i++ {
-		typeLen := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		pos += 2
-		typ := string(data[pos : pos+typeLen])
-		pos += typeLen
-		detailLen := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		pos += 2
-		detail := string(data[pos : pos+detailLen])
-		pos += detailLen
-		ts := int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
-		pos += 8
-		events = append(events, HistoryEvent{Type: typ, Detail: detail, Timestamp: ts})
-	}
-	return events
 }

@@ -594,6 +594,35 @@ durations (`5m`, `30s`) are as written. An answer of more than 4096 raw
 points is refused as a bad request with the server's text: aggregate them,
 narrow the query, or page through them with `Read`.
 
+### Run status and history
+
+`client.Action.Status` and `client.Workflow.Status` show a run's output as
+a preview: its first 256 bytes (an action's error message too), with
+`OutputTruncated` (and `ErrorTruncated`) set when more were cut. An ended
+workflow run's `Input` is empty. The whole of each is in the run's history:
+
+```go
+page, err := client.Action.History(runID, nil) // or client.Workflow.History
+for _, ev := range page.Events {
+    fmt.Println(ev.Type, string(ev.Detail), ev.Extra, ev.TimestampMS)
+}
+// page.HasMore: pass &flo.RunHistoryOptions{Cursor: page.Cursor} for the next page
+```
+
+Pages are oldest first unless `NewestFirst`; `Limit` 0 is the server's 100,
+and a page holds at most 1000 events. An action's `action_settled` event
+holds its whole result, with the outcome its worker named in `Extra`; its
+delivery, retried failure or hand-back says `Extra == "truncated"` when
+`Detail` is only the first 256 bytes. A workflow's `workflow_output` event
+holds an ended run's whole output when it is longer than the preview. A gap
+shows as a `history_lost` or `history_missing` event. The server may hold a
+history read up to 5 s while the run's history catches up. A run the
+server doesn't hold is `flo.ErrNotFound`.
+
+Workflow and action names over 256 bytes are refused (`flo.ErrBadRequest`)
+when the workflow is created or started, or the action registered; a step
+that calls an action named longer than that fails.
+
 ## Error Handling
 
 ```go
@@ -629,10 +658,10 @@ if err != nil {
         // first); flo.IsShardHalted(err) when the shard halted
     } else if flo.IsLimit(err) {
         // The node is at a limit built into the server (the reason says
-        // which: its memory budget, or as many actions per shard, workflow
-        // definitions or runs as it keeps). No setting raises it: retrying
-        // won't clear it until something is deleted or the node is given
-        // more memory; nothing retries it
+        // which: its memory budget, which an action registration spends
+        // like any other write). No setting raises it: retrying won't
+        // clear it until something is deleted or the node is given more
+        // memory; nothing retries it
     } else if flo.IsInternal(err) {
         // Internal server error
     }

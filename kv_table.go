@@ -23,7 +23,8 @@ func isTableOp(op OpCode) bool {
 		OpNamespaceCreate, OpNamespaceDelete, OpNamespaceList, OpNamespaceInfo,
 		OpStreamGroupList, OpStreamGroupMembers, OpStreamGroupSteal, OpStreamGroupDLQList, OpStreamGroupDLQRequeue, OpStreamGroupDLQDelete,
 		OpQueuePeek, OpQueueDLQList, OpQueueDLQRequeue, OpQueueDLQDelete, OpQueueDequeue, OpQueueComplete, OpQueueFail, OpQueueTouch, OpTSRead, OpTSInfo,
-		OpActionStatus, OpActionAwait, OpActionComplete, OpActionFail, OpActionTouch, OpActionInfo,
+		OpActionStatus, OpActionAwait, OpActionComplete, OpActionFail, OpActionTouch, OpActionInfo, OpActionHistory,
+		OpWorkflowHistory,
 		OpWorkerList, OpWorkerInfo, OpProcessingRemove:
 		return true
 	}

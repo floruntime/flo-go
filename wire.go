@@ -142,6 +142,8 @@ func waitMS(op OpCode, value, options []byte) uint64 {
 			}
 		}
 		return 0
+	case OpWorkflowHistory, OpActionHistory:
+		return runHistoryHoldMS
 	}
 	return uint64(extractBlockMS(options))
 }
